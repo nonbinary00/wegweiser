@@ -1,0 +1,3138 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Wegweiser v9 – Prototyp Navigation</title>
+<style>
+  :root{
+    --bg:#000; --fg:#fff; --accent:#ffd400; --ok:#37d67a; --warn:#ff6b6b; --muted:#9aa0a6;
+    --pad: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+    -webkit-text-size-adjust:100%;overflow:hidden}
+  body{display:flex;flex-direction:column;min-height:100dvh;padding:var(--pad)}
+  h1{font-size:1rem;font-weight:700;letter-spacing:.02em;margin:0 0 6px;color:var(--muted);
+    text-transform:uppercase}
+  #stage{position:relative;flex:1;min-height:0;border-radius:18px;overflow:hidden;background:#0a0a0a;
+    display:flex;align-items:center;justify-content:center}
+  #view{width:100%;height:100%;object-fit:cover;display:block}
+  video{display:none}
+  #status{position:absolute;left:0;right:0;bottom:0;padding:14px 14px calc(14px + env(safe-area-inset-bottom));
+    background:linear-gradient(to top,rgba(0,0,0,.85),rgba(0,0,0,0));
+    display:flex;flex-direction:column;gap:2px}
+  #room{font-size:clamp(1.4rem,7vw,2.4rem);font-weight:800;line-height:1.05;color:var(--accent);
+    text-shadow:0 2px 8px rgba(0,0,0,.9)}
+  #meta{font-size:clamp(.9rem,4vw,1.2rem);font-weight:600;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,.9)}
+  #room.empty{color:var(--muted);font-size:clamp(1.1rem,5vw,1.6rem);font-weight:600}
+  #meta.empty{display:none}
+  #gate{position:absolute;inset:0;background:#000;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;text-align:center;gap:20px;padding:24px;z-index:5}
+  #gate p{max-width:24ch;color:var(--muted);font-size:1.05rem;line-height:1.4;margin:0}
+  .big-btn{appearance:none;border:none;border-radius:999px;background:var(--accent);color:#000;
+    font-size:1.4rem;font-weight:800;padding:22px 34px;min-width:240px;cursor:pointer;
+    box-shadow:0 6px 24px rgba(255,212,0,.35)}
+  .big-btn:active{transform:scale(.98)}
+  .big-btn:focus-visible{outline:4px solid #fff;outline-offset:3px}
+  /* Navigations-Panel */
+  #navPanel{padding-top:10px;font-size:.85rem;line-height:1.45;color:var(--muted);
+    display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;max-height:26dvh;overflow-y:auto}
+  #navPanel b{color:#fff;font-weight:700}
+  #navPanel .wide{grid-column:1 / -1}
+  #navState{color:var(--accent);font-weight:700}
+  #stepSource{font-weight:800}
+  #stepSource.auto{color:var(--ok)}
+  #stepSource.override{color:var(--warn)}
+  /* Bedienleisten */
+  .btnrow{display:flex;gap:8px;padding-top:8px}
+  .ctrl{flex:1;appearance:none;border:2px solid #2a2a2a;background:#141414;color:#fff;
+    border-radius:14px;padding:13px 8px;font-size:.95rem;font-weight:700;cursor:pointer}
+  .ctrl:active{background:#1f1f1f}
+  .ctrl:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+  .ctrl small{display:block;font-weight:500;color:var(--muted);font-size:.68rem;margin-top:2px}
+  .ctrl.primary{border-color:var(--accent);color:var(--accent)}
+  .ctrl.danger{border-color:#5a2a2a}
+  #err{position:absolute;inset:0;background:#000;color:#fff;display:none;flex-direction:column;
+    align-items:center;justify-content:center;gap:14px;padding:28px;text-align:center;z-index:6}
+  #err h2{color:var(--warn);margin:0;font-size:1.3rem}
+  #err p{color:var(--muted);max-width:30ch;line-height:1.5;margin:0}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  @media (prefers-reduced-motion: reduce){.big-btn:active{transform:none}}
+</style>
+</head>
+<body>
+  <h1>Wegweiser v9</h1>
+
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <video id="cam" playsinline muted autoplay></video>
+
+    <div id="status" aria-hidden="true">
+      <div id="room" class="empty">Bereit</div>
+      <div id="meta" class="empty"></div>
+    </div>
+
+    <!-- Von Screenreadern gelesene Live-Meldungen -->
+    <div id="live" class="sr" role="status" aria-live="assertive"></div>
+
+    <div id="gate">
+      <div style="font-size:1.6rem;font-weight:800;color:#fff">Kamera-Wegweiser</div>
+      <p>Route wählen, Kamera starten und den Markierungen Schritt für Schritt folgen.</p>
+      <button id="startBtn" class="big-btn">Kamera starten</button>
+      <p style="font-size:.85rem">Tippe irgendwo auf den Bildschirm. Erlaube den Kamera-Zugriff.</p>
+    </div>
+
+    <div id="err">
+      <h2>Kamera nicht verfügbar</h2>
+      <p id="errMsg"></p>
+      <button id="retryBtn" class="big-btn" style="min-width:180px;font-size:1.1rem;padding:16px 24px">Erneut versuchen</button>
+    </div>
+  </div>
+
+  <div id="destRow" style="padding-top:8px">
+    <label class="sr" for="destSel">Ziel wählen</label>
+    <select id="destSel" aria-label="Ziel wählen"
+      style="width:100%;border:2px solid #2a2a2a;background:#141414;color:#fff;border-radius:14px;padding:13px 12px;font-size:1rem;font-weight:700">
+      <option value="">Ziel: keins gewählt</option>
+    </select>
+  </div>
+
+  <div id="navPanel" aria-hidden="true">
+    <div>Ziel: <b id="uiDest">–</b></div>
+    <div>Zustand: <b id="navState">IDLE</b></div>
+    <div class="wide" style="font-size:1rem">Nächste Markierung: <b id="uiNext">–</b></div>
+    <div>Zuletzt bestätigt: <b id="uiCur">–</b></div>
+    <div>Distanz: <b id="uiDist">–</b></div>
+    <div>Schritt: <b id="stepSource">–</b></div>
+    <div class="wide">Anweisung: <b id="uiInstr">–</b></div>
+  </div>
+
+  <div class="btnrow">
+    <button class="ctrl primary" id="navStartBtn">Navigation starten</button>
+    <button class="ctrl danger" id="navEndBtn">Navigation beenden</button>
+  </div>
+  <div class="btnrow">
+    <button class="ctrl" id="repeatBtn">Anweisung wiederholen</button>
+    <button class="ctrl" id="whereBtn">Wo bin ich?</button>
+    <button class="ctrl" id="flipBtn">Kamera<small>vorn / hinten</small></button>
+    <button class="ctrl" id="muteBtn">Ton an<small>Sprache</small></button>
+  </div>
+
+<!-- ==================== Bibliotheken (js-aruco2) ==================== -->
+<script>/*
+Copyright (c) 2011 Juan Mellado
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+*/
+
+/*
+References:
+- "OpenCV: Open Computer Vision Library"
+  http://sourceforge.net/projects/opencvlibrary/
+- "Stack Blur: Fast But Goodlooking"
+  http://incubator.quasimondo.com/processing/fast_blur_deluxe.php
+*/
+
+var CV = CV || {};
+this.CV = CV;
+
+CV.Image = function(width, height, data){
+  this.width = width || 0;
+  this.height = height || 0;
+  this.data = data || [];
+};
+
+CV.grayscale = function(imageSrc, imageDst){
+  var src = imageSrc.data, dst = imageDst.data, len = src.length,
+      i = 0, j = 0;
+
+  for (; i < len; i += 4){
+    dst[j ++] =
+      (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114 + 0.5) & 0xff;
+  }
+
+  imageDst.width = imageSrc.width;
+  imageDst.height = imageSrc.height;
+
+  return imageDst;
+};
+
+CV.threshold = function(imageSrc, imageDst, threshold){
+  var src = imageSrc.data, dst = imageDst.data,
+      len = src.length, tab = [], i;
+
+  for (i = 0; i < 256; ++ i){
+    tab[i] = i <= threshold? 0: 255;
+  }
+
+  for (i = 0; i < len; ++ i){
+    dst[i] = tab[ src[i] ];
+  }
+
+  imageDst.width = imageSrc.width;
+  imageDst.height = imageSrc.height;
+
+  return imageDst;
+};
+
+CV.adaptiveThreshold = function(imageSrc, imageDst, kernelSize, threshold){
+  var src = imageSrc.data, dst = imageDst.data, len = src.length, tab = [], i;
+
+  CV.stackBoxBlur(imageSrc, imageDst, kernelSize);
+
+  for (i = 0; i < 768; ++ i){
+    tab[i] = (i - 255 <= -threshold)? 255: 0;
+  }
+
+  for (i = 0; i < len; ++ i){
+    dst[i] = tab[ src[i] - dst[i] + 255 ];
+  }
+
+  imageDst.width = imageSrc.width;
+  imageDst.height = imageSrc.height;
+
+  return imageDst;
+};
+
+CV.otsu = function(imageSrc){
+  var src = imageSrc.data, len = src.length, hist = [],
+      threshold = 0, sum = 0, sumB = 0, wB = 0, wF = 0, max = 0,
+      mu, between, i;
+
+  for (i = 0; i < 256; ++ i){
+    hist[i] = 0;
+  }
+
+  for (i = 0; i < len; ++ i){
+    hist[ src[i] ] ++;
+  }
+
+  for (i = 0; i < 256; ++ i){
+    sum += hist[i] * i;
+  }
+
+  for (i = 0; i < 256; ++ i){
+    wB += hist[i];
+    if (0 !== wB){
+
+      wF = len - wB;
+      if (0 === wF){
+        break;
+      }
+
+      sumB += hist[i] * i;
+
+      mu = (sumB / wB) - ( (sum - sumB) / wF );
+
+      between = wB * wF * mu * mu;
+
+      if (between > max){
+        max = between;
+        threshold = i;
+      }
+    }
+  }
+
+  return threshold;
+};
+
+CV.stackBoxBlurMult =
+  [1, 171, 205, 293, 57, 373, 79, 137, 241, 27, 391, 357, 41, 19, 283, 265];
+
+CV.stackBoxBlurShift =
+  [0, 9, 10, 11, 9, 12, 10, 11, 12, 9, 13, 13, 10, 9, 13, 13];
+
+CV.BlurStack = function(){
+  this.color = 0;
+  this.next = null;
+};
+
+CV.stackBoxBlur = function(imageSrc, imageDst, kernelSize){
+  var src = imageSrc.data, dst = imageDst.data,
+      height = imageSrc.height, width = imageSrc.width,
+      heightMinus1 = height - 1, widthMinus1 = width - 1,
+      size = kernelSize + kernelSize + 1, radius = kernelSize + 1,
+      mult = CV.stackBoxBlurMult[kernelSize],
+      shift = CV.stackBoxBlurShift[kernelSize],
+      stack, stackStart, color, sum, pos, start, p, x, y, i;
+
+  stack = stackStart = new CV.BlurStack();
+  for (i = 1; i < size; ++ i){
+    stack = stack.next = new CV.BlurStack();
+  }
+  stack.next = stackStart;
+
+  pos = 0;
+
+  for (y = 0; y < height; ++ y){
+    start = pos;
+
+    color = src[pos];
+    sum = radius * color;
+
+    stack = stackStart;
+    for (i = 0; i < radius; ++ i){
+      stack.color = color;
+      stack = stack.next;
+    }
+    for (i = 1; i < radius; ++ i){
+      stack.color = src[pos + i];
+      sum += stack.color;
+      stack = stack.next;
+    }
+
+    stack = stackStart;
+    for (x = 0; x < width; ++ x){
+      dst[pos ++] = (sum * mult) >>> shift;
+
+      p = x + radius;
+      p = start + (p < widthMinus1? p: widthMinus1);
+      sum -= stack.color - src[p];
+
+      stack.color = src[p];
+      stack = stack.next;
+    }
+  }
+
+  for (x = 0; x < width; ++ x){
+    pos = x;
+    start = pos + width;
+
+    color = dst[pos];
+    sum = radius * color;
+
+    stack = stackStart;
+    for (i = 0; i < radius; ++ i){
+      stack.color = color;
+      stack = stack.next;
+    }
+    for (i = 1; i < radius; ++ i){
+      stack.color = dst[start];
+      sum += stack.color;
+      stack = stack.next;
+
+      start += width;
+    }
+
+    stack = stackStart;
+    for (y = 0; y < height; ++ y){
+      dst[pos] = (sum * mult) >>> shift;
+
+      p = y + radius;
+      p = x + ( (p < heightMinus1? p: heightMinus1) * width );
+      sum -= stack.color - dst[p];
+
+      stack.color = dst[p];
+      stack = stack.next;
+
+      pos += width;
+    }
+  }
+
+  return imageDst;
+};
+
+CV.gaussianBlur = function(imageSrc, imageDst, imageMean, kernelSize){
+  var kernel = CV.gaussianKernel(kernelSize);
+
+  imageDst.width = imageSrc.width;
+  imageDst.height = imageSrc.height;
+
+  imageMean.width = imageSrc.width;
+  imageMean.height = imageSrc.height;
+
+  CV.gaussianBlurFilter(imageSrc, imageMean, kernel, true);
+  CV.gaussianBlurFilter(imageMean, imageDst, kernel, false);
+
+  return imageDst;
+};
+
+CV.gaussianBlurFilter = function(imageSrc, imageDst, kernel, horizontal){
+  var src = imageSrc.data, dst = imageDst.data,
+      height = imageSrc.height, width = imageSrc.width,
+      pos = 0, limit = kernel.length >> 1,
+      cur, value, i, j, k;
+
+  for (i = 0; i < height; ++ i){
+
+    for (j = 0; j < width; ++ j){
+      value = 0.0;
+
+      for (k = -limit; k <= limit; ++ k){
+
+        if (horizontal){
+          cur = pos + k;
+          if (j + k < 0){
+            cur = pos;
+          }
+          else if (j + k >= width){
+            cur = pos;
+          }
+        }else{
+          cur = pos + (k * width);
+          if (i + k < 0){
+            cur = pos;
+          }
+          else if (i + k >= height){
+            cur = pos;
+          }
+        }
+
+        value += kernel[limit + k] * src[cur];
+      }
+
+      dst[pos ++] = horizontal? value: (value + 0.5) & 0xff;
+    }
+  }
+
+  return imageDst;
+};
+
+CV.gaussianKernel = function(kernelSize){
+  var tab =
+    [ [1],
+      [0.25, 0.5, 0.25],
+      [0.0625, 0.25, 0.375, 0.25, 0.0625],
+      [0.03125, 0.109375, 0.21875, 0.28125, 0.21875, 0.109375, 0.03125] ],
+    kernel = [], center, sigma, scale2X, sum, x, i;
+
+  if ( (kernelSize <= 7) && (kernelSize % 2 === 1) ){
+    kernel = tab[kernelSize >> 1];
+  }else{
+    center = (kernelSize - 1.0) * 0.5;
+    sigma = 0.8 + (0.3 * (center - 1.0) );
+    scale2X = -0.5 / (sigma * sigma);
+    sum = 0.0;
+    for (i = 0; i < kernelSize; ++ i){
+      x = i - center;
+      sum += kernel[i] = Math.exp(scale2X * x * x);
+    }
+    sum = 1 / sum;
+    for (i = 0; i < kernelSize; ++ i){
+      kernel[i] *= sum;
+    }
+  }
+
+  return kernel;
+};
+
+CV.findContours = function(imageSrc, binary){
+  var width = imageSrc.width, height = imageSrc.height, contours = [],
+      src, deltas, pos, pix, nbd, outer, hole, i, j;
+
+  src = CV.binaryBorder(imageSrc, binary);
+
+  deltas = CV.neighborhoodDeltas(width + 2);
+
+  pos = width + 3;
+  nbd = 1;
+
+  for (i = 0; i < height; ++ i, pos += 2){
+
+    for (j = 0; j < width; ++ j, ++ pos){
+      pix = src[pos];
+
+      if (0 !== pix){
+        outer = hole = false;
+
+        if (1 === pix && 0 === src[pos - 1]){
+          outer = true;
+        }
+        else if (pix >= 1 && 0 === src[pos + 1]){
+          hole = true;
+        }
+
+        if (outer || hole){
+          ++ nbd;
+
+          contours.push( CV.borderFollowing(src, pos, nbd, {x: j, y: i}, hole, deltas) );
+        }
+      }
+    }
+  }
+
+  return contours;
+};
+
+CV.borderFollowing = function(src, pos, nbd, point, hole, deltas){
+  var contour = [], pos1, pos3, pos4, s, s_end, s_prev;
+
+  contour.hole = hole;
+
+  s = s_end = hole? 0: 4;
+  do{
+    s = (s - 1) & 7;
+    pos1 = pos + deltas[s];
+    if (src[pos1] !== 0){
+      break;
+    }
+  }while(s !== s_end);
+
+  if (s === s_end){
+    src[pos] = -nbd;
+    contour.push( {x: point.x, y: point.y} );
+
+  }else{
+    pos3 = pos;
+    s_prev = s ^ 4;
+
+    while(true){
+      s_end = s;
+
+      do{
+        pos4 = pos3 + deltas[++ s];
+      }while(src[pos4] === 0);
+
+      s &= 7;
+
+      if ( ( (s - 1) >>> 0) < (s_end >>> 0) ){
+        src[pos3] = -nbd;
+      }
+      else if (src[pos3] === 1){
+        src[pos3] = nbd;
+      }
+
+      contour.push( {x: point.x, y: point.y} );
+
+      s_prev = s;
+
+      point.x += CV.neighborhood[s][0];
+      point.y += CV.neighborhood[s][1];
+
+      if ( (pos4 === pos) && (pos3 === pos1) ){
+        break;
+      }
+
+      pos3 = pos4;
+      s = (s + 4) & 7;
+    }
+  }
+
+  return contour;
+};
+
+CV.neighborhood =
+  [ [1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1] ];
+
+CV.neighborhoodDeltas = function(width){
+  var deltas = [], len = CV.neighborhood.length, i = 0;
+
+  for (; i < len; ++ i){
+    deltas[i] = CV.neighborhood[i][0] + (CV.neighborhood[i][1] * width);
+  }
+
+  return deltas.concat(deltas);
+};
+
+CV.approxPolyDP = function(contour, epsilon){
+  var slice = {start_index: 0, end_index: 0},
+      right_slice = {start_index: 0, end_index: 0},
+      poly = [], stack = [], len = contour.length,
+      pt, start_pt, end_pt, dist, max_dist, le_eps,
+      dx, dy, i, j, k;
+
+  epsilon *= epsilon;
+
+  k = 0;
+
+  for (i = 0; i < 3; ++ i){
+    max_dist = 0;
+
+    k = (k + right_slice.start_index) % len;
+    start_pt = contour[k];
+    if (++ k === len) {k = 0;}
+
+    for (j = 1; j < len; ++ j){
+      pt = contour[k];
+      if (++ k === len) {k = 0;}
+
+      dx = pt.x - start_pt.x;
+      dy = pt.y - start_pt.y;
+      dist = dx * dx + dy * dy;
+
+      if (dist > max_dist){
+        max_dist = dist;
+        right_slice.start_index = j;
+      }
+    }
+  }
+
+  if (max_dist <= epsilon){
+    poly.push( {x: start_pt.x, y: start_pt.y} );
+
+  }else{
+    slice.start_index = k;
+    slice.end_index = (right_slice.start_index += slice.start_index);
+
+    right_slice.start_index -= right_slice.start_index >= len? len: 0;
+    right_slice.end_index = slice.start_index;
+    if (right_slice.end_index < right_slice.start_index){
+      right_slice.end_index += len;
+    }
+
+    stack.push( {start_index: right_slice.start_index, end_index: right_slice.end_index} );
+    stack.push( {start_index: slice.start_index, end_index: slice.end_index} );
+  }
+
+  while(stack.length !== 0){
+    slice = stack.pop();
+
+    end_pt = contour[slice.end_index % len];
+    start_pt = contour[k = slice.start_index % len];
+    if (++ k === len) {k = 0;}
+
+    if (slice.end_index <= slice.start_index + 1){
+      le_eps = true;
+
+    }else{
+      max_dist = 0;
+
+      dx = end_pt.x - start_pt.x;
+      dy = end_pt.y - start_pt.y;
+
+      for (i = slice.start_index + 1; i < slice.end_index; ++ i){
+        pt = contour[k];
+        if (++ k === len) {k = 0;}
+
+        dist = Math.abs( (pt.y - start_pt.y) * dx - (pt.x - start_pt.x) * dy);
+
+        if (dist > max_dist){
+          max_dist = dist;
+          right_slice.start_index = i;
+        }
+      }
+
+      le_eps = max_dist * max_dist <= epsilon * (dx * dx + dy * dy);
+    }
+
+    if (le_eps){
+      poly.push( {x: start_pt.x, y: start_pt.y} );
+
+    }else{
+      right_slice.end_index = slice.end_index;
+      slice.end_index = right_slice.start_index;
+
+      stack.push( {start_index: right_slice.start_index, end_index: right_slice.end_index} );
+      stack.push( {start_index: slice.start_index, end_index: slice.end_index} );
+    }
+  }
+
+  return poly;
+};
+
+CV.warp = function(imageSrc, imageDst, contour, warpSize){
+  var src = imageSrc.data, dst = imageDst.data,
+      width = imageSrc.width, height = imageSrc.height,
+      pos = 0,
+      sx1, sx2, dx1, dx2, sy1, sy2, dy1, dy2, p1, p2, p3, p4,
+      m, r, s, t, u, v, w, x, y, i, j;
+
+  m = CV.getPerspectiveTransform(contour, warpSize - 1);
+
+  r = m[8];
+  s = m[2];
+  t = m[5];
+
+  for (i = 0; i < warpSize; ++ i){
+    r += m[7];
+    s += m[1];
+    t += m[4];
+
+    u = r;
+    v = s;
+    w = t;
+
+    for (j = 0; j < warpSize; ++ j){
+      u += m[6];
+      v += m[0];
+      w += m[3];
+
+      x = v / u;
+      y = w / u;
+
+      sx1 = x >>> 0;
+      sx2 = (sx1 === width - 1)? sx1: sx1 + 1;
+      dx1 = x - sx1;
+      dx2 = 1.0 - dx1;
+
+      sy1 = y >>> 0;
+      sy2 = (sy1 === height - 1)? sy1: sy1 + 1;
+      dy1 = y - sy1;
+      dy2 = 1.0 - dy1;
+
+      p1 = p2 = sy1 * width;
+      p3 = p4 = sy2 * width;
+
+      dst[pos ++] =
+        (dy2 * (dx2 * src[p1 + sx1] + dx1 * src[p2 + sx2]) +
+         dy1 * (dx2 * src[p3 + sx1] + dx1 * src[p4 + sx2]) ) & 0xff;
+
+    }
+  }
+
+  imageDst.width = warpSize;
+  imageDst.height = warpSize;
+
+  return imageDst;
+};
+
+CV.getPerspectiveTransform = function(src, size){
+  var rq = CV.square2quad(src);
+
+  rq[0] /= size;
+  rq[1] /= size;
+  rq[3] /= size;
+  rq[4] /= size;
+  rq[6] /= size;
+  rq[7] /= size;
+
+  return rq;
+};
+
+CV.square2quad = function(src){
+  var sq = [], px, py, dx1, dx2, dy1, dy2, den;
+
+  px = src[0].x - src[1].x + src[2].x - src[3].x;
+  py = src[0].y - src[1].y + src[2].y - src[3].y;
+
+  if (0 === px && 0 === py){
+    sq[0] = src[1].x - src[0].x;
+    sq[1] = src[2].x - src[1].x;
+    sq[2] = src[0].x;
+    sq[3] = src[1].y - src[0].y;
+    sq[4] = src[2].y - src[1].y;
+    sq[5] = src[0].y;
+    sq[6] = 0;
+    sq[7] = 0;
+    sq[8] = 1;
+
+  }else{
+    dx1 = src[1].x - src[2].x;
+    dx2 = src[3].x - src[2].x;
+    dy1 = src[1].y - src[2].y;
+    dy2 = src[3].y - src[2].y;
+    den = dx1 * dy2 - dx2 * dy1;
+
+    sq[6] = (px * dy2 - dx2 * py) / den;
+    sq[7] = (dx1 * py - px * dy1) / den;
+    sq[8] = 1;
+    sq[0] = src[1].x - src[0].x + sq[6] * src[1].x;
+    sq[1] = src[3].x - src[0].x + sq[7] * src[3].x;
+    sq[2] = src[0].x;
+    sq[3] = src[1].y - src[0].y + sq[6] * src[1].y;
+    sq[4] = src[3].y - src[0].y + sq[7] * src[3].y;
+    sq[5] = src[0].y;
+  }
+
+  return sq;
+};
+
+CV.isContourConvex = function(contour){
+  var orientation = 0, convex = true,
+      len = contour.length, i = 0, j = 0,
+      cur_pt, prev_pt, dxdy0, dydx0, dx0, dy0, dx, dy;
+
+  prev_pt = contour[len - 1];
+  cur_pt = contour[0];
+
+  dx0 = cur_pt.x - prev_pt.x;
+  dy0 = cur_pt.y - prev_pt.y;
+
+  for (; i < len; ++ i){
+    if (++ j === len) {j = 0;}
+
+    prev_pt = cur_pt;
+    cur_pt = contour[j];
+
+    dx = cur_pt.x - prev_pt.x;
+    dy = cur_pt.y - prev_pt.y;
+    dxdy0 = dx * dy0;
+    dydx0 = dy * dx0;
+
+    orientation |= dydx0 > dxdy0? 1: (dydx0 < dxdy0? 2: 3);
+
+    if (3 === orientation){
+        convex = false;
+        break;
+    }
+
+    dx0 = dx;
+    dy0 = dy;
+  }
+
+  return convex;
+};
+
+CV.perimeter = function(poly){
+  var len = poly.length, i = 0, j = len - 1,
+      p = 0.0, dx, dy;
+
+  for (; i < len; j = i ++){
+    dx = poly[i].x - poly[j].x;
+    dy = poly[i].y - poly[j].y;
+
+    p += Math.sqrt(dx * dx + dy * dy) ;
+  }
+
+  return p;
+};
+
+CV.minEdgeLength = function(poly){
+  var len = poly.length, i = 0, j = len - 1,
+      min = Infinity, d, dx, dy;
+
+  for (; i < len; j = i ++){
+    dx = poly[i].x - poly[j].x;
+    dy = poly[i].y - poly[j].y;
+
+    d = dx * dx + dy * dy;
+
+    if (d < min){
+      min = d;
+    }
+  }
+
+  return Math.sqrt(min);
+};
+
+CV.countNonZero = function(imageSrc, square){
+  var src = imageSrc.data, height = square.height, width = square.width,
+      pos = square.x + (square.y * imageSrc.width),
+      span = imageSrc.width - width,
+      nz = 0, i, j;
+
+  for (i = 0; i < height; ++ i){
+
+    for (j = 0; j < width; ++ j){
+
+      if ( 0 !== src[pos ++] ){
+        ++ nz;
+      }
+    }
+
+    pos += span;
+  }
+
+  return nz;
+};
+
+CV.binaryBorder = function(imageSrc, dst){
+  var src = imageSrc.data, height = imageSrc.height, width = imageSrc.width,
+      posSrc = 0, posDst = 0, i, j;
+
+  for (j = -2; j < width; ++ j){
+    dst[posDst ++] = 0;
+  }
+
+  for (i = 0; i < height; ++ i){
+    dst[posDst ++] = 0;
+
+    for (j = 0; j < width; ++ j){
+      dst[posDst ++] = (0 === src[posSrc ++]? 0: 1);
+    }
+
+    dst[posDst ++] = 0;
+  }
+
+  for (j = -2; j < width; ++ j){
+    dst[posDst ++] = 0;
+  }
+
+  return dst;
+};
+</script>
+<script>/*
+Copyright (c) 2020 Damiano Falcioni
+Copyright (c) 2011 Juan Mellado
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+*/
+
+/*
+References:
+- "ArUco: a minimal library for Augmented Reality applications based on OpenCv"
+  http://www.uco.es/investiga/grupos/ava/node/26
+- "js-aruco: a port to JavaScript of the ArUco library"
+  https://github.com/jcmellado/js-aruco
+*/
+
+var AR = {};
+var CV = this.CV || require('./cv').CV;
+this.AR = AR;
+
+AR.DICTIONARIES = {
+  ARUCO: {
+    nBits: 25,
+    tau: 3,
+    codeList: [0x1084210,0x1084217,0x1084209,0x108420e,0x10842f0,0x10842f7,0x10842e9,0x10842ee,0x1084130,0x1084137,0x1084129,0x108412e,0x10841d0,0x10841d7,0x10841c9,0x10841ce,0x1085e10,0x1085e17,0x1085e09,0x1085e0e,0x1085ef0,0x1085ef7,0x1085ee9,0x1085eee,0x1085d30,0x1085d37,0x1085d29,0x1085d2e,0x1085dd0,0x1085dd7,0x1085dc9,0x1085dce,0x1082610,0x1082617,0x1082609,0x108260e,0x10826f0,0x10826f7,0x10826e9,0x10826ee,0x1082530,0x1082537,0x1082529,0x108252e,0x10825d0,0x10825d7,0x10825c9,0x10825ce,0x1083a10,0x1083a17,0x1083a09,0x1083a0e,0x1083af0,0x1083af7,0x1083ae9,0x1083aee,0x1083930,0x1083937,0x1083929,0x108392e,0x10839d0,0x10839d7,0x10839c9,0x10839ce,0x10bc210,0x10bc217,0x10bc209,0x10bc20e,0x10bc2f0,0x10bc2f7,0x10bc2e9,0x10bc2ee,0x10bc130,0x10bc137,0x10bc129,0x10bc12e,0x10bc1d0,0x10bc1d7,0x10bc1c9,0x10bc1ce,0x10bde10,0x10bde17,0x10bde09,0x10bde0e,0x10bdef0,0x10bdef7,0x10bdee9,0x10bdeee,0x10bdd30,0x10bdd37,0x10bdd29,0x10bdd2e,0x10bddd0,0x10bddd7,0x10bddc9,0x10bddce,0x10ba610,0x10ba617,0x10ba609,0x10ba60e,0x10ba6f0,0x10ba6f7,0x10ba6e9,0x10ba6ee,0x10ba530,0x10ba537,0x10ba529,0x10ba52e,0x10ba5d0,0x10ba5d7,0x10ba5c9,0x10ba5ce,0x10bba10,0x10bba17,0x10bba09,0x10bba0e,0x10bbaf0,0x10bbaf7,0x10bbae9,0x10bbaee,0x10bb930,0x10bb937,0x10bb929,0x10bb92e,0x10bb9d0,0x10bb9d7,0x10bb9c9,0x10bb9ce,0x104c210,0x104c217,0x104c209,0x104c20e,0x104c2f0,0x104c2f7,0x104c2e9,0x104c2ee,0x104c130,0x104c137,0x104c129,0x104c12e,0x104c1d0,0x104c1d7,0x104c1c9,0x104c1ce,0x104de10,0x104de17,0x104de09,0x104de0e,0x104def0,0x104def7,0x104dee9,0x104deee,0x104dd30,0x104dd37,0x104dd29,0x104dd2e,0x104ddd0,0x104ddd7,0x104ddc9,0x104ddce,0x104a610,0x104a617,0x104a609,0x104a60e,0x104a6f0,0x104a6f7,0x104a6e9,0x104a6ee,0x104a530,0x104a537,0x104a529,0x104a52e,0x104a5d0,0x104a5d7,0x104a5c9,0x104a5ce,0x104ba10,0x104ba17,0x104ba09,0x104ba0e,0x104baf0,0x104baf7,0x104bae9,0x104baee,0x104b930,0x104b937,0x104b929,0x104b92e,0x104b9d0,0x104b9d7,0x104b9c9,0x104b9ce,0x1074210,0x1074217,0x1074209,0x107420e,0x10742f0,0x10742f7,0x10742e9,0x10742ee,0x1074130,0x1074137,0x1074129,0x107412e,0x10741d0,0x10741d7,0x10741c9,0x10741ce,0x1075e10,0x1075e17,0x1075e09,0x1075e0e,0x1075ef0,0x1075ef7,0x1075ee9,0x1075eee,0x1075d30,0x1075d37,0x1075d29,0x1075d2e,0x1075dd0,0x1075dd7,0x1075dc9,0x1075dce,0x1072610,0x1072617,0x1072609,0x107260e,0x10726f0,0x10726f7,0x10726e9,0x10726ee,0x1072530,0x1072537,0x1072529,0x107252e,0x10725d0,0x10725d7,0x10725c9,0x10725ce,0x1073a10,0x1073a17,0x1073a09,0x1073a0e,0x1073af0,0x1073af7,0x1073ae9,0x1073aee,0x1073930,0x1073937,0x1073929,0x107392e,0x10739d0,0x10739d7,0x10739c9,0x10739ce,0x1784210,0x1784217,0x1784209,0x178420e,0x17842f0,0x17842f7,0x17842e9,0x17842ee,0x1784130,0x1784137,0x1784129,0x178412e,0x17841d0,0x17841d7,0x17841c9,0x17841ce,0x1785e10,0x1785e17,0x1785e09,0x1785e0e,0x1785ef0,0x1785ef7,0x1785ee9,0x1785eee,0x1785d30,0x1785d37,0x1785d29,0x1785d2e,0x1785dd0,0x1785dd7,0x1785dc9,0x1785dce,0x1782610,0x1782617,0x1782609,0x178260e,0x17826f0,0x17826f7,0x17826e9,0x17826ee,0x1782530,0x1782537,0x1782529,0x178252e,0x17825d0,0x17825d7,0x17825c9,0x17825ce,0x1783a10,0x1783a17,0x1783a09,0x1783a0e,0x1783af0,0x1783af7,0x1783ae9,0x1783aee,0x1783930,0x1783937,0x1783929,0x178392e,0x17839d0,0x17839d7,0x17839c9,0x17839ce,0x17bc210,0x17bc217,0x17bc209,0x17bc20e,0x17bc2f0,0x17bc2f7,0x17bc2e9,0x17bc2ee,0x17bc130,0x17bc137,0x17bc129,0x17bc12e,0x17bc1d0,0x17bc1d7,0x17bc1c9,0x17bc1ce,0x17bde10,0x17bde17,0x17bde09,0x17bde0e,0x17bdef0,0x17bdef7,0x17bdee9,0x17bdeee,0x17bdd30,0x17bdd37,0x17bdd29,0x17bdd2e,0x17bddd0,0x17bddd7,0x17bddc9,0x17bddce,0x17ba610,0x17ba617,0x17ba609,0x17ba60e,0x17ba6f0,0x17ba6f7,0x17ba6e9,0x17ba6ee,0x17ba530,0x17ba537,0x17ba529,0x17ba52e,0x17ba5d0,0x17ba5d7,0x17ba5c9,0x17ba5ce,0x17bba10,0x17bba17,0x17bba09,0x17bba0e,0x17bbaf0,0x17bbaf7,0x17bbae9,0x17bbaee,0x17bb930,0x17bb937,0x17bb929,0x17bb92e,0x17bb9d0,0x17bb9d7,0x17bb9c9,0x17bb9ce,0x174c210,0x174c217,0x174c209,0x174c20e,0x174c2f0,0x174c2f7,0x174c2e9,0x174c2ee,0x174c130,0x174c137,0x174c129,0x174c12e,0x174c1d0,0x174c1d7,0x174c1c9,0x174c1ce,0x174de10,0x174de17,0x174de09,0x174de0e,0x174def0,0x174def7,0x174dee9,0x174deee,0x174dd30,0x174dd37,0x174dd29,0x174dd2e,0x174ddd0,0x174ddd7,0x174ddc9,0x174ddce,0x174a610,0x174a617,0x174a609,0x174a60e,0x174a6f0,0x174a6f7,0x174a6e9,0x174a6ee,0x174a530,0x174a537,0x174a529,0x174a52e,0x174a5d0,0x174a5d7,0x174a5c9,0x174a5ce,0x174ba10,0x174ba17,0x174ba09,0x174ba0e,0x174baf0,0x174baf7,0x174bae9,0x174baee,0x174b930,0x174b937,0x174b929,0x174b92e,0x174b9d0,0x174b9d7,0x174b9c9,0x174b9ce,0x1774210,0x1774217,0x1774209,0x177420e,0x17742f0,0x17742f7,0x17742e9,0x17742ee,0x1774130,0x1774137,0x1774129,0x177412e,0x17741d0,0x17741d7,0x17741c9,0x17741ce,0x1775e10,0x1775e17,0x1775e09,0x1775e0e,0x1775ef0,0x1775ef7,0x1775ee9,0x1775eee,0x1775d30,0x1775d37,0x1775d29,0x1775d2e,0x1775dd0,0x1775dd7,0x1775dc9,0x1775dce,0x1772610,0x1772617,0x1772609,0x177260e,0x17726f0,0x17726f7,0x17726e9,0x17726ee,0x1772530,0x1772537,0x1772529,0x177252e,0x17725d0,0x17725d7,0x17725c9,0x17725ce,0x1773a10,0x1773a17,0x1773a09,0x1773a0e,0x1773af0,0x1773af7,0x1773ae9,0x1773aee,0x1773930,0x1773937,0x1773929,0x177392e,0x17739d0,0x17739d7,0x17739c9,0x17739ce,0x984210,0x984217,0x984209,0x98420e,0x9842f0,0x9842f7,0x9842e9,0x9842ee,0x984130,0x984137,0x984129,0x98412e,0x9841d0,0x9841d7,0x9841c9,0x9841ce,0x985e10,0x985e17,0x985e09,0x985e0e,0x985ef0,0x985ef7,0x985ee9,0x985eee,0x985d30,0x985d37,0x985d29,0x985d2e,0x985dd0,0x985dd7,0x985dc9,0x985dce,0x982610,0x982617,0x982609,0x98260e,0x9826f0,0x9826f7,0x9826e9,0x9826ee,0x982530,0x982537,0x982529,0x98252e,0x9825d0,0x9825d7,0x9825c9,0x9825ce,0x983a10,0x983a17,0x983a09,0x983a0e,0x983af0,0x983af7,0x983ae9,0x983aee,0x983930,0x983937,0x983929,0x98392e,0x9839d0,0x9839d7,0x9839c9,0x9839ce,0x9bc210,0x9bc217,0x9bc209,0x9bc20e,0x9bc2f0,0x9bc2f7,0x9bc2e9,0x9bc2ee,0x9bc130,0x9bc137,0x9bc129,0x9bc12e,0x9bc1d0,0x9bc1d7,0x9bc1c9,0x9bc1ce,0x9bde10,0x9bde17,0x9bde09,0x9bde0e,0x9bdef0,0x9bdef7,0x9bdee9,0x9bdeee,0x9bdd30,0x9bdd37,0x9bdd29,0x9bdd2e,0x9bddd0,0x9bddd7,0x9bddc9,0x9bddce,0x9ba610,0x9ba617,0x9ba609,0x9ba60e,0x9ba6f0,0x9ba6f7,0x9ba6e9,0x9ba6ee,0x9ba530,0x9ba537,0x9ba529,0x9ba52e,0x9ba5d0,0x9ba5d7,0x9ba5c9,0x9ba5ce,0x9bba10,0x9bba17,0x9bba09,0x9bba0e,0x9bbaf0,0x9bbaf7,0x9bbae9,0x9bbaee,0x9bb930,0x9bb937,0x9bb929,0x9bb92e,0x9bb9d0,0x9bb9d7,0x9bb9c9,0x9bb9ce,0x94c210,0x94c217,0x94c209,0x94c20e,0x94c2f0,0x94c2f7,0x94c2e9,0x94c2ee,0x94c130,0x94c137,0x94c129,0x94c12e,0x94c1d0,0x94c1d7,0x94c1c9,0x94c1ce,0x94de10,0x94de17,0x94de09,0x94de0e,0x94def0,0x94def7,0x94dee9,0x94deee,0x94dd30,0x94dd37,0x94dd29,0x94dd2e,0x94ddd0,0x94ddd7,0x94ddc9,0x94ddce,0x94a610,0x94a617,0x94a609,0x94a60e,0x94a6f0,0x94a6f7,0x94a6e9,0x94a6ee,0x94a530,0x94a537,0x94a529,0x94a52e,0x94a5d0,0x94a5d7,0x94a5c9,0x94a5ce,0x94ba10,0x94ba17,0x94ba09,0x94ba0e,0x94baf0,0x94baf7,0x94bae9,0x94baee,0x94b930,0x94b937,0x94b929,0x94b92e,0x94b9d0,0x94b9d7,0x94b9c9,0x94b9ce,0x974210,0x974217,0x974209,0x97420e,0x9742f0,0x9742f7,0x9742e9,0x9742ee,0x974130,0x974137,0x974129,0x97412e,0x9741d0,0x9741d7,0x9741c9,0x9741ce,0x975e10,0x975e17,0x975e09,0x975e0e,0x975ef0,0x975ef7,0x975ee9,0x975eee,0x975d30,0x975d37,0x975d29,0x975d2e,0x975dd0,0x975dd7,0x975dc9,0x975dce,0x972610,0x972617,0x972609,0x97260e,0x9726f0,0x9726f7,0x9726e9,0x9726ee,0x972530,0x972537,0x972529,0x97252e,0x9725d0,0x9725d7,0x9725c9,0x9725ce,0x973a10,0x973a17,0x973a09,0x973a0e,0x973af0,0x973af7,0x973ae9,0x973aee,0x973930,0x973937,0x973929,0x97392e,0x9739d0,0x9739d7,0x9739c9,0x9739ce,0xe84210,0xe84217,0xe84209,0xe8420e,0xe842f0,0xe842f7,0xe842e9,0xe842ee,0xe84130,0xe84137,0xe84129,0xe8412e,0xe841d0,0xe841d7,0xe841c9,0xe841ce,0xe85e10,0xe85e17,0xe85e09,0xe85e0e,0xe85ef0,0xe85ef7,0xe85ee9,0xe85eee,0xe85d30,0xe85d37,0xe85d29,0xe85d2e,0xe85dd0,0xe85dd7,0xe85dc9,0xe85dce,0xe82610,0xe82617,0xe82609,0xe8260e,0xe826f0,0xe826f7,0xe826e9,0xe826ee,0xe82530,0xe82537,0xe82529,0xe8252e,0xe825d0,0xe825d7,0xe825c9,0xe825ce,0xe83a10,0xe83a17,0xe83a09,0xe83a0e,0xe83af0,0xe83af7,0xe83ae9,0xe83aee,0xe83930,0xe83937,0xe83929,0xe8392e,0xe839d0,0xe839d7,0xe839c9,0xe839ce,0xebc210,0xebc217,0xebc209,0xebc20e,0xebc2f0,0xebc2f7,0xebc2e9,0xebc2ee,0xebc130,0xebc137,0xebc129,0xebc12e,0xebc1d0,0xebc1d7,0xebc1c9,0xebc1ce,0xebde10,0xebde17,0xebde09,0xebde0e,0xebdef0,0xebdef7,0xebdee9,0xebdeee,0xebdd30,0xebdd37,0xebdd29,0xebdd2e,0xebddd0,0xebddd7,0xebddc9,0xebddce,0xeba610,0xeba617,0xeba609,0xeba60e,0xeba6f0,0xeba6f7,0xeba6e9,0xeba6ee,0xeba530,0xeba537,0xeba529,0xeba52e,0xeba5d0,0xeba5d7,0xeba5c9,0xeba5ce,0xebba10,0xebba17,0xebba09,0xebba0e,0xebbaf0,0xebbaf7,0xebbae9,0xebbaee,0xebb930,0xebb937,0xebb929,0xebb92e,0xebb9d0,0xebb9d7,0xebb9c9,0xebb9ce,0xe4c210,0xe4c217,0xe4c209,0xe4c20e,0xe4c2f0,0xe4c2f7,0xe4c2e9,0xe4c2ee,0xe4c130,0xe4c137,0xe4c129,0xe4c12e,0xe4c1d0,0xe4c1d7,0xe4c1c9,0xe4c1ce,0xe4de10,0xe4de17,0xe4de09,0xe4de0e,0xe4def0,0xe4def7,0xe4dee9,0xe4deee,0xe4dd30,0xe4dd37,0xe4dd29,0xe4dd2e,0xe4ddd0,0xe4ddd7,0xe4ddc9,0xe4ddce,0xe4a610,0xe4a617,0xe4a609,0xe4a60e,0xe4a6f0,0xe4a6f7,0xe4a6e9,0xe4a6ee,0xe4a530,0xe4a537,0xe4a529,0xe4a52e,0xe4a5d0,0xe4a5d7,0xe4a5c9,0xe4a5ce,0xe4ba10,0xe4ba17,0xe4ba09,0xe4ba0e,0xe4baf0,0xe4baf7,0xe4bae9,0xe4baee,0xe4b930,0xe4b937,0xe4b929,0xe4b92e,0xe4b9d0,0xe4b9d7,0xe4b9c9,0xe4b9ce,0xe74210,0xe74217,0xe74209,0xe7420e,0xe742f0,0xe742f7,0xe742e9,0xe742ee,0xe74130,0xe74137,0xe74129,0xe7412e,0xe741d0,0xe741d7,0xe741c9,0xe741ce,0xe75e10,0xe75e17,0xe75e09,0xe75e0e,0xe75ef0,0xe75ef7,0xe75ee9,0xe75eee,0xe75d30,0xe75d37,0xe75d29,0xe75d2e,0xe75dd0,0xe75dd7,0xe75dc9,0xe75dce,0xe72610,0xe72617,0xe72609,0xe7260e,0xe726f0,0xe726f7,0xe726e9,0xe726ee,0xe72530,0xe72537,0xe72529,0xe7252e,0xe725d0,0xe725d7,0xe725c9,0xe725ce,0xe73a10,0xe73a17,0xe73a09,0xe73a0e,0xe73af0,0xe73af7,0xe73ae9,0xe73aee,0xe73930,0xe73937,0xe73929,0xe7392e,0xe739d0,0xe739d7,0xe739c9]
+  },
+  ARUCO_MIP_36h12: {
+    nBits: 36,
+    tau: 12,
+    codeList: [0xd2b63a09d,0x6001134e5,0x1206fbe72,0xff8ad6cb4,0x85da9bc49,0xb461afe9c,0x6db51fe13,0x5248c541f,0x8f34503,0x8ea462ece,0xeac2be76d,0x1af615c44,0xb48a49f27,0x2e4e1283b,0x78b1f2fa8,0x27d34f57e,0x89222fff1,0x4c1669406,0xbf49b3511,0xdc191cd5d,0x11d7c3f85,0x16a130e35,0xe29f27eff,0x428d8ae0c,0x90d548477,0x2319cbc93,0xc3b0c3dfc,0x424bccc9,0x2a081d630,0x762743d96,0xd0645bf19,0xf38d7fd60,0xc6cbf9a10,0x3c1be7c65,0x276f75e63,0x4490a3f63,0xda60acd52,0x3cc68df59,0xab46f9dae,0x88d533d78,0xb6d62ec21,0xb3c02b646,0x22e56d408,0xac5f5770a,0xaaa993f66,0x4caa07c8d,0x5c9b4f7b0,0xaa9ef0e05,0x705c5750,0xac81f545e,0x735b91e74,0x8cc35cee4,0xe44694d04,0xb5e121de0,0x261017d0f,0xf1d439eb5,0xa1a33ac96,0x174c62c02,0x1ee27f716,0x8b1c5ece9,0x6a05b0c6a,0xd0568dfc,0x192d25e5f,0x1adbeccc8,0xcfec87f00,0xd0b9dde7a,0x88dcef81e,0x445681cb9,0xdbb2ffc83,0xa48d96df1,0xb72cc2e7d,0xc295b53f,0xf49832704,0x9968edc29,0x9e4e1af85,0x8683e2d1b,0x810b45c04,0x6ac44bfe2,0x645346615,0x3990bd598,0x1c9ed0f6a,0xc26729d65,0x83993f795,0x3ac05ac5d,0x357adff3b,0xd5c05565,0x2f547ef44,0x86c115041,0x640fd9e5f,0xce08bbcf7,0x109bb343e,0xc21435c92,0x35b4dfce4,0x459752cf2,0xec915b82c,0x51881eed0,0x2dda7dc97,0x2e0142144,0x42e890f99,0x9a8856527,0x8e80d9d80,0x891cbcf34,0x25dd82410,0x239551d34,0x8fe8f0c70,0x94106a970,0x82609b40c,0xfc9caf36,0x688181d11,0x718613c08,0xf1ab7629,0xa357bfc18,0x4c03b7a46,0x204dedce6,0xad6300d37,0x84cc4cd09,0x42160e5c4,0x87d2adfa8,0x7850e7749,0x4e750fc7c,0xbf2e5dfda,0xd88324da5,0x234b52f80,0x378204514,0xabdf2ad53,0x365e78ef9,0x49caa6ca2,0x3c39ddf3,0xc68c5385d,0x5bfcbbf67,0x623241e21,0xabc90d5cc,0x388c6fe85,0xda0e2d62d,0x10855dfe9,0x4d46efd6b,0x76ea12d61,0x9db377d3d,0xeed0efa71,0xe6ec3ae2f,0x441faee83,0xba19c8ff5,0x313035eab,0x6ce8f7625,0x880dab58d,0x8d3409e0d,0x2be92ee21,0xd60302c6c,0x469ffc724,0x87eebeed3,0x42587ef7a,0x7a8cc4e52,0x76a437650,0x999e41ef4,0x7d0969e42,0xc02baf46b,0x9259f3e47,0x2116a1dc0,0x9f2de4d84,0xeffac29,0x7b371ff8c,0x668339da9,0xd010aee3f,0x1cd00b4c0,0x95070fc3b,0xf84c9a770,0x38f863d76,0x3646ff045,0xce1b96412,0x7a5d45da8,0x14e00ef6c,0x5e95abfd8,0xb2e9cb729,0x36c47dd7,0xb8ee97c6b,0xe9e8f657,0xd4ad2ef1a,0x8811c7f32,0x47bde7c31,0x3adadfb64,0x6e5b28574,0x33e67cd91,0x2ab9fdd2d,0x8afa67f2b,0xe6a28fc5e,0x72049cdbd,0xae65dac12,0x1251a4526,0x1089ab841,0xe2f096ee0,0xb0caee573,0xfd6677e86,0x444b3f518,0xbe8b3a56a,0x680a75cfc,0xac02baea8,0x97d815e1c,0x1d4386e08,0x1a14f5b0e,0xe658a8d81,0xa3868efa7,0x3668a9673,0xe8fc53d85,0x2e2b7edd5,0x8b2470f13,0xf69795f32,0x4589ffc8e,0x2e2080c9c,0x64265f7d,0x3d714dd10,0x1692c6ef1,0x3e67f2f49,0x5041dad63,0x1a1503415,0x64c18c742,0xa72eec35,0x1f0f9dc60,0xa9559bc67,0xf32911d0d,0x21c0d4ffc,0xe01cef5b0,0x4e23a3520,0xaa4f04e49,0xe1c4fcc43,0x208e8f6e8,0x8486774a5,0x9e98c7558,0x2c59fb7dc,0x9446a4613,0x8292dcc2e,0x4d61631,0xd05527809,0xa0163852d,0x8f657f639,0xcca6c3e37,0xcb136bc7a,0xfc5a83e53,0x9aa44fc30,0xbdec1bd3c,0xe020b9f7c,0x4b8f35fb0,0xb8165f637,0x33dc88d69,0x10a2f7e4d,0xc8cb5ff53,0xde259ff6b,0x46d070dd4,0x32d3b9741,0x7075f1c04,0x4d58dbea0]
+  }
+};
+
+AR.Dictionary = function (dicName) {
+  this.codes = {};
+  this.codeList = [];
+  this.tau = 0;
+  this._initialize(dicName);
+};
+
+AR.Dictionary.prototype._initialize = function (dicName) {
+  this.codes = {};
+  this.codeList = [];
+  this.tau = 0;
+  this.nBits = 0;
+  this.markSize = 0;
+  this.dicName = dicName;
+  var dictionary = AR.DICTIONARIES[dicName];
+  if (!dictionary)
+    throw 'The dictionary "' + dicName + '" is not recognized.';
+  
+  this.nBits = dictionary.nBits;
+  this.markSize = Math.sqrt(dictionary.nBits) + 2;
+  for (var i = 0; i < dictionary.codeList.length; i++) {
+    var code = null;
+    if (typeof dictionary.codeList[i] === 'number')
+      code = this._hex2bin(dictionary.codeList[i], dictionary.nBits);
+    if (typeof dictionary.codeList[i] === 'string')
+      code = this._hex2bin(parseInt(dictionary.codeList[i], 16), dictionary.nBits);
+    if (Array.isArray(dictionary.codeList[i])) 
+      code = this._bytes2bin(dictionary.codeList[i], dictionary.nBits);
+    if (code === null) 
+      throw 'Invalid code ' + i + ' in dictionary ' + dicName + ': ' + JSON.stringify(dictionary.codeList[i]);
+    if (code.length != dictionary.nBits)
+      throw 'The code ' + i + ' in dictionary ' + dicName + ' is not ' +  dictionary.nBits + ' bits long but ' + code.length + ': ' + code;
+    this.codeList.push(code);
+    this.codes[code] = {
+      id: i
+    };
+  }
+  this.tau = dictionary.tau || this._calculateTau();
+};
+
+AR.Dictionary.prototype.find = function (bits) {
+  var val = '',
+    i, j;
+  for (i = 0; i < bits.length; i++) {
+    var bitRow = bits[i];
+    for (j = 0; j < bitRow.length; j++) {
+      val += bitRow[j];
+    }
+  }
+  var minFound = this.codes[val];
+  if (minFound)
+    return {
+      id: minFound.id,
+      distance: 0
+    };
+
+  for (i = 0; i < this.codeList.length; i++) {
+    var code = this.codeList[i];
+    var distance = this._hammingDistance(val, code);
+    if (this._hammingDistance(val, code) < this.tau) {
+      if (!minFound || minFound.distance > distance) {
+        minFound = {
+          id: this.codes[code].id,
+          distance: distance
+        };
+      }
+    }
+  }
+  return minFound;
+};
+
+AR.Dictionary.prototype._hex2bin = function (hex, nBits) {
+  return hex.toString(2).padStart(nBits, '0');
+};
+
+AR.Dictionary.prototype._bytes2bin = function (byteList, nBits) {
+  var bits = '', byte;
+  for (byte of byteList) {
+    bits += byte.toString(2).padStart(bits.length + 8 > nBits?nBits - bits.length:8, '0');
+  }
+  return bits;
+};
+
+AR.Dictionary.prototype._hammingDistance = function (str1, str2) {
+  if (str1.length != str2.length)
+    throw 'Hamming distance calculation require inputs of the same length';
+  var distance = 0,
+    i;
+  for (i = 0; i < str1.length; i++)
+    if (str1[i] !== str2[i])
+      distance += 1;
+  return distance;
+};
+
+AR.Dictionary.prototype._calculateTau = function () {
+  var tau = Number.MAX_VALUE;
+  for(var i=0;i<this.codeList.length;i++)
+    for(var j=i+1;j<this.codeList.length;j++) {
+      var distance = this._hammingDistance(this.codeList[i], this.codeList[j]);
+      tau = distance < tau ? distance : tau;
+    }
+  return tau;
+};
+
+AR.Dictionary.prototype.generateSVG = function (id) {
+  var code = this.codeList[id];
+  if (code == null)
+    throw 'The id "' + id + '" is not valid for the dictionary "' + this.dicName + '". ID must be between 0 and ' + (this.codeList.length-1) + ' included.';
+  var size = this.markSize - 2;
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+ (size+4) + ' ' + (size+4) + '">';
+  svg += '<rect x="0" y="0" width="' + (size+4) + '" height="' + (size+4) + '" fill="white"/>';
+  svg += '<rect x="1" y="1" width="' + (size+2) + '" height="' + (size+2) + '" fill="black"/>';
+  for(var y=0;y<size;y++) {
+    for(var x=0;x<size;x++) {
+      if (code[y*size+x]=='1') 
+        svg += '<rect x="' + (x+2) + '" y="' + (y+2) + '" width="1" height="1" fill="white"/>';
+    }
+  }
+  svg += '</svg>';
+  return svg;
+};
+
+AR.Marker = function (id, corners, hammingDistance) {
+  this.id = id;
+  this.corners = corners;
+  this.hammingDistance = hammingDistance;
+};
+
+AR.Detector = function (config) {
+  config = config || {};
+  this.grey = new CV.Image();
+  this.thres = new CV.Image();
+  this.homography = new CV.Image();
+  this.binary = [];
+  this.contours = [];
+  this.polys = [];
+  this.candidates = [];
+  config.dictionaryName = config.dictionaryName || 'ARUCO_MIP_36h12';
+  this.dictionary = new AR.Dictionary(config.dictionaryName);
+  this.dictionary.tau = config.maxHammingDistance != null ? config.maxHammingDistance : this.dictionary.tau;
+};
+
+AR.Detector.prototype.detectImage = function (width, height, data) {
+  return this.detect({
+    width: width,
+    height: height,
+    data: data
+  });
+};
+
+AR.Detector.prototype.detectStreamInit = function (width, height, callback) {
+  this.streamConfig = {};
+  this.streamConfig.width = width;
+  this.streamConfig.height = height;
+  this.streamConfig.imageSize = width * height * 4; //provided image must be a sequence of rgba bytes (4 bytes represent a pixel)
+  this.streamConfig.index = 0;
+  this.streamConfig.imageData = new Uint8ClampedArray(this.streamConfig.imageSize);
+  this.streamConfig.callback = callback || function (image, markerList) {};
+};
+
+//accept data chunks of different sizes
+AR.Detector.prototype.detectStream = function (data) {
+  for (var i = 0; i < data.length; i++) {
+    this.streamConfig.imageData[this.streamConfig.index] = data[i];
+    this.streamConfig.index = (this.streamConfig.index + 1) % this.streamConfig.imageSize;
+    if (this.streamConfig.index == 0) {
+      var image = {
+        width: this.streamConfig.width,
+        height: this.streamConfig.height,
+        data: this.streamConfig.imageData
+      };
+      var markerList = this.detect(image);
+      this.streamConfig.callback(image, markerList);
+    }
+  }
+};
+
+AR.Detector.prototype.detectMJPEGStreamInit = function (width, height, callback, decoderFn) {
+  this.mjpeg = {
+    decoderFn: decoderFn,
+    chunks: [],
+    SOI: [0xff, 0xd8],
+    EOI: [0xff, 0xd9]
+  };
+  this.detectStreamInit(width, height, callback);
+};
+
+AR.Detector.prototype.detectMJPEGStream = function (chunk) {
+  var eoiPos = chunk.findIndex(function (element, index, array) {
+    return this.mjpeg.EOI[0] == element && array.length > index + 1 && this.mjpeg.EOI[1] == array[index + 1];
+  });
+  var soiPos = chunk.findIndex(function (element, index, array) {
+    return this.mjpeg.SOI[0] == element && array.length > index + 1 && this.mjpeg.SOI[1] == array[index + 1];
+  });
+
+  if (eoiPos === -1) {
+    this.mjpeg.chunks.push(chunk);
+  } else {
+    var part1 = chunk.slice(0, eoiPos + 2);
+    if (part1.length) {
+      this.mjpeg.chunks.push(part1);
+    }
+    if (this.mjpeg.chunks.length) {
+      var jpegImage = this.mjpeg.chunks.flat();
+      var rgba = this.mjpeg.decoderFn(jpegImage);
+      this.detectStream(rgba);
+    }
+    this.mjpeg.chunks = [];
+  }
+  if (soiPos > -1) {
+    this.mjpeg.chunks = [];
+    this.mjpeg.chunks.push(chunk.slice(soiPos));
+  }
+};
+
+AR.Detector.prototype.detect = function (image) {
+  CV.grayscale(image, this.grey);
+  CV.adaptiveThreshold(this.grey, this.thres, 2, 7);
+
+  this.contours = CV.findContours(this.thres, this.binary);
+  //Scale Fix: https://stackoverflow.com/questions/35936397/marker-detection-on-paper-sheet-using-javascript
+  //this.candidates = this.findCandidates(this.contours, image.width * 0.20, 0.05, 10);
+  this.candidates = this.findCandidates(this.contours, image.width * 0.01, 0.05, 10);
+  this.candidates = this.clockwiseCorners(this.candidates);
+  this.candidates = this.notTooNear(this.candidates, 10);
+
+  return this.findMarkers(this.grey, this.candidates, 49);
+};
+
+AR.Detector.prototype.findCandidates = function (contours, minSize, epsilon, minLength) {
+  var candidates = [],
+    len = contours.length,
+    contour, poly, i;
+
+  this.polys = [];
+
+  for (i = 0; i < len; ++i) {
+    contour = contours[i];
+
+    if (contour.length >= minSize) {
+      poly = CV.approxPolyDP(contour, contour.length * epsilon);
+
+      this.polys.push(poly);
+
+      if ((4 === poly.length) && (CV.isContourConvex(poly))) {
+
+        if (CV.minEdgeLength(poly) >= minLength) {
+          candidates.push(poly);
+        }
+      }
+    }
+  }
+
+  return candidates;
+};
+
+AR.Detector.prototype.clockwiseCorners = function (candidates) {
+  var len = candidates.length,
+    dx1, dx2, dy1, dy2, swap, i;
+
+  for (i = 0; i < len; ++i) {
+    dx1 = candidates[i][1].x - candidates[i][0].x;
+    dy1 = candidates[i][1].y - candidates[i][0].y;
+    dx2 = candidates[i][2].x - candidates[i][0].x;
+    dy2 = candidates[i][2].y - candidates[i][0].y;
+
+    if ((dx1 * dy2 - dy1 * dx2) < 0) {
+      swap = candidates[i][1];
+      candidates[i][1] = candidates[i][3];
+      candidates[i][3] = swap;
+    }
+  }
+
+  return candidates;
+};
+
+AR.Detector.prototype.notTooNear = function (candidates, minDist) {
+  var notTooNear = [],
+    len = candidates.length,
+    dist, dx, dy, i, j, k;
+
+  for (i = 0; i < len; ++i) {
+
+    for (j = i + 1; j < len; ++j) {
+      dist = 0;
+
+      for (k = 0; k < 4; ++k) {
+        dx = candidates[i][k].x - candidates[j][k].x;
+        dy = candidates[i][k].y - candidates[j][k].y;
+
+        dist += dx * dx + dy * dy;
+      }
+
+      if ((dist / 4) < (minDist * minDist)) {
+
+        if (CV.perimeter(candidates[i]) < CV.perimeter(candidates[j])) {
+          candidates[i].tooNear = true;
+        } else {
+          candidates[j].tooNear = true;
+        }
+      }
+    }
+  }
+
+  for (i = 0; i < len; ++i) {
+    if (!candidates[i].tooNear) {
+      notTooNear.push(candidates[i]);
+    }
+  }
+
+  return notTooNear;
+};
+
+AR.Detector.prototype.findMarkers = function (imageSrc, candidates, warpSize) {
+  var markers = [],
+    len = candidates.length,
+    candidate, marker, i;
+
+  for (i = 0; i < len; ++i) {
+    candidate = candidates[i];
+
+    CV.warp(imageSrc, this.homography, candidate, warpSize);
+
+    CV.threshold(this.homography, this.homography, CV.otsu(this.homography));
+
+    marker = this.getMarker(this.homography, candidate);
+    if (marker) {
+      markers.push(marker);
+    }
+  }
+
+  return markers;
+};
+
+AR.Detector.prototype.getMarker = function (imageSrc, candidate) {
+  var markSize = this.dictionary.markSize;
+  var width = (imageSrc.width / markSize) >>> 0,
+    minZero = (width * width) >> 1,
+    bits = [],
+    rotations = [],
+    square, inc, i, j;
+
+  for (i = 0; i < markSize; ++i) {
+    inc = (0 === i || (markSize - 1) === i) ? 1 : (markSize - 1);
+
+    for (j = 0; j < markSize; j += inc) {
+      square = {
+        x: j * width,
+        y: i * width,
+        width: width,
+        height: width
+      };
+      if (CV.countNonZero(imageSrc, square) > minZero) {
+        return null;
+      }
+    }
+  }
+
+  for (i = 0; i < markSize - 2; ++i) {
+    bits[i] = [];
+
+    for (j = 0; j < markSize - 2; ++j) {
+      square = {
+        x: (j + 1) * width,
+        y: (i + 1) * width,
+        width: width,
+        height: width
+      };
+
+      bits[i][j] = CV.countNonZero(imageSrc, square) > minZero ? 1 : 0;
+    }
+  }
+
+  rotations[0] = bits;
+
+  var foundMin = null;
+  var rot = 0;
+  for (i = 0; i < 4; i++) {
+    var found = this.dictionary.find(rotations[i]);
+    if (found && (foundMin === null || found.distance < foundMin.distance)) {
+      foundMin = found;
+      rot = i;
+      if (foundMin.distance === 0)
+        break;
+    }
+    rotations[i + 1] = this.rotate(rotations[i]);
+  }
+
+  if (foundMin)
+    return new AR.Marker(foundMin.id, this.rotate2(candidate, 4 - rot), foundMin.distance);
+
+  return null;
+};
+
+AR.Detector.prototype.rotate = function (src) {
+  var dst = [],
+    len = src.length,
+    i, j;
+
+  for (i = 0; i < len; ++i) {
+    dst[i] = [];
+    for (j = 0; j < src[i].length; ++j) {
+      dst[i][j] = src[src[i].length - j - 1][i];
+    }
+  }
+
+  return dst;
+};
+
+AR.Detector.prototype.rotate2 = function (src, rotation) {
+  var dst = [],
+    len = src.length,
+    i;
+
+  for (i = 0; i < len; ++i) {
+    dst[i] = src[(rotation + i) % len];
+  }
+
+  return dst;
+};
+</script>
+<script>/* Copyright (C) 2013-2016, The Regents of The University of Michigan.
+All rights reserved.
+This software was developed in the APRIL Robotics Lab under the
+direction of Edwin Olson, ebolson@umich.edu. This software may be
+available under alternative licensing terms; contact the address above.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+The views and conclusions contained in the software and documentation are those
+of the authors and should not be interpreted as representing official policies,
+either expressed or implied, of the Regents of The University of Michigan.
+*/
+
+//Dictionary extracted from https://github.com/AprilRobotics/apriltag-generation/blob/master/src/april/tag/Tag36h11.java
+
+var AR = this.AR || require('../aruco').AR;
+AR.DICTIONARIES['APRILTAG_36h11'] = {
+  nBits: 36,
+  tau: 11,
+  codeList: [0xd5d628584,0xd97f18b49,0xdd280910e,0xe479e9c98,0xebcbca822,0xf31dab3ac,0x56a5d085,0x10652e1d4,0x22b1dfead,0x265ad0472,0x34fe91b86,0x3ff962cd5,0x43a25329a,0x474b4385f,0x4e9d243e9,0x5246149ae,0x5997f5538,0x683bb6c4c,0x6be4a7211,0x7e3158eea,0x81da494af,0x858339a74,0x8cd51a5fe,0x9f21cc2d7,0xa2cabc89c,0xadc58d9eb,0xb16e7dfb0,0xb8c05eb3a,0xd25ef139d,0xd607e1962,0xe4aba3076,0x2dde6a3da,0x43d40c678,0x5620be351,0x64c47fa65,0x686d7002a,0x6c16605ef,0x6fbf50bb4,0x8d06d39dc,0x9f53856b5,0xadf746dc9,0xbc9b084dd,0xd290aa77b,0xd9e28b305,0xe4dd5c454,0xfad2fe6f2,0x181a8151a,0x26be42c2e,0x2e10237b8,0x405cd5491,0x7742eab1c,0x85e6ac230,0x8d388cdba,0x9f853ea93,0xc41ea2445,0xcf1973594,0x14a34a333,0x31eacd15b,0x6c79d2dab,0x73cbb3935,0x89c155bd3,0x8d6a46198,0x91133675d,0xa708d89fb,0xae5ab9585,0xb9558a6d4,0xb98743ab2,0xd6cec68da,0x1506bcaef,0x4becd217a,0x4f95c273f,0x658b649dd,0xa76c4b1b7,0xecf621f56,0x1c8a56a57,0x3628e92ba,0x53706c0e2,0x5e6b3d231,0x7809cfa94,0xe97eead6f,0x5af40604a,0x7492988ad,0xed5994712,0x5eceaf9ed,0x7c1632815,0xc1a0095b4,0xe9e25d52b,0x3a6705419,0xa8333012f,0x4ce5704d0,0x508e60a95,0x877476120,0xa864e950d,0xea45cfce7,0x19da047e8,0x24d4d5937,0x6e079cc9b,0x99f2e11d7,0x33aa50429,0x499ff26c7,0x50f1d3251,0x66e7754ef,0x96ad633ce,0x9a5653993,0xaca30566c,0xc298a790a,0x8be44b65d,0xdc68f354b,0x16f7f919b,0x4dde0e826,0xd548cbd9f,0xe0439ceee,0xfd8b1fd16,0x76521bb7b,0xd92375742,0xcab16d40c,0x730c9dd72,0xad9ba39c2,0xb14493f87,0x52b15651f,0x185409cad,0x77ae2c68d,0x94f5af4b5,0xa13bad55,0x61ea437cd,0xa022399e2,0x203b163d1,0x7bba8f40e,0x95bc9442d,0x41c0b5358,0x8e9c6cc81,0xeb549670,0x9da3a0b51,0xd832a67a1,0xdcd4350bc,0x4aa05fdd2,0x60c7bb44e,0x4b358b96c,0x67299b45,0xb9c89b5fa,0x6975acaea,0x62b8f7afa,0x33567c3d7,0xbac139950,0xa5927c62a,0x5c916e6a4,0x260ecb7d5,0x29b7bbd9a,0x903205f26,0xae72270a4,0x3d2ec51a7,0x82ea55324,0x11a6f3427,0x1ca1c4576,0xa40c81aef,0xbddccd730,0xe617561e,0x969317b0f,0x67f781364,0x610912f96,0xb2549fdfc,0x6e5aaa6b,0xb6c475339,0xc56836a4d,0x844e351eb,0x4647f83b4,0x908a04f5,0x7f51034c9,0xaee537fca,0x5e92494ba,0xd445808f4,0x28d68b563,0x4d25374b,0x2bc065f65,0x96dc3ea0c,0x4b2ade817,0x7c3fd502,0xe768b5caf,0x17605cf6c,0x182741ee4,0x62846097c,0x72b5ebf80,0x263da6e13,0xfa841bcb5,0x7e45e8c69,0x653c81fa0,0x7443b5e70,0xa5234afd,0x74756f24e,0x157ebf02a,0x82ef46939,0x80d420264,0x2aeed3e98,0xb0a1dd4f8,0xb5436be13,0x7b7b4b13b,0x1ce80d6d3,0x16c08427d,0xee54462dd,0x1f7644cce,0x9c7b5cc92,0xe369138f8,0x5d5a66e91,0x485d62f49,0xe6e819e94,0xb1f340eb5,0x9d198ce2,0xd60717437,0x196b856c,0xf0a6173a5,0x12c0e1ec6,0x62b82d5cf,0xad154c067,0xce3778832,0x6b0a7b864,0x4c7686694,0x5058ff3ec,0xd5e21ea23,0x9ff4a76ee,0x9dd981019,0x1bad4d30a,0xc601896d1,0x973439b48,0x1ce7431a8,0x57a8021d6,0xf9dba96e6,0x83a2e4e7c,0x8ea585380,0xaf6c0e744,0x875b73bab,0xda34ca901,0x2ab9727ef,0xd39f21b9a,0x8a10b742f,0x5f8952dba,0xf8da71ab0,0xc25f9df96,0x6f8a5d94,0xe42e63e1a,0xb78409d1b,0x792229add,0x5acf8c455,0x2fc29a9b0,0xea486237b,0xb0c9685a0,0x1ad748a47,0x3b4712d5,0xf29216d30,0x8dad65e49,0xa2cf09dd,0xb5f174c6,0xe54f57743,0xb9cf54d78,0x4a312a88a,0x27babc962,0xb86897111,0xf2ff6c116,0x82274bd8a,0x97023505e,0x52d46edd1,0x585c1f538,0xbddd00e43,0x5590b74df,0x729404a1f,0x65320855e,0xd3d4b6956,0x7ae374f14,0x2d7a60e06,0x315cd9b5e,0xfd36b4eac,0xf1df7642b,0x55db27726,0x8f15ebc19,0x992f8c531,0x62dea2a40,0x928275cab,0x69c263cb9,0xa774cca9e,0x266b2110e,0x1b14acbb8,0x624b8a71b,0x1c539406b,0x3086d529b,0x111dd66e,0x98cd630bf,0x8b9d1ffdc,0x72b2f61e7,0x9ed9d672b,0x96cdd15f3,0x6366c2504,0x6ca9df73a,0xa066d60f0,0xe7a4b8add,0x8264647ef,0xaa195bf81,0x9a3db8244,0x14d2df6a,0xb63265b7,0x2f010de73,0x97e774986,0x248affc29,0xfb57dcd11,0xb1a7e4d9,0x4bfa2d07d,0x54e5cdf96,0x4c15c1c86,0xcd9c61166,0x499380b2a,0x540308d09,0x8b63fe66f,0xc81aeb35e,0x86fe0bd5c,0xce2480c2a,0x1ab29ee60,0x8048daa15,0xdbfeb2d39,0x567c9858c,0x2b6edc5bc,0x2078fca82,0xadacc22aa,0xb92486f49,0x51fac5964,0x691ee6420,0xf63b3e129,0x39be7e572,0xda2ce6c74,0x20cf17a5c,0xee55f9b6e,0xfb8572726,0xb2c2de548,0xcaa9bce92,0xae9182db3,0x74b6e5bd1,0x137b252af,0x51f686881,0xd672f6c02,0x654146ce4,0xf944bc825,0xe8327f809,0x76a73fd59,0xf79da4cb4,0x956f8099b,0x7b5f2655c,0xd06b114a6,0xd0697ca50,0x27c390797,0xbc61ed9b2,0xcc12dd19b,0xeb7818d2c,0x92fcecda,0x89ded4ea1,0x256a0ba34,0xb6948e627,0x1ef6b1054,0x8639294a2,0xeda3780a4,0x39ee2af1d,0xcd257edc5,0x2d9d6bc22,0x121d3b47d,0x37e23f8ad,0x119f31cf6,0x2c97f4f09,0xd502abfe0,0x10bc3ca77,0x53d7190ef,0x90c3e62a6,0x7e9ebf675,0x979ce23d1,0x27f0c98e9,0xeafb4ae59,0x7ca7fe2bd,0x1490ca8f6,0x9123387ba,0xb3bc73888,0x3ea87e325,0x4888964aa,0xa0188a6b9,0xcd383c666,0x40029a3fd,0xe1c00ac5c,0x39e6f2b6e,0xde664f622,0xe979a75e8,0x7c6b4c86c,0xfd492e071,0x8fbb35118,0x40b4a09b7,0xaf80bd6da,0x70e0b2521,0x2f5c54d93,0x3f4a118d5,0x9c1897b9,0x79776eac,0x84b00b17,0x3a95ad90e,0x28c544095,0x39d457c05,0x7a3791a78,0xbb770e22e,0x9a822bd6c,0x68a4b1fed,0xa5fd27b3b,0xc3995b79,0xd1519dff1,0x8e7eee359,0xcd3ca50b1,0xb73b8b793,0x57aca1c43,0xec2655277,0x785a2c1b3,0x75a07985a,0xa4b01eb69,0xa18a11347,0xdb1f28ca3,0x877ec3e25,0x31f6341b8,0x1363a3a4c,0x75d8b9ba,0x7ae0792a9,0xa83a21651,0x7f08f9fb5,0xd0cf73a9,0xb04dcc98e,0xf65c7b0f8,0x65ddaf69a,0x2cf9b86b3,0x14cb51e25,0xf48027b5b,0xec26ea8b,0x44bafd45c,0xb12c7c0c4,0x959fd9d82,0xc77c9725a,0x48a22d462,0x8398e8072,0xec89b05ce,0xbb682d4c9,0xe5a86d2ff,0x358f01134,0x8556ddcf6,0x67584b6e2,0x11609439f,0x8488816e,0xaaf1a2c46,0xf879898cf,0x8bbe5e2f7,0x101eee363,0x690f69377,0xf5bd93cd9,0xcea4c2bf6,0x9550be706,0x2c5b38a60,0xe72033547,0x4458b0629,0xee8d9ed41,0xd2f918d72,0x78dc39fd3,0x8212636f6,0x7450a72a7,0xc4f0cf4c6,0x367bcddcd,0xc1caf8cc6,0xa7f5b853d,0x9d536818b,0x535e021b0,0xa7eb8729e,0x422a67b49,0x929e928a6,0x48e8aefcc,0xa9897393c,0x5eb81d37e,0x1e80287b7,0x34770d903,0x2eef86728,0x59266ccb6,0x110bba61,0x1dfd284ef,0x447439d1b,0xfece0e599,0x9309f3703,0x80764d1dd,0x353f1e6a0,0x2c1c12dcc,0xc1d21b9d7,0x457ee453e,0xd66faf540,0x44831e652,0xcfd49a848,0x9312d4133,0x3f097d3ee,0x8c9ebef7a,0xa99e29e88,0xe9fab22c,0x4e748f4fb,0xecdee4288,0xabce5f1d0,0xc42f6876c,0x7ed402ea0,0xe5c4242c3,0xd5b2c31ae,0x286863be6,0x160444d94,0x5f0f5808e,0xae3d44b2a,0x9f5c5d109,0x8ad9316d7,0x3422ba064,0x2fed11d56,0xbea6e3e04,0x4b029eec,0x6deed7435,0x3718ce17c,0x55857f5e2,0x2edac7b62,0x85d6c512,0xd6ca88e0f,0x2b7e1fc69,0xa699d5c1b,0xf05ad74de,0x4cf5fb56d,0x5725e07e1,0x72f18a2de,0x1cec52609,0x48534243c,0x2523a4d69,0x35c1b80d1,0xa4d7338a7,0xdb1af012,0xe61a9475d,0x5df03f91,0x97ae260bb,0x32d627fef,0xb640f73c2,0x45a1ac9c6,0x6a2202de1,0x57d3e25f2,0x5aa9f986e,0xcc859d8a,0xe3ec6cca8,0x54e95e1ae,0x446887b06,0x7516732be,0x3817ac8f5,0x3e26d938c,0xaa81bc235,0xdf387ca1b,0xf3a3b3f2,0xb4bf69677,0xae21868ed,0x81e1d2d9d,0xa0a9ea14c,0x8eee297a9,0x4740c0559,0xe8b141837,0xac69e0a3d,0x9ed83a1e1,0x5edb55ecb,0x7340fe81,0x50dfbc6bf,0x4f583508a,0xcb1fb78bc,0x4025ced2f,0x39791ebec,0x53ee388f1,0x7d6c0bd23,0x93a995fbe,0x8a41728de,0x2fe70e053,0xab3db443a,0x1364edb05,0x47b6eeed6,0x12e71af01,0x52ff83587,0x3a1575dd8,0x3feaa3564,0xeacf78ba7,0x872b94f8,0xda8ddf9a2,0x9aa920d2b,0x1f350ed36,0x18a5e861f,0x2c35b89c3,0x3347ac48a,0x7f23e022e,0x2459068fb,0xe83be4b73]
+};</script>
+<script>/*
+Copyright (c) 2012 Juan Mellado
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+*/
+
+/*
+References:
+- "Numerical Recipes in C - Second Edition"
+  http://www.nr.com/
+*/
+
+var SVD = SVD || {};
+this.SVD = SVD;
+
+SVD.svdcmp = function(a, m, n, w, v){
+  var flag, i, its, j, jj, k, l, nm,
+      anorm = 0.0, c, f, g = 0.0, h, s, scale = 0.0, x, y, z, rv1 = [];
+      
+  //Householder reduction to bidiagonal form
+  for (i = 0; i < n; ++ i){
+    l = i + 1;
+    rv1[i] = scale * g;
+    g = s = scale = 0.0;
+    if (i < m){
+      for (k = i; k < m; ++ k){
+        scale += Math.abs( a[k][i] );
+      }
+      if (0.0 !== scale){
+        for (k = i; k < m; ++ k){
+          a[k][i] /= scale;
+          s += a[k][i] * a[k][i];
+        }
+        f = a[i][i];
+        g = -SVD.sign( Math.sqrt(s), f );
+        h = f * g - s;
+        a[i][i] = f - g;
+        for (j = l; j < n; ++ j){
+          for (s = 0.0, k = i; k < m; ++ k){
+            s += a[k][i] * a[k][j];
+          }
+          f = s / h;
+          for (k = i; k < m; ++ k){
+            a[k][j] += f * a[k][i];
+          }
+        }
+        for (k = i; k < m; ++ k){
+          a[k][i] *= scale;
+        }
+      }
+    }
+    w[i] = scale * g;
+    g = s = scale = 0.0;
+    if ( (i < m) && (i !== n - 1) ){
+      for (k = l; k < n; ++ k){
+        scale += Math.abs( a[i][k] );
+      }
+      if (0.0 !== scale){
+        for (k = l; k < n; ++ k){
+          a[i][k] /= scale;
+          s += a[i][k] * a[i][k];
+        }
+        f = a[i][l];
+        g = -SVD.sign( Math.sqrt(s), f );
+        h = f * g - s;
+        a[i][l] = f - g;
+        for (k = l; k < n; ++ k){
+          rv1[k] = a[i][k] / h;
+        }
+        for (j = l; j < m; ++ j){
+          for (s = 0.0, k = l; k < n; ++ k){
+            s += a[j][k] * a[i][k];
+          }
+          for (k = l; k < n; ++ k){
+            a[j][k] += s * rv1[k];
+          }
+        }
+        for (k = l; k < n; ++ k){
+          a[i][k] *= scale;
+        }
+      }
+    }
+    anorm = Math.max(anorm, ( Math.abs( w[i] ) + Math.abs( rv1[i] ) ) );
+  }
+
+  //Acumulation of right-hand transformation
+  for (i = n - 1; i >= 0; -- i){
+    if (i < n - 1){
+      if (0.0 !== g){
+        for (j = l; j < n; ++ j){
+          v[j][i] = ( a[i][j] / a[i][l] ) / g;
+        }
+        for (j = l; j < n; ++ j){
+          for (s = 0.0, k = l; k < n; ++ k){
+            s += a[i][k] * v[k][j];
+          }
+          for (k = l; k < n; ++ k){
+            v[k][j] += s * v[k][i];
+          }
+        }
+      }
+      for (j = l; j < n; ++ j){
+        v[i][j] = v[j][i] = 0.0;
+      }
+    }
+    v[i][i] = 1.0;
+    g = rv1[i];
+    l = i;
+  }
+
+  //Acumulation of left-hand transformation
+  for (i = Math.min(n, m) - 1; i >= 0; -- i){
+    l = i + 1;
+    g = w[i];
+    for (j = l; j < n; ++ j){
+      a[i][j] = 0.0;
+    }
+    if (0.0 !== g){
+      g = 1.0 / g;
+      for (j = l; j < n; ++ j){
+        for (s = 0.0, k = l; k < m; ++ k){
+          s += a[k][i] * a[k][j];
+        }
+        f = (s / a[i][i]) * g;
+        for (k = i; k < m; ++ k){
+          a[k][j] += f * a[k][i];
+        }
+      }
+      for (j = i; j < m; ++ j){
+        a[j][i] *= g;
+      }
+    }else{
+        for (j = i; j < m; ++ j){
+          a[j][i] = 0.0;
+        }
+    }
+    ++ a[i][i];
+  }
+
+  //Diagonalization of the bidiagonal form
+  for (k = n - 1; k >= 0; -- k){
+    for (its = 1; its <= 30; ++ its){
+      flag = true;
+      for (l = k; l >= 0; -- l){
+        nm = l - 1;
+        if ( Math.abs( rv1[l] ) + anorm === anorm ){
+          flag = false;
+          break;
+        }
+        if ( Math.abs( w[nm] ) + anorm === anorm ){
+          break;
+        }
+      }
+      if (flag){
+        c = 0.0;
+        s = 1.0;
+        for (i = l; i <= k; ++ i){
+          f = s * rv1[i];
+          if ( Math.abs(f) + anorm === anorm ){
+            break;
+          }
+          g = w[i];
+          h = SVD.pythag(f, g);
+          w[i] = h;
+          h = 1.0 / h;
+          c = g * h;
+          s = -f * h;
+          for (j = 1; j <= m; ++ j){
+            y = a[j][nm];
+            z = a[j][i];
+            a[j][nm] = y * c + z * s;
+            a[j][i] = z * c - y * s;
+          }
+        }
+      }
+
+      //Convergence
+      z = w[k];
+      if (l === k){
+        if (z < 0.0){
+          w[k] = -z;
+          for (j = 0; j < n; ++ j){
+            v[j][k] = -v[j][k];
+          }
+        }
+        break;
+      }
+
+      if (30 === its){
+        return false;
+      }
+
+      //Shift from bottom 2-by-2 minor
+      x = w[l];
+      nm = k - 1;
+      y = w[nm];
+      g = rv1[nm];
+      h = rv1[k];
+      f = ( (y - z) * (y + z) + (g - h) * (g + h) ) / (2.0 * h * y);
+      g = SVD.pythag( f, 1.0 );
+      f = ( (x - z) * (x + z) + h * ( (y / (f + SVD.sign(g, f) ) ) - h) ) / x;
+
+      //Next QR transformation
+      c = s = 1.0;
+      for (j = l; j <= nm; ++ j){
+        i = j + 1;
+        g = rv1[i];
+        y = w[i];
+        h = s * g;
+        g = c * g;
+        z = SVD.pythag(f, h);
+        rv1[j] = z;
+        c = f / z;
+        s = h / z;
+        f = x * c + g * s;
+        g = g * c - x * s;
+        h = y * s;
+        y *= c;
+        for (jj = 0; jj < n; ++ jj){
+          x = v[jj][j];
+          z = v[jj][i];
+          v[jj][j] = x * c + z * s;
+          v[jj][i] = z * c - x * s;
+        }
+        z = SVD.pythag(f, h);
+        w[j] = z;
+        if (0.0 !== z){
+          z = 1.0 / z;
+          c = f * z;
+          s = h * z;
+        }
+        f = c * g + s * y;
+        x = c * y - s * g;
+        for (jj = 0; jj < m; ++ jj){
+          y = a[jj][j];
+          z = a[jj][i];
+          a[jj][j] = y * c + z * s;
+          a[jj][i] = z * c - y * s;
+        }
+      }
+      rv1[l] = 0.0;
+      rv1[k] = f;
+      w[k] = x;
+    }
+  }
+
+  return true;
+};
+
+SVD.pythag = function(a, b){
+  var at = Math.abs(a), bt = Math.abs(b), ct;
+
+  if (at > bt){
+    ct = bt / at;
+    return at * Math.sqrt(1.0 + ct * ct);
+  }
+    
+  if (0.0 === bt){
+    return 0.0;
+  }
+
+  ct = at / bt;
+  return bt * Math.sqrt(1.0 + ct * ct);
+};
+
+SVD.sign = function(a, b){
+  return b >= 0.0? Math.abs(a): -Math.abs(a);
+};
+</script>
+<script>/*
+Copyright (c) 2012 Juan Mellado
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+*/
+
+/*
+References:
+- "Iterative Pose Estimation using Coplanar Feature Points"
+  Denis Oberkampf, Daniel F. DeMenthon, Larry S. Davis
+  http://www.cfar.umd.edu/~daniel/daniel_papersfordownload/CoplanarPts.pdf
+*/
+
+var POS = POS || {};
+this.POS = POS;
+
+var SVD = this.SVD || require('./svd').SVD;
+
+POS.Posit = function(modelSize, focalLength){
+  this.objectPoints = this.buildModel(modelSize);
+  this.focalLength = focalLength;
+
+  this.objectVectors = [];
+  this.objectNormal = [];
+  this.objectMatrix = [[],[],[]];
+  
+  this.init();
+};
+
+POS.Posit.prototype.buildModel = function(modelSize){
+  var half = modelSize / 2.0;
+  
+  return [
+    [-half,  half, 0.0],
+    [ half,  half, 0.0],
+    [ half, -half, 0.0],
+    [-half, -half, 0.0] ];
+};
+
+POS.Posit.prototype.init = function(){
+  var np = this.objectPoints.length,
+      vectors = [], n = [], len = 0.0, row = 2, i;
+  
+  for (i = 0; i < np; ++ i){
+    this.objectVectors[i] = [this.objectPoints[i][0] - this.objectPoints[0][0],
+                             this.objectPoints[i][1] - this.objectPoints[0][1],
+                             this.objectPoints[i][2] - this.objectPoints[0][2]];
+                             
+    vectors[i] = [this.objectVectors[i][0],
+                  this.objectVectors[i][1],
+                  this.objectVectors[i][2]];
+  }
+
+  while(0.0 === len){
+    n[0] = this.objectVectors[1][1] * this.objectVectors[row][2] -
+           this.objectVectors[1][2] * this.objectVectors[row][1];
+    n[1] = this.objectVectors[1][2] * this.objectVectors[row][0] -
+           this.objectVectors[1][0] * this.objectVectors[row][2];
+    n[2] = this.objectVectors[1][0] * this.objectVectors[row][1] -
+           this.objectVectors[1][1] * this.objectVectors[row][0];
+    
+    len = Math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    
+    ++ row;
+  }
+
+  for (i = 0; i < 3; ++ i){
+    this.objectNormal[i] = n[i] / len;
+  }
+
+  POS.pseudoInverse(vectors, np, this.objectMatrix);
+};
+
+POS.Posit.prototype.pose = function(imagePoints){
+  var posRotation1 = [[],[],[]], posRotation2 = [[],[],[]], posTranslation = [],
+      rotation1 = [[],[],[]], rotation2 = [[],[],[]], translation1 = [], translation2 = [],
+      error1, error2, valid1, valid2, i, j;
+
+  this.pos(imagePoints, posRotation1, posRotation2, posTranslation);
+
+  valid1 = this.isValid(posRotation1, posTranslation);
+  if (valid1){
+    error1 = this.iterate(imagePoints, posRotation1, posTranslation, rotation1, translation1);
+  }else{
+    error1 = {euclidean: -1.0, pixels: -1, maximum: -1.0};
+  }
+  
+  valid2 = this.isValid(posRotation2, posTranslation);
+  if (valid2){
+    error2 = this.iterate(imagePoints, posRotation2, posTranslation, rotation2, translation2);
+  }else{
+    error2 = {euclidean: -1.0, pixels: -1, maximum: -1.0};
+  }
+
+  for (i = 0; i < 3; ++ i){
+    for (j = 0; j < 3; ++ j){
+      if (valid1){
+        translation1[i] -= rotation1[i][j] * this.objectPoints[0][j];
+      }
+      if (valid2){
+        translation2[i] -= rotation2[i][j] * this.objectPoints[0][j];
+      }
+    }
+  }
+
+  return error1.euclidean < error2.euclidean?
+    new POS.Pose(error1.pixels, rotation1, translation1, error2.pixels, rotation2, translation2):
+    new POS.Pose(error2.pixels, rotation2, translation2, error1.pixels, rotation1, translation1);
+};
+
+POS.Posit.prototype.pos = function(imagePoints, rotation1, rotation2, translation){
+  var np = this.objectPoints.length, imageVectors = [],
+      i0 = [], j0 = [], ivec = [], jvec = [], row1 = [], row2 = [], row3 = [],
+      i0i0, j0j0, i0j0, delta, q, lambda, mu, scale, i, j;
+
+  for (i = 0; i < np; ++ i){
+    imageVectors[i] = [imagePoints[i].x - imagePoints[0].x,
+                       imagePoints[i].y - imagePoints[0].y];
+  }
+
+  //i0 and j0
+  for (i = 0; i < 3; ++ i){
+    i0[i] = 0.0;
+    j0[i] = 0.0;
+    for (j = 0; j < np; ++ j){
+      i0[i] += this.objectMatrix[i][j] * imageVectors[j][0];
+      j0[i] += this.objectMatrix[i][j] * imageVectors[j][1];
+    }
+  }
+
+  i0i0 = i0[0] * i0[0] + i0[1] * i0[1] + i0[2] * i0[2];
+  j0j0 = j0[0] * j0[0] + j0[1] * j0[1] + j0[2] * j0[2];
+  i0j0 = i0[0] * j0[0] + i0[1] * j0[1] + i0[2] * j0[2];
+
+  //Lambda and mu
+  delta = (j0j0 - i0i0) * (j0j0 - i0i0) + 4.0 * (i0j0 * i0j0);
+  
+  if (j0j0 - i0i0 >= 0.0){
+    q = (j0j0 - i0i0 + Math.sqrt(delta) ) / 2.0;
+  }else{
+    q = (j0j0 - i0i0 - Math.sqrt(delta) ) / 2.0;
+  }
+  
+  if (q >= 0.0){
+    lambda = Math.sqrt(q);
+    if (0.0 === lambda){
+      mu = 0.0;
+    }else{
+      mu = -i0j0 / lambda;
+    }
+  }else{
+    lambda = Math.sqrt( -(i0j0 * i0j0) / q);
+    if (0.0 === lambda){
+      mu = Math.sqrt(i0i0 - j0j0);
+    }else{
+      mu = -i0j0 / lambda;
+    }
+  }
+
+  //First rotation
+  for (i = 0; i < 3; ++ i){
+    ivec[i] = i0[i] + lambda * this.objectNormal[i];
+    jvec[i] = j0[i] + mu * this.objectNormal[i];
+  }
+  
+  scale = Math.sqrt(ivec[0] * ivec[0] + ivec[1] * ivec[1] + ivec[2] * ivec[2]);
+  
+  for (i = 0; i < 3; ++ i){
+    row1[i] = ivec[i] / scale;
+    row2[i] = jvec[i] / scale;
+  }
+  
+  row3[0] = row1[1] * row2[2] - row1[2] * row2[1];
+  row3[1] = row1[2] * row2[0] - row1[0] * row2[2];
+  row3[2] = row1[0] * row2[1] - row1[1] * row2[0];
+
+  for (i = 0; i < 3; ++ i){
+    rotation1[0][i] = row1[i];
+    rotation1[1][i] = row2[i];
+    rotation1[2][i] = row3[i];
+  }
+
+  //Second rotation
+  for (i = 0; i < 3; ++ i){
+    ivec[i] = i0[i] - lambda * this.objectNormal[i];
+    jvec[i] = j0[i] - mu * this.objectNormal[i];
+  }
+  
+  for (i = 0; i < 3; ++ i){
+    row1[i] = ivec[i] / scale;
+    row2[i] = jvec[i] / scale;
+  }
+  
+  row3[0] = row1[1] * row2[2] - row1[2] * row2[1];
+  row3[1] = row1[2] * row2[0] - row1[0] * row2[2];
+  row3[2] = row1[0] * row2[1] - row1[1] * row2[0];
+  
+  for (i = 0; i < 3; ++ i){
+    rotation2[0][i] = row1[i];
+    rotation2[1][i] = row2[i];
+    rotation2[2][i] = row3[i];
+  }
+
+  //Translation
+  translation[0] = imagePoints[0].x / scale;
+  translation[1] = imagePoints[0].y / scale;
+  translation[2] = this.focalLength / scale;
+};
+
+POS.Posit.prototype.isValid = function(rotation, translation){
+  var np = this.objectPoints.length, zmin = Infinity, i = 0, zi;
+
+  for (; i < np; ++ i){
+    zi = translation[2] +
+      (rotation[2][0] * this.objectVectors[i][0] +
+       rotation[2][1] * this.objectVectors[i][1] +
+       rotation[2][2] * this.objectVectors[i][2]);
+    if (zi < zmin){
+      zmin = zi;
+    }
+  }
+
+  return zmin >= 0.0;
+};
+
+POS.Posit.prototype.iterate = function(imagePoints, posRotation, posTranslation, rotation, translation){
+  var np = this.objectPoints.length,
+      oldSopImagePoints = [], sopImagePoints = [],
+      rotation1 = [[],[],[]], rotation2 = [[],[],[]],
+      translation1 = [], translation2 = [],
+      converged = false, iteration = 0,
+      oldImageDifference, imageDifference, factor,
+      error, error1, error2, delta, i, j;
+
+  for (i = 0; i < np; ++ i){
+    oldSopImagePoints[i] = {x: imagePoints[i].x,
+                            y: imagePoints[i].y};
+  }
+  
+  for (i = 0; i < 3; ++ i){
+    for (j = 0; j < 3; ++ j){
+      rotation[i][j] = posRotation[i][j];
+    }
+    translation[i] = posTranslation[i];
+  }
+
+  for (i = 0; i < np; ++ i){
+    factor = 0.0;
+    for (j = 0; j < 3; ++ j){
+      factor += this.objectVectors[i][j] * rotation[2][j] / translation[2];
+    }
+    sopImagePoints[i] = {x: (1.0 + factor) * imagePoints[i].x,
+                         y: (1.0 + factor) * imagePoints[i].y};
+  }
+
+  imageDifference = 0.0;
+  
+  for (i = 0; i < np; ++ i){
+    imageDifference += Math.abs(sopImagePoints[i].x - oldSopImagePoints[i].x);
+    imageDifference += Math.abs(sopImagePoints[i].y - oldSopImagePoints[i].y);
+  }
+
+  for (i = 0; i < 3; ++ i){
+    translation1[i] = translation[i] -
+      (rotation[i][0] * this.objectPoints[0][0] +
+       rotation[i][1] * this.objectPoints[0][1] +
+       rotation[i][2] * this.objectPoints[0][2]);
+  }
+  
+  error = error1 = this.error(imagePoints, rotation, translation1);
+
+  //Convergence
+  converged = (0.0 === error1.pixels) || (imageDifference < 0.01);
+  
+  while( iteration ++ < 100 && !converged ){
+  
+    for (i = 0; i < np; ++ i){
+      oldSopImagePoints[i].x = sopImagePoints[i].x;
+      oldSopImagePoints[i].y = sopImagePoints[i].y;
+    }
+
+    this.pos(sopImagePoints, rotation1, rotation2, translation);
+
+    for (i = 0; i < 3; ++ i){
+      translation1[i] = translation[i] -
+        (rotation1[i][0] * this.objectPoints[0][0] +
+         rotation1[i][1] * this.objectPoints[0][1] +
+         rotation1[i][2] * this.objectPoints[0][2]);
+        
+      translation2[i] = translation[i] -
+        (rotation2[i][0] * this.objectPoints[0][0] +
+         rotation2[i][1] * this.objectPoints[0][1] +
+         rotation2[i][2] * this.objectPoints[0][2]);
+    }
+
+    error1 = this.error(imagePoints, rotation1, translation1);
+    error2 = this.error(imagePoints, rotation2, translation2);
+
+    if ( (error1.euclidean >= 0.0) && (error2.euclidean >= 0.0) ){
+      if (error2.euclidean < error1.euclidean){
+        error = error2;
+        for (i = 0; i < 3; ++ i){
+          for (j = 0; j < 3; ++ j){
+            rotation[i][j] = rotation2[i][j];
+          }
+        }
+      }else{
+        error = error1;
+        for (i = 0; i < 3; ++ i){
+          for (j = 0; j < 3; ++ j){
+            rotation[i][j] = rotation1[i][j];
+          }
+        }
+      }
+    }
+
+    if ( (error1.euclidean < 0.0) && (error2.euclidean >= 0.0) ){
+      error = error2;
+      for (i = 0; i < 3; ++ i){
+        for (j = 0; j < 3; ++ j){
+          rotation[i][j] = rotation2[i][j];
+        }
+      }
+    }
+    
+    if ( (error2.euclidean < 0.0) && (error1.euclidean >= 0.0) ){
+      error = error1;
+      for (i = 0; i < 3; ++ i){
+        for (j = 0; j < 3; ++ j){
+          rotation[i][j] = rotation1[i][j];
+        }
+      }
+    }
+
+    for (i = 0; i < np; ++ i){
+      factor = 0.0;
+      for (j = 0; j < 3; ++ j){
+        factor += this.objectVectors[i][j] * rotation[2][j] / translation[2];
+      }
+      sopImagePoints[i].x = (1.0 + factor) * imagePoints[i].x;
+      sopImagePoints[i].y = (1.0 + factor) * imagePoints[i].y;
+    }
+
+    oldImageDifference = imageDifference;
+    imageDifference = 0.0;
+    
+    for (i = 0; i < np; ++ i){
+      imageDifference += Math.abs(sopImagePoints[i].x - oldSopImagePoints[i].x);
+      imageDifference += Math.abs(sopImagePoints[i].y - oldSopImagePoints[i].y);
+    }
+
+    delta = Math.abs(imageDifference - oldImageDifference);
+
+    converged = (0.0 === error.pixels) || (delta < 0.01);
+  }
+  
+  return error;
+};
+
+POS.Posit.prototype.error = function(imagePoints, rotation, translation){
+  var np = this.objectPoints.length,
+      move = [], projection = [], errorvec = [],
+      euclidean = 0.0, pixels = 0.0, maximum = 0.0,
+      i, j, k;
+
+  if ( !this.isValid(rotation, translation) ){
+    return {euclidean: -1.0, pixels: -1, maximum: -1.0};
+  }
+  
+  for (i = 0; i < np; ++ i){
+    move[i] = [];
+    for (j = 0; j < 3; ++ j){
+      move[i][j] = translation[j];
+    }
+  }
+  
+  for (i = 0; i < np; ++ i){
+    for (j = 0; j < 3; ++ j){
+      for (k = 0; k < 3; ++ k){
+        move[i][j] += rotation[j][k] * this.objectPoints[i][k];
+      }
+    }
+  }
+
+  for (i = 0; i < np; ++ i){
+    projection[i] = [];
+    for (j = 0; j < 2; ++ j){
+      projection[i][j] = this.focalLength * move[i][j] / move[i][2];
+    }
+  }
+  
+  for (i = 0; i < np; ++ i){
+    errorvec[i] = [projection[i][0] - imagePoints[i].x,
+                   projection[i][1] - imagePoints[i].y];
+  }
+
+  for (i = 0; i < np; ++ i){
+    euclidean += Math.sqrt(errorvec[i][0] * errorvec[i][0] +
+                           errorvec[i][1] * errorvec[i][1]);
+                       
+    pixels += Math.abs( Math.round(projection[i][0]) - Math.round(imagePoints[i].x) ) +
+              Math.abs( Math.round(projection[i][1]) - Math.round(imagePoints[i].y) );
+              
+    if (Math.abs(errorvec[i][0]) > maximum){
+      maximum = Math.abs(errorvec[i][0]);
+    }
+    if (Math.abs(errorvec[i][1]) > maximum){
+      maximum = Math.abs(errorvec[i][1]);
+    }
+  }
+
+  return {euclidean: euclidean / np, pixels: pixels, maximum: maximum};
+};
+
+POS.pseudoInverse = function(a, n, b){
+  var w = [], v = [[],[],[]], s = [[],[],[]],
+      wmax = 0.0, cn = 0,
+      i, j, k;
+
+  SVD.svdcmp(a, n, 3, w, v);
+
+  for (i = 0; i < 3; ++ i){
+    if (w[i] > wmax){
+      wmax = w[i];
+    }
+  }
+
+  wmax *= 0.01;
+
+  for (i = 0; i < 3; ++ i){
+    if (w[i] < wmax){
+      w[i] = 0.0;
+    }
+  }
+
+  for (j = 0; j < 3; ++ j){
+    if (0.0 === w[j]){
+      ++ cn;
+      for (k = j; k < 2; ++ k){
+        for (i = 0; i < n; ++ i){
+          a[i][k] = a[i][k + 1];
+        }
+        for (i = 0; i < 3; ++ i){
+          v[i][k] = v[i][k + 1];
+        }
+      }
+    }
+  }
+
+  for (j = 0; j < 2; ++ j){
+    if (0.0 === w[j]){
+      w[j] = w[j + 1];
+    }
+  }
+
+  for (i = 0; i < 3; ++ i){
+    for (j = 0; j < 3 - cn; ++ j){
+      s[i][j] = v[i][j] / w[j];
+    }
+  }
+  
+  for (i = 0; i < 3; ++ i){
+    for (j = 0; j < n; ++ j){
+      b[i][j] = 0.0;
+      for (k = 0; k < 3 - cn; ++ k){
+        b[i][j] += s[i][k] * a[j][k];
+      }
+    }
+  }
+};
+
+POS.Pose = function(error1, rotation1, translation1, error2, rotation2, translation2){
+  this.bestError = error1;
+  this.bestRotation = rotation1;
+  this.bestTranslation = translation1;
+  this.alternativeError = error2;
+  this.alternativeRotation = rotation2;
+  this.alternativeTranslation = translation2;
+};
+</script>
+
+<!-- ==================== App (v9: Route + manuelle Ansagen + aktive Korrektur) ==================== -->
+<!--
+  v9 = Struktur von v8 + Wissen von v7 + aktive Nutzerführung:
+  - Fester Routenablauf, Zustandsmodell, Wrong-Tag-Erkennung        (aus v8)
+  - Manuelle, ortskundige Ansagen für JEDEN Abschnitt               (aus v7)
+  - Distanz-Countdown beim Annähern an eine Markierung              (aus v7, verallgemeinert)
+  - Wiederholte Suchhinweise statt nur einem pro Schritt            (neu)
+  - "Vorbeigelaufen"-Warnung anhand erwarteter Gehzeit              (neu)
+  - Resynchronisation: bekannter Routen-Tag vor/zurück wird
+    akzeptiert und die Route dort fortgesetzt                       (neu)
+  - Tag 5 (Tischtennis) ist wieder erreichbares Ziel                (aus v7)
+-->
+<script>
+"use strict";
+(function(){
+  // ---- Konfiguration ----
+  var MARKER_SIZE_M = 0.12;
+  var PROC_WIDTH    = 640;
+  var PROC_MS       = 140;
+  var DEBUG_SHOW_TAG_ID = true;
+  var CONFIRM_FRAMES    = 2;
+
+  var SETTINGS = {
+    announceDoors: true,
+    maxDoorLandmarks: 2,
+    scanHintAfterMs: 8000,            // erste Ruhezeit ohne Marke -> Suchhinweis
+    scanHintAfterFirstStepMs: 18000,  // nach der langen ersten Anweisung mehr Ruhe
+    scanHintRepeatMs: 14000,          // NEU: Suchhinweis WIEDERHOLT sich
+    candMemoryMs: 700,
+    visualMemoryMs: 700,
+    wrongTagCooldownMs: 8000,
+    aimCooldownMs: 1500,
+    doorMaxDistToRouteM: 2.0,
+    approachM: 3.0,                   // NEU: Marke weiter weg -> erst hinführen
+    approachDoneM: 1.8,               // NEU: ab hier gilt die Marke als erreicht
+    approachLostDoneM: 2.6,            // Marke verloren nur nahe genug als "erreicht" werten
+    approachLostMs: 1600,             // Marke beim Annähern verloren -> prüfen/neu ausrichten
+    walkSpeedMps: 0.5,                // NEU: angenommene Gehgeschwindigkeit
+    passedGraceMs: 20000              // NEU: Toleranz, bevor "vorbeigelaufen" kommt
+  };
+
+  var SAFETY_SPEECH = "Der Wegweiser unterstützt die Orientierung anhand von Markierungen, " +
+    "erkennt aber keine Hindernisse. Bitte verwenden Sie weiterhin Ihren Langstock " +
+    "oder Ihre gewohnte Mobilitätshilfe.";
+
+  // ==================== FLOOR_GEOMETRY ====================
+  // 1:1-Import aus "markers (2).json" — EINZIGE Geometriequelle, NICHT von Hand ändern.
+  var FLOOR_GEOMETRY = {
+    scale_m_per_px: 0.04967096009845022,
+    image: { width: 2480, height: 1753 },
+    origin: "bottom-left",
+    markers: [
+      { tag_id:1,  label:"Eingang",     type:"entrance", x_m:103.733, y_m:46.217, dir_deg:180   },
+      { tag_id:3,  label:"Flex",        type:"corridor", x_m:94.691,  y_m:42.808, dir_deg:0     },
+      { tag_id:2,  label:"Patrik",      type:"corridor", x_m:103.240, y_m:41.290, dir_deg:94.6  },
+      { tag_id:4,  label:"Martin",      type:"corridor", x_m:81.431,  y_m:42.682, dir_deg:354.8 },
+      { tag_id:5,  label:"Tischtennis", type:"corridor", x_m:76.235,  y_m:52.805, dir_deg:264.1 },
+      { tag_id:6,  label:"Korridor",    type:"corridor", x_m:89.966,  y_m:43.100, dir_deg:337.2 },
+      { tag_id:8,  label:"Ecke",        type:"corridor", x_m:68.447,  y_m:43.400, dir_deg:335.6 },
+      { tag_id:7,  label:"Leonie",      type:"office",   x_m:74.273,  y_m:40.961, dir_deg:2.9   },
+      { tag_id:9,  label:"Essbereich",  type:"office",   x_m:78.211,  y_m:37.795, dir_deg:91.4  },
+      { tag_id:10, label:"Drucker",     type:"office",   x_m:64.824,  y_m:41.103, dir_deg:10.8  },
+      { tag_id:11, label:"end",         type:"office",   x_m:55.470,  y_m:43.375, dir_deg:334   }
+    ],
+    doors: [
+      { label:"Eingang Patrik", type:"door", x_m:103.823, y_m:41.799, width_m:0.710, opening_deg:270.5, dir_deg:0.5   },
+      { label:"Eingang",        type:"door", x_m:101.840, y_m:46.057, width_m:0.738, opening_deg:270.8, dir_deg:0.8   },
+      { label:"Tür Frex",       type:"door", x_m:95.944,  y_m:41.284, width_m:0.898, opening_deg:0.2,   dir_deg:270.2 },
+      { label:"Tür 1",          type:"door", x_m:92.500,  y_m:41.248, width_m:0.927, opening_deg:0,     dir_deg:270   },
+      { label:"Tür 2",          type:"door", x_m:89.658,  y_m:41.240, width_m:0.761, opening_deg:0,     dir_deg:270   },
+      { label:"Eingang Martin", type:"door", x_m:81.348,  y_m:40.144, width_m:0.757, opening_deg:89.1,  dir_deg:359.1 },
+      { label:"Küchentür",      type:"door", x_m:74.557,  y_m:51.549, width_m:0.643, opening_deg:89.7,  dir_deg:179.7 },
+      { label:"Tür Leonie",     type:"door", x_m:74.203,  y_m:39.844, width_m:0.802, opening_deg:90.5,  dir_deg:180.5 },
+      { label:"Tür 3",          type:"door", x_m:63.275,  y_m:41.069, width_m:0.868, opening_deg:177.7, dir_deg:null  },
+      { label:"Tür 4",          type:"door", x_m:59.814,  y_m:41.029, width_m:0.855, opening_deg:0,     dir_deg:null  },
+      { label:"Tür end",        type:"door", x_m:55.156,  y_m:41.418, width_m:0.835, opening_deg:90.7,  dir_deg:180.7 }
+    ]
+  };
+
+  // ==================== ROUTEN ====================
+  var ROUTES = {
+    11: { name: "Ende des Korridors", tagIds: [1, 2, 3, 6, 4, 7, 8, 10, 11] },
+    5:  { name: "Tischtennis",        tagIds: [1, 2, 3, 6, 4, 5] }
+  };
+
+  // ==================== MANUELLE ABSCHNITTS-ANSAGEN (aus v7-Wissen) ====================
+  // Schlüssel "from->to". Diese Texte sind vor Ort verifiziertes Wissen und haben
+  // IMMER Vorrang vor der automatischen Geometrie-Ansage. Die Automatik bleibt
+  // nur Fallback für nicht abgedeckte Abschnitte.
+  var SEGMENT_OVERRIDES = {
+    "1->2": { direction:"right", instruction:
+      "Tag 1 am Eingang erkannt. Gehen Sie ungefähr zwei Meter geradeaus. " +
+      "Links befindet sich die Küche, rechts befinden sich die Büros. " +
+      "Biegen Sie danach rechts ab. Dort finden Sie die nächste Markierung, Tag 2 bei Patrik." },
+    "2->3": { direction:"right", instruction:
+      "Sie sind bei Patrik. Biegen Sie rechts ab. Die Tür zu Flex befindet sich links, " +
+      "etwa zwei Meter entfernt. Folgen Sie dem Korridor ungefähr neun Meter geradeaus " +
+      "und halten Sie sich an der rechten Wand. Suchen Sie Tag 3 bei Flex." },
+    "3->6": { direction:"straight", instruction:
+      "Sie sind am Eingang Flex. Gehen Sie ungefähr fünf Meter geradeaus. " +
+      "Auf der linken Seite folgen zwei Türen zum Büro Alevtyna. " +
+      "Suchen Sie Tag 6 im Korridor." },
+    "6->4": { direction:"straight", instruction:
+      "Sie befinden sich im Korridor. Gehen Sie ungefähr neun Meter geradeaus " +
+      "und halten Sie sich an der rechten Wand. Sie passieren zwei Türen auf der linken Seite. " +
+      "Suchen Sie Tag 4 bei Martin." },
+    "4->7": { direction:"straight", instruction:
+      "Sie sind bei Martin. Gehen Sie ungefähr sieben Meter geradeaus. " +
+      "Die Tür zu Leonie befindet sich links, kurz vor der nächsten Markierung. " +
+      "Suchen Sie Tag 7 bei Leonie." },
+    "7->8": { direction:"straight", instruction:
+      "Sie sind bei Leonie. Gehen Sie ungefähr sechs Meter geradeaus bis zur Ecke. " +
+      "Suchen Sie Tag 8 an der Ecke." },
+    "8->10": { direction:"left", instruction:
+      "Sie haben die Ecke erreicht. Biegen Sie links ab und gehen Sie ungefähr vier Meter. " +
+      "Suchen Sie Tag 10 beim Drucker." },
+    "10->11": { direction:"straight", instruction:
+      "Sie sind beim Drucker. Gehen Sie ungefähr zehn Meter geradeaus " +
+      "und halten Sie sich an der linken Wand. Sie passieren zwei Türen auf der linken Seite. " +
+      "Die Tür am Ende links ist das Ziel. Suchen Sie Tag 11 am Ende des Korridors." },
+    "4->5": { direction:"right", instruction:
+      "Sie sind bei Martin. Wenden Sie sich nach rechts und gehen Sie ungefähr elf Meter. " +
+      "Die Küchentür befindet sich auf der linken Seite. Suchen Sie Tag 5 bei Tischtennis." }
+  };
+
+  // Ankunftsansagen (aus v7: reachedSpeech)
+  var ARRIVAL_OVERRIDES = {
+    11: "Ziel erreicht. Sie haben das Ende des Korridors erreicht. Die Tür befindet sich links.",
+    5:  "Ziel erreicht. Sie sind bei Tischtennis. Die Küchentür befindet sich links."
+  };
+
+  // Ortsansagen für Tags AUSSERHALB der Route (aus v7: locationSpeech) —
+  // statt nur "gehört nicht zum Weg" sagt v9, WO der Nutzer ist und wie zurück.
+  var OFF_ROUTE_HINTS = {
+    5:  "Sie sind bei Tischtennis, in der Nähe der Küche.",
+    9:  "Sie sind beim Essbereich."
+  };
+
+  // Anzeigenamen (nur Sprache/UI)
+  var DISPLAY_NAME = { 11: "Ende des Korridors" };
+
+  // ---- Geometrie-Hilfsfunktionen (unverändert aus v8) ----
+  function normDeg(a){ return ((a % 360) + 360) % 360; }
+  function norm180(a){ return ((a + 180) % 360 + 360) % 360 - 180; }
+
+  var MARKERS = {};
+  FLOOR_GEOMETRY.markers.forEach(function(m){ MARKERS[m.tag_id] = m; });
+  var DOORS = FLOOR_GEOMETRY.doors;
+
+  function markerName(id){
+    if(DISPLAY_NAME[id]) return DISPLAY_NAME[id];
+    return MARKERS[id] ? MARKERS[id].label : ("Tag " + id);
+  }
+  function doorRoomName(d){
+    var mm = /^Tür (.+)$/.exec(d.label || "");
+    if(!mm) return null;
+    if(/^\d+$/.test(mm[1])) return null;
+    if(mm[1] === "end") return null;
+    if(mm[1] === "Frex") return "Flex";
+    return mm[1];
+  }
+  function metersDE(d){
+    var m = Math.max(1, Math.round(d));
+    var words = { 1:"einen", 2:"zwei", 3:"drei", 4:"vier", 5:"fünf", 6:"sechs",
+                  7:"sieben", 8:"acht", 9:"neun", 10:"zehn", 11:"elf", 12:"zwölf" };
+    return (words[m] || m) + " Meter";
+  }
+  function bearingDeg(from, to){
+    return Math.atan2(to.y_m - from.y_m, to.x_m - from.x_m) * 180 / Math.PI;
+  }
+  function classifyTurn(rel){
+    var a = Math.abs(rel);
+    if(a < 25)   return "straight";
+    if(a <= 135) return rel > 0 ? "left" : "right";
+    return "turn_back";
+  }
+  var TURN_DE = { straight:"geradeaus", left:"links", right:"rechts", turn_back:"umkehren" };
+
+  function doorsAlongSegment(from, to, doors){
+    var vx = to.x_m - from.x_m, vy = to.y_m - from.y_m;
+    var len2 = vx*vx + vy*vy;
+    if(len2 === 0) return [];
+    var out = [];
+    doors.forEach(function(d){
+      var wx = d.x_m - from.x_m, wy = d.y_m - from.y_m;
+      var t = (wx*vx + wy*vy) / len2;
+      if(t <= 0.02 || t >= 0.98) return;
+      var px = from.x_m + t*vx, py = from.y_m + t*vy;
+      var dist = Math.hypot(d.x_m - px, d.y_m - py);
+      if(dist > SETTINGS.doorMaxDistToRouteM) return;
+      var cross = vx*wy - vy*wx;
+      var side = (dist < 0.3) ? "ahead" : (cross > 0 ? "left" : "right");
+      out.push({ door:d, label:d.label, roomName:doorRoomName(d),
+                 side:side, distToRouteM:dist, t:t });
+    });
+    out.sort(function(a,b){ return a.t - b.t; });
+    return out;
+  }
+  var SIDE_DE = { left:"links", right:"rechts", ahead:"voraus" };
+
+  function buildDoorHint(nearbyDoors){
+    if(!SETTINGS.announceDoors || !nearbyDoors.length) return null;
+    var ds = nearbyDoors.slice(0, SETTINGS.maxDoorLandmarks);
+    if(ds.length >= 2 && ds.every(function(i){ return i.side === ds[0].side; })){
+      var s = ds[0].side;
+      var n = ds.length === 2 ? "zwei" : (ds.length === 3 ? "drei" : ds.length);
+      if(s === "left")  return "Auf der linken Seite befinden sich " + n + " Türen.";
+      if(s === "right") return "Auf der rechten Seite befinden sich " + n + " Türen.";
+      return "Vor Ihnen befinden sich " + n + " Türen.";
+    }
+    var best = ds.slice().sort(function(a,b){ return a.distToRouteM - b.distToRouteM; })[0];
+    var name = best.roomName ? ("Die Tür zu " + best.roomName) : "Eine Tür";
+    return name + " befindet sich " + SIDE_DE[best.side] + ".";
+  }
+
+  // Automatische Ansage — nur noch FALLBACK für Abschnitte ohne Override.
+  function buildInstruction(from, to, toId, distanceM, direction, nearbyDoors){
+    var p = "Sie befinden sich bei " + markerName(from.tag_id) + ". ";
+    var dist = metersDE(distanceM);
+    if(direction === "straight"){
+      p += "Gehen Sie ungefähr " + dist + " geradeaus";
+    } else if(direction === "left" || direction === "right"){
+      p += "Biegen Sie " + TURN_DE[direction] + " ab und gehen Sie ungefähr " + dist;
+    } else {
+      p += "Kehren Sie um und gehen Sie ungefähr " + dist;
+    }
+    p += " und suchen Sie Tag " + toId + " bei " + markerName(toId) + ".";
+    var hint = buildDoorHint(nearbyDoors);
+    if(hint) p += " " + hint;
+    return p;
+  }
+
+  // ==================== SCHRITT-GENERIERUNG ====================
+  // Geometrie (Distanz, Kurs, Türen) automatisch; die gesprochene Anweisung
+  // kommt bevorzugt aus SEGMENT_OVERRIDES / ARRIVAL_OVERRIDES.
+  function generateRouteSteps(routeTagIds, markers, doors){
+    var steps = [];
+    var prevBearing = null;
+    for(var i = 0; i < routeTagIds.length; i++){
+      var fromId = routeTagIds[i];
+      var from = markers[fromId];
+
+      if(i === routeTagIds.length - 1){
+        var arr = ARRIVAL_OVERRIDES[fromId];
+        steps.push({
+          fromTagId: fromId, toTagId: null,
+          fromLabel: from.label, toLabel: null,
+          distanceM: null, bearingDeg: null,
+          direction: null, autoDirection: null, directionReliable: true,
+          nearbyDoors: [], isArrival: true,
+          instruction: arr || ("Ziel erreicht. Sie befinden sich bei " + markerName(fromId) + "."),
+          source: arr ? "OVERRIDE" : "AUTO"
+        });
+        break;
+      }
+
+      var toId = routeTagIds[i+1];
+      var to = markers[toId];
+      var ov = SEGMENT_OVERRIDES[fromId + "->" + toId] || {};
+      var distanceM = Math.hypot(to.x_m - from.x_m, to.y_m - from.y_m);
+      var brg = bearingDeg(from, to);
+
+      var autoDirection, reliable = true;
+      if(prevBearing == null){
+        var heading = norm180((from.dir_deg != null ? from.dir_deg : 0) - 180);
+        autoDirection = classifyTurn(norm180(brg - heading));
+        reliable = false;
+      } else {
+        autoDirection = classifyTurn(norm180(brg - prevBearing));
+      }
+      prevBearing = brg;
+
+      var nearbyDoors = doorsAlongSegment(from, to, doors)
+                          .slice(0, SETTINGS.maxDoorLandmarks);
+      var direction = ov.direction || autoDirection;
+      var autoInstruction = buildInstruction(from, to, toId, distanceM, direction, nearbyDoors);
+
+      steps.push({
+        fromTagId: fromId, toTagId: toId,
+        fromLabel: from.label, toLabel: to.label,
+        distanceM: distanceM, bearingDeg: brg,
+        direction: direction, autoDirection: autoDirection,
+        directionReliable: reliable,
+        nearbyDoors: nearbyDoors, isArrival: false,
+        instruction: ov.instruction || autoInstruction,
+        source: ov.instruction ? "OVERRIDE" : "AUTO"
+      });
+    }
+    return steps;
+  }
+
+  // ==================== VALIDIERUNG ====================
+  function validateRouteData(routeTagIds, destinationId){
+    var ok = true;
+    function fail(msg){ console.error("[validateRouteData] " + msg); ok = false; }
+
+    routeTagIds.forEach(function(id){
+      var m = MARKERS[id];
+      if(!m) return fail("Tag " + id + " existiert nicht in FLOOR_GEOMETRY.");
+      if(!isFinite(m.x_m) || !isFinite(m.y_m))
+        fail("Tag " + id + ": Koordinaten nicht endlich.");
+    });
+    for(var i = 1; i < routeTagIds.length; i++){
+      if(routeTagIds[i] === routeTagIds[i-1])
+        fail("Route enthält benachbarte Duplikate: Tag " + routeTagIds[i]);
+      var a = MARKERS[routeTagIds[i-1]], b = MARKERS[routeTagIds[i]];
+      if(a && b && Math.hypot(b.x_m - a.x_m, b.y_m - a.y_m) === 0)
+        fail("Abstand zwischen Tag " + routeTagIds[i-1] + " und Tag " + routeTagIds[i] + " ist 0.");
+      // WARNUNG statt Fehler: Abschnitt ohne manuelle Ansage
+      if(!SEGMENT_OVERRIDES[routeTagIds[i-1] + "->" + routeTagIds[i]])
+        console.warn("[validateRouteData] Abschnitt " + routeTagIds[i-1] + "->" + routeTagIds[i] +
+                     " hat KEINE manuelle Ansage — Automatik-Fallback aktiv.");
+    }
+    if(routeTagIds[routeTagIds.length - 1] !== destinationId)
+      fail("Letzter Routen-Tag (" + routeTagIds[routeTagIds.length-1] +
+           ") ist nicht das Ziel (" + destinationId + ").");
+
+    var steps = generateRouteSteps(routeTagIds, MARKERS, DOORS);
+    console.table(steps.map(function(s){
+      return {
+        fromTagId: s.fromTagId,
+        toTagId: s.toTagId,
+        distanceM: s.distanceM != null ? +s.distanceM.toFixed(2) : null,
+        direction: s.direction + (s.directionReliable ? "" : " (unsicher)"),
+        nearbyDoors: s.nearbyDoors.map(function(d){ return d.label + ":" + d.side; }).join(", "),
+        source: s.source
+      };
+    }));
+    return ok;
+  }
+
+  // ==================== ZUSTANDSMODELL ====================
+  var NavState = {
+    IDLE: "IDLE",
+    SEARCHING_START_TAG: "SEARCHING_START_TAG",
+    TAG_CANDIDATE: "TAG_CANDIDATE",
+    TAG_CONFIRMED: "TAG_CONFIRMED",
+    APPROACHING_TAG: "APPROACHING_TAG",       // NEU: Marke gesehen, Nutzer geht hin
+    INSTRUCTION_GIVEN: "INSTRUCTION_GIVEN",
+    SEARCHING_NEXT_TAG: "SEARCHING_NEXT_TAG",
+    WRONG_TAG: "WRONG_TAG",
+    DESTINATION_REACHED: "DESTINATION_REACHED"
+  };
+
+  var navState = NavState.IDLE;
+  var activeRoute = null;
+  var routeSteps = [];
+  var routeIndex = -1;
+  var currentTagId = null;
+  var expectedNextTagId = null;
+  var lastConfirmedTagId = null;
+  var destinationId = null;
+  var navigationActive = false;
+  var destinationReached = false;
+
+  var lastRouteInstruction = "";
+  var expectedLastSeenAt = 0;
+  var searchStartedAt = 0;
+  var scanHintCount = 0;           // NEU: zählt Suchhinweise (wiederholen sich)
+  var lastScanHintAt = 0;
+  var passedHintGiven = false;     // NEU: "vorbeigelaufen" einmal pro Schritt
+  var approach2mSaid = false;      // NEU: "noch zwei Meter" einmal pro Annäherung
+  var approachLostWarned = false;
+  var currentScanDelayMs = 8000;
+  var candLastSeenAt = 0;
+  var lastExpectedVis = null;
+  var lastWrongTagAt = 0;
+  var wrongCandId = null, wrongCandCount = 0;
+  var backWarnGiven = false;
+  var candId = null, candCount = 0;
+  var lastAimZone = null, lastAimAt = 0;
+
+  function setNavState(s){
+    navState = s;
+    uiState.textContent = s;
+  }
+
+  // ---- Elemente ----
+  var video   = document.getElementById("cam");
+  var canvas  = document.getElementById("view");
+  var ctx     = canvas.getContext("2d", { willReadFrequently: true });
+  var roomEl  = document.getElementById("room");
+  var metaEl  = document.getElementById("meta");
+  var liveEl  = document.getElementById("live");
+  var gate    = document.getElementById("gate");
+  var errBox  = document.getElementById("err");
+  var errMsg  = document.getElementById("errMsg");
+  var startBtn= document.getElementById("startBtn");
+  var retryBtn= document.getElementById("retryBtn");
+  var repeatBtn = document.getElementById("repeatBtn");
+  var whereBtn  = document.getElementById("whereBtn");
+  var flipBtn   = document.getElementById("flipBtn");
+  var muteBtn   = document.getElementById("muteBtn");
+  var navStartBtn = document.getElementById("navStartBtn");
+  var navEndBtn   = document.getElementById("navEndBtn");
+  var destSel = document.getElementById("destSel");
+  var uiDest  = document.getElementById("uiDest");
+  var uiCur   = document.getElementById("uiCur");
+  var uiNext  = document.getElementById("uiNext");
+  var uiDist  = document.getElementById("uiDist");
+  var uiState = document.getElementById("navState");
+  var uiInstr = document.getElementById("uiInstr");
+  var uiSource= document.getElementById("stepSource");
+
+  // ---- Laufzeit (Kamera/Erkennung) ----
+  var detector, positCache = {}, stream = null;
+  function positFor(sizeM){
+    var key = String(sizeM);
+    if(!positCache[key]) positCache[key] = new POS.Posit(sizeM, PROC_WIDTH);
+    return positCache[key];
+  }
+  var facing = "environment";
+  var soundOn = true;
+  var W = PROC_WIDTH, H = 480;
+  var running = false;
+  var germanVoice = null;
+  var emaDist = null;
+  var safetyGiven = false;
+
+  // ---- Sprache ----
+  function pickVoice(){
+    if(!("speechSynthesis" in window)) return;
+    var vs = speechSynthesis.getVoices() || [];
+    germanVoice = vs.find(function(v){ return /de(-|_|$)/i.test(v.lang); })
+              || vs.find(function(v){ return /deutsch|german/i.test(v.name); })
+              || null;
+  }
+  if("speechSynthesis" in window){
+    pickVoice();
+    speechSynthesis.onvoiceschanged = pickVoice;
+  }
+  function buzz(ms){ if(navigator.vibrate){ try{ navigator.vibrate(ms); }catch(e){} } }
+
+  function say(text, opts){
+    opts = opts || {};
+    liveEl.textContent = ""; liveEl.textContent = text;
+    if(!soundOn || !("speechSynthesis" in window)) return true;
+    if(!opts.interrupt && (speechSynthesis.speaking || speechSynthesis.pending)) return false;
+    try{
+      if(opts.interrupt) speechSynthesis.cancel();
+      var u = new SpeechSynthesisUtterance(text);
+      u.lang = "de-DE"; if(germanVoice) u.voice = germanVoice;
+      u.rate = opts.slow ? 0.85 : 1.0; u.pitch = 1.0;
+      speechSynthesis.speak(u);
+      buzz(50);
+    }catch(e){}
+    return true;
+  }
+  function speaking(){
+    return ("speechSynthesis" in window) && (speechSynthesis.speaking || speechSynthesis.pending);
+  }
+
+  // ---- Anzeige ----
+  function showRoom(label, sub, distM){
+    roomEl.textContent = label;
+    roomEl.classList.remove("empty");
+    var m = sub || "";
+    if(distM != null) m += (m ? " · " : "") + "≈ " + Math.max(0, Math.round(distM)) + " m";
+    metaEl.textContent = m;
+    metaEl.classList.toggle("empty", !m);
+  }
+  function showIdle(txt){
+    roomEl.textContent = txt || "Keine Markierung";
+    roomEl.classList.add("empty");
+    metaEl.textContent = "";
+    metaEl.classList.add("empty");
+  }
+  function updatePanel(visDist){
+    uiDest.textContent = destinationId != null ? (markerName(destinationId) + " (Tag " + destinationId + ")") : "–";
+    uiCur.textContent  = currentTagId != null ? ("Tag " + currentTagId + " · " + markerName(currentTagId)) : "–";
+    uiNext.textContent = expectedNextTagId != null ? ("Tag " + expectedNextTagId + " · " + markerName(expectedNextTagId)) : "–";
+    uiDist.textContent = visDist != null ? ("≈ " + visDist.toFixed(1) + " m") : "–";
+    var step = (routeIndex >= 0 && routeSteps[routeIndex]) ? routeSteps[routeIndex] : null;
+    uiInstr.textContent = step ? step.instruction : (lastRouteInstruction || "–");
+    uiSource.textContent = step ? step.source : "–";
+    uiSource.className = step ? step.source.toLowerCase() : "";
+  }
+
+  // ---- Entfernung über POSIT ----
+  function distanceMeters(corners, sizeM){
+    try{
+      var posit = positFor(sizeM || MARKER_SIZE_M);
+      var pts = corners.map(function(c){ return { x: c.x - W/2, y: H/2 - c.y }; });
+      var pose = posit.pose(pts);
+      var t = pose.bestTranslation;
+      return Math.sqrt(t[0]*t[0] + t[1]*t[1] + t[2]*t[2]);
+    }catch(e){ return null; }
+  }
+
+  function drawMarker(corners, color, faint){
+    ctx.lineWidth = faint ? 2 : Math.max(3, W/160);
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x, corners[0].y);
+    for(var i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  // ==================== NAVIGATION ====================
+  function resetSearchTimers(){
+    searchStartedAt = performance.now();
+    expectedLastSeenAt = 0;
+    scanHintCount = 0;
+    lastScanHintAt = 0;
+    passedHintGiven = false;
+    approach2mSaid = false;
+    approachLostWarned = false;
+    candLastSeenAt = 0;
+    lastExpectedVis = null;
+    wrongCandId = null; wrongCandCount = 0;
+    backWarnGiven = false;
+    candId = null; candCount = 0;
+    lastAimZone = null; lastAimAt = 0;
+  }
+
+  function startNavigation(){
+    var destId = destSel.value ? parseInt(destSel.value, 10) : null;
+    if(destId == null || !ROUTES[destId]){
+      say("Bitte wählen Sie zuerst ein Ziel.", {interrupt:true});
+      return;
+    }
+    destinationId = destId;
+    activeRoute = ROUTES[destId];
+    validateRouteData(activeRoute.tagIds, destinationId);
+    routeSteps = generateRouteSteps(activeRoute.tagIds, MARKERS, DOORS);
+    routeIndex = -1;
+    currentTagId = null;
+    lastConfirmedTagId = null;
+    expectedNextTagId = activeRoute.tagIds[0];
+    navigationActive = true;
+    destinationReached = false;
+    lastRouteInstruction = "";
+    emaDist = null;
+    resetSearchTimers();
+    currentScanDelayMs = SETTINGS.scanHintAfterMs;
+    setNavState(NavState.SEARCHING_START_TAG);
+    updatePanel(null);
+    say("Ziel gewählt: " + activeRoute.name + ". Suchen Sie die erste Markierung, Tag " +
+        expectedNextTagId + " bei " + markerName(expectedNextTagId) + ". " +
+        "Bewegen Sie das Smartphone langsam, bis die Markierung erkannt wird.",
+        {interrupt:true});
+  }
+
+  function endNavigation(announce){
+    navigationActive = false;
+    activeRoute = null;
+    routeSteps = [];
+    routeIndex = -1;
+    currentTagId = null;
+    expectedNextTagId = null;
+    destinationId = null;
+    destinationReached = false;
+    emaDist = null;
+    resetSearchTimers();
+    setNavState(NavState.IDLE);
+    updatePanel(null);
+    if(announce) say("Navigation beendet.", {interrupt:true});
+  }
+
+  // Kern: Schrittansage liefern (Ort + Richtung + Distanz + Türwissen).
+  // prefix = optionale Vorbemerkung (z. B. bei Resynchronisation).
+  function deliverStepInstruction(prefix){
+    var step = routeSteps[routeIndex];
+    var text = (prefix ? prefix + " " : "") + step.instruction;
+
+    if(currentTagId === destinationId){
+      destinationReached = true;
+      navigationActive = false;
+      expectedNextTagId = null;
+      lastRouteInstruction = step.instruction;
+      setNavState(NavState.DESTINATION_REACHED);
+      say(text, {interrupt:true});
+      updatePanel(null);
+      return;
+    }
+
+    lastRouteInstruction = step.instruction;
+    expectedNextTagId = step.toTagId;
+    say(text, {interrupt:true});
+    setNavState(NavState.INSTRUCTION_GIVEN);
+    resetSearchTimers();
+    currentScanDelayMs = (routeIndex === 0)
+      ? SETTINGS.scanHintAfterFirstStepMs
+      : SETTINGS.scanHintAfterMs;
+    updatePanel(null);
+  }
+
+  // Erwarteter Tag per Multi-Frame bestätigt.
+  // NEU (Idee aus v7-Türphasen): Ist die Marke noch weit weg, wird der Nutzer
+  // erst mit Distanz-Countdown HINGEFÜHRT, statt sofort die nächste Anweisung
+  // zu bekommen, während er noch mehrere Meter entfernt steht.
+  function onExpectedTagConfirmed(tagId, dist){
+    routeIndex = activeRoute.tagIds.indexOf(tagId);
+    currentTagId = tagId;
+    lastConfirmedTagId = tagId;
+    setNavState(NavState.TAG_CONFIRMED);
+
+    if(dist != null && dist > SETTINGS.approachM){
+      approach2mSaid = false;
+      approachLostWarned = false;
+      emaDist = dist;
+      setNavState(NavState.APPROACHING_TAG);
+      say("Tag " + tagId + " bei " + markerName(tagId) + " erkannt. Noch ungefähr " +
+          metersDE(dist) + ". Gehen Sie langsam darauf zu.", {interrupt:true});
+      updatePanel(dist);
+      return;
+    }
+    deliverStepInstruction(null);
+  }
+
+  // Annäherungsphase: Distanz-Feedback, bis die Marke erreicht ist.
+  function handleApproach(now, visible){
+    if(visible && emaDist != null){
+      approachLostWarned = false;
+      if(emaDist <= SETTINGS.approachDoneM){
+        deliverStepInstruction(null);
+        return;
+      }
+      if(!approach2mSaid && emaDist <= 2.4){
+        if(say("Noch ungefähr zwei Meter.", {})) approach2mSaid = true;
+      }
+    } else if(!visible && (now - expectedLastSeenAt) > SETTINGS.approachLostMs){
+      if(emaDist != null && emaDist <= SETTINGS.approachLostDoneM){
+        // Marke aus dem Bild verloren (Nutzer nah dran / Telefon gesenkt) -> erreicht
+        deliverStepInstruction(null);
+      } else if(!approachLostWarned){
+        if(say("Markierung verloren. Bleiben Sie stehen und richten Sie das Smartphone wieder auf Tag " +
+               currentTagId + ".", {})){
+          approachLostWarned = true;
+          expectedLastSeenAt = now;
+        }
+      }
+    }
+  }
+
+  // Bestätigter, aber NICHT erwarteter Tag.
+  // NEU: echte Korrektur statt nur Warnung.
+  //  - Tag liegt VORAUS auf der Route  -> Route dort fortsetzen (Resync vorwärts)
+  //  - Tag liegt ZURÜCK auf der Route  -> Route dort fortsetzen (Resync rückwärts)
+  //  - Tag liegt NICHT auf der Route   -> sagen WO der Nutzer ist + Weg zurück
+  function onWrongTagConfirmed(tagId, dist){
+    var now = performance.now();
+    if(now - lastWrongTagAt < SETTINGS.wrongTagCooldownMs) return;
+    var idx = activeRoute.tagIds.indexOf(tagId);
+    setNavState(NavState.WRONG_TAG);
+
+    if(idx >= 0 && idx > routeIndex){
+      // Vorwärts-Resync: Nutzer ist weiter als gedacht — kein Problem machen.
+      lastWrongTagAt = now;
+      routeIndex = idx;
+      currentTagId = tagId;
+      lastConfirmedTagId = tagId;
+      deliverStepInstruction("Sie sind bereits bei " + markerName(tagId) +
+                             ", Tag " + tagId + ". Die Route wird hier fortgesetzt.");
+      return;
+    }
+    if(idx >= 0){
+      // Rückwärts-Resync: die Route wirklich an diesem Punkt neu aufnehmen.
+      lastWrongTagAt = now;
+      backWarnGiven = true;
+      routeIndex = idx;
+      currentTagId = tagId;
+      lastConfirmedTagId = tagId;
+      deliverStepInstruction("Sie sind zurück bei " + markerName(tagId) +
+                             ", Tag " + tagId + ".");
+      return;
+    } else {
+      // Off-Route: Ortswissen aus v7 nutzen, dann konkreten Rückweg nennen.
+      var p = OFF_ROUTE_HINTS[tagId] || "Diese Markierung gehört nicht zum aktuellen Weg.";
+      if(lastConfirmedTagId != null){
+        p += " Kehren Sie um und gehen Sie zurück zu Tag " + lastConfirmedTagId +
+             " bei " + markerName(lastConfirmedTagId) + ".";
+      } else {
+        p += " Kehren Sie zum Ausgangspunkt zurück und suchen Sie Tag " +
+             expectedNextTagId + " bei " + markerName(expectedNextTagId) + ".";
+      }
+      if(say(p, {})) lastWrongTagAt = now;
+    }
+    setNavState(routeIndex < 0 ? NavState.SEARCHING_START_TAG : NavState.SEARCHING_NEXT_TAG);
+  }
+
+  // Ausricht-Hinweise, solange der erwartete Tag sichtbar, aber unbestätigt ist.
+  function aimGuidance(corners){
+    var cx = 0, cy = 0;
+    for(var i = 0; i < corners.length; i++){ cx += corners[i].x; cy += corners[i].y; }
+    cx /= corners.length; cy /= corners.length;
+    var zone;
+    if(cx < W * 0.33)      zone = "left";
+    else if(cx > W * 0.67) zone = "right";
+    else if(cy < H * 0.30) zone = "up";
+    else if(cy > H * 0.70) zone = "down";
+    else                   zone = "center";
+    var now = performance.now();
+    if(zone === lastAimZone) return;
+    if(now - lastAimAt < SETTINGS.aimCooldownMs) return;
+    if(speaking()) return;
+    var msg = { left:"Markierung links.", right:"Markierung rechts.",
+                up:"Smartphone etwas höher.", down:"Smartphone etwas tiefer.",
+                center:"Markierung mittig." }[zone];
+    if(say(msg, {})){ lastAimZone = zone; lastAimAt = now; }
+  }
+
+  // NEU: Suchhinweise WIEDERHOLEN sich (v8 sprach nur einmal pro Schritt).
+  // Eskalierende Texte: erst Suchbewegung, dann Erinnerung an das Ziel,
+  // dann Hinweis auf die Hilfetasten — danach im Wechsel.
+  function scanHint(){
+    var now = performance.now();
+    var idleSince = Math.max(expectedLastSeenAt, searchStartedAt, lastScanHintAt);
+    var delay = (scanHintCount === 0) ? currentScanDelayMs : SETTINGS.scanHintRepeatMs;
+    if(now - idleSince < delay) return;
+    if(speaking()) return;
+    var target = "Gesucht wird Tag " + expectedNextTagId + " bei " + markerName(expectedNextTagId) + ".";
+    var msgs = [
+      "Bitte bewegen Sie das Smartphone langsam von links nach rechts und suchen Sie die nächste Markierung.",
+      "Noch keine Markierung gefunden. " + target +
+        " Bewegen Sie das Smartphone langsam von links nach rechts, auch etwas höher und tiefer.",
+      "Immer noch keine Markierung. Bleiben Sie stehen. " + target +
+        " Sie können jederzeit Anweisung wiederholen oder Wo bin ich drücken."
+    ];
+    var idx = (scanHintCount < 3) ? scanHintCount : ((scanHintCount % 2) + 1);
+    if(say(msgs[idx], {})){
+      scanHintCount++;
+      lastScanHintAt = now;
+    }
+  }
+
+  // NEU: "Vorbeigelaufen"-Warnung. Modelliert den Fortschritt zwischen zwei
+  // Tags über die erwartete Gehzeit (Distanz / Gehgeschwindigkeit + Toleranz).
+  function passedCheck(){
+    if(passedHintGiven) return;
+    if(routeIndex < 0) return;                       // erst nach dem ersten Tag sinnvoll
+    var step = routeSteps[routeIndex];
+    if(!step || step.distanceM == null) return;
+    var expectMs = step.distanceM / SETTINGS.walkSpeedMps * 1000 + SETTINGS.passedGraceMs;
+    if(performance.now() - searchStartedAt < expectMs) return;
+    if(speaking()) return;
+    if(say("Sie sind möglicherweise an der Markierung vorbeigelaufen. " +
+           "Bleiben Sie stehen und drehen Sie sich langsam um. Suchen Sie Tag " +
+           expectedNextTagId + " bei " + markerName(expectedNextTagId) + ".", {})){
+      passedHintGiven = true;
+    }
+  }
+
+  // ==================== HAUPTSCHLEIFE ====================
+  function tick(){
+    if(!running) return;
+    if(video.readyState >= 2 && video.videoWidth){
+      var vw = video.videoWidth, vh = video.videoHeight;
+      var newH = Math.round(PROC_WIDTH * vh / vw);
+      if(canvas.width !== PROC_WIDTH || canvas.height !== newH){
+        canvas.width = PROC_WIDTH; canvas.height = newH; W = PROC_WIDTH; H = newH;
+      }
+      ctx.drawImage(video, 0, 0, W, H);
+      var img = ctx.getImageData(0, 0, W, H);
+      var detected = [];
+      try{ detected = detector.detect(img); }catch(e){ detected = []; }
+
+      var now = performance.now();
+      var expectedDet = null, bestKnown = null, bestKnownDist = Infinity;
+      // Während der Annäherung ist der "erwartete" Tag der soeben bestätigte.
+      var watchTagId = (navState === NavState.APPROACHING_TAG) ? currentTagId : expectedNextTagId;
+
+      for(var i = 0; i < detected.length; i++){
+        var mk = detected[i];
+        var known = MARKERS[mk.id];
+        var d = distanceMeters(mk.corners, MARKER_SIZE_M);
+        var isExpected = navigationActive && mk.id === watchTagId;
+        if(navigationActive && !destinationReached){
+          if(isExpected) drawMarker(mk.corners, "#ffd400");
+          else drawMarker(mk.corners, "rgba(154,160,166,0.35)", true);
+        } else {
+          drawMarker(mk.corners, known ? "#37d67a" : "#ff6b6b");
+        }
+        if(isExpected) expectedDet = { id: mk.id, corners: mk.corners, dist: d };
+        if(known && (d == null || d < bestKnownDist)){
+          bestKnown = { id: mk.id, corners: mk.corners, dist: d };
+          bestKnownDist = (d == null ? Infinity : d);
+        }
+      }
+
+      // Visuelles Gedächtnis (700 ms)
+      var expectedVisual = !!expectedDet;
+      if(navigationActive && !destinationReached){
+        if(expectedDet){
+          lastExpectedVis = { corners: expectedDet.corners, at: now };
+        } else if(lastExpectedVis && (now - lastExpectedVis.at) <= SETTINGS.visualMemoryMs){
+          expectedVisual = true;
+          drawMarker(lastExpectedVis.corners, "#ffd400");
+        } else {
+          lastExpectedVis = null;
+        }
+      }
+
+      // --- Anzeige ---
+      var visDist = null;
+      if(navigationActive && !destinationReached){
+        if(expectedDet && expectedDet.dist != null){
+          emaDist = (emaDist == null) ? expectedDet.dist : (0.7*emaDist + 0.3*expectedDet.dist);
+          visDist = emaDist;
+        } else if(expectedVisual){
+          visDist = emaDist;
+        } else if(navState !== NavState.APPROACHING_TAG){
+          emaDist = null;
+        }
+        var showId = (navState === NavState.APPROACHING_TAG) ? currentTagId : expectedNextTagId;
+        var nn = markerName(showId);
+        var sub = (navState === NavState.APPROACHING_TAG)
+          ? "Annäherung · " + (expectedVisual ? "sichtbar" : "gleich erreicht")
+          : (expectedVisual ? "Nächstes Ziel · sichtbar" : "Nächstes Ziel · suchen …");
+        showRoom(DEBUG_SHOW_TAG_ID ? (nn + " [Tag " + showId + "]") : nn, sub, visDist);
+      } else if(destinationReached){
+        showRoom(activeRoute ? activeRoute.name : "Ziel", "Ziel erreicht", null);
+      } else if(bestKnown){
+        if(bestKnown.dist != null){
+          emaDist = (emaDist == null) ? bestKnown.dist : (0.7*emaDist + 0.3*bestKnown.dist);
+          visDist = emaDist;
+        }
+        var nm = markerName(bestKnown.id);
+        showRoom(DEBUG_SHOW_TAG_ID ? (nm + " [Tag " + bestKnown.id + "]") : nm, null, visDist);
+      } else {
+        emaDist = null;
+        showIdle("Keine Markierung");
+      }
+
+      // --- Routenlogik ---
+      if(navigationActive && !destinationReached){
+        if(navState === NavState.APPROACHING_TAG){
+          if(expectedDet) expectedLastSeenAt = now;
+          handleApproach(now, !!expectedDet);
+        } else if(expectedDet){
+          expectedLastSeenAt = now;
+          if(candId === expectedDet.id){ candCount++; } else { candId = expectedDet.id; candCount = 1; }
+          candLastSeenAt = now;
+          if(candCount < CONFIRM_FRAMES){
+            if(navState !== NavState.TAG_CANDIDATE &&
+               (navState === NavState.SEARCHING_START_TAG || navState === NavState.SEARCHING_NEXT_TAG))
+              setNavState(NavState.TAG_CANDIDATE);
+            aimGuidance(expectedDet.corners);
+          } else {
+            candId = null; candCount = 0;
+            onExpectedTagConfirmed(expectedDet.id, expectedDet.dist != null ? expectedDet.dist : emaDist);
+          }
+        } else {
+          if(candId != null && (now - candLastSeenAt) > SETTINGS.candMemoryMs){
+            candId = null; candCount = 0;
+          }
+          if(navState === NavState.INSTRUCTION_GIVEN && !speaking()){
+            setNavState(NavState.SEARCHING_NEXT_TAG);
+            searchStartedAt = now;
+          }
+          if(bestKnown && bestKnown.id !== expectedNextTagId){
+            if(wrongCandId === bestKnown.id){ wrongCandCount++; } else { wrongCandId = bestKnown.id; wrongCandCount = 1; }
+            if(wrongCandCount >= CONFIRM_FRAMES){
+              wrongCandId = null; wrongCandCount = 0;
+              onWrongTagConfirmed(bestKnown.id, bestKnown.dist);
+            }
+          } else {
+            wrongCandId = null; wrongCandCount = 0;
+          }
+          if(navState === NavState.SEARCHING_NEXT_TAG || navState === NavState.SEARCHING_START_TAG){
+            scanHint();
+            passedCheck();
+          }
+        }
+      }
+
+      updatePanel(visDist);
+    }
+    scheduleNext();
+  }
+  var nextTimer = null;
+  function scheduleNext(){ nextTimer = setTimeout(function(){ requestAnimationFrame(tick); }, PROC_MS); }
+
+  // ---- Kamera ----
+  function stopStream(){ if(stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; } }
+
+  async function startCamera(){
+    errBox.style.display = "none";
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      return showError("Dieser Browser unterstützt keinen Kamera-Zugriff. Bitte Safari oder Chrome verwenden und die Seite über HTTPS öffnen.");
+    }
+    stopStream();
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+    }catch(e){
+      try{ stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:true }); }
+      catch(e2){ return showError(errText(e2)); }
+    }
+    video.srcObject = stream;
+    try{ await video.play(); }catch(e){}
+    gate.style.display = "none";
+    running = true;
+    if(!safetyGiven){
+      say("Wegweiser bereit. " + SAFETY_SPEECH, {interrupt:true});
+      safetyGiven = true;
+    } else {
+      say("Wegweiser bereit.", {interrupt:true});
+    }
+    scheduleNext();
+  }
+  function errText(e){
+    var n = (e && e.name) || "";
+    if(n === "NotAllowedError" || n === "SecurityError") return "Kamera-Zugriff wurde abgelehnt. Bitte in den Browser-Einstellungen erlauben. Auf dem Handy muss die Seite über HTTPS geöffnet sein.";
+    if(n === "NotFoundError" || n === "OverconstrainedError") return "Keine passende Kamera gefunden. Versuche die andere Kamera.";
+    return "Kamera konnte nicht gestartet werden (" + (n || "Fehler") + ").";
+  }
+  function showError(msg){ running = false; errMsg.textContent = msg; errBox.style.display = "flex"; }
+
+  // ---- Bedienung ----
+  gate.addEventListener("click", function(){ if(!running) startCamera(); });
+  retryBtn.addEventListener("click", startCamera);
+
+  navStartBtn.addEventListener("click", function(){
+    if(!running){ say("Bitte zuerst die Kamera starten.", {interrupt:true}); return; }
+    startNavigation();
+  });
+  navEndBtn.addEventListener("click", function(){ endNavigation(true); });
+
+  repeatBtn.addEventListener("click", function(){
+    if(lastRouteInstruction) say(lastRouteInstruction, {interrupt:true});
+    else say("Noch keine Anweisung vorhanden.", {interrupt:true});
+  });
+
+  whereBtn.addEventListener("click", function(){
+    var p;
+    if(destinationReached){
+      p = "Sie sind am Ziel: " + (activeRoute ? activeRoute.name : "Ziel") + ".";
+    } else if(currentTagId != null){
+      p = "Zuletzt bestätigt: Tag " + currentTagId + " bei " + markerName(currentTagId) + ".";
+      var step = routeSteps[routeIndex];
+      if(step && step.distanceM != null && expectedNextTagId != null){
+        p += " Gesucht wird Tag " + expectedNextTagId + " bei " + markerName(expectedNextTagId) +
+             ", ungefähr " + metersDE(step.distanceM) + " entfernt.";
+      } else if(expectedNextTagId != null){
+        p += " Gesucht wird Tag " + expectedNextTagId + " bei " + markerName(expectedNextTagId) + ".";
+      }
+    } else if(navigationActive){
+      p = "Noch keine Markierung bestätigt. Gesucht wird Tag " + expectedNextTagId +
+          " bei " + markerName(expectedNextTagId) + ".";
+    } else {
+      p = "Keine Navigation aktiv. Bitte wählen Sie ein Ziel und starten Sie die Navigation.";
+    }
+    say(p, {interrupt:true});
+  });
+
+  flipBtn.addEventListener("click", function(){
+    facing = (facing === "environment") ? "user" : "environment";
+    candId = null; candCount = 0; emaDist = null;
+    if(running) startCamera();
+  });
+  muteBtn.addEventListener("click", function(){
+    soundOn = !soundOn;
+    muteBtn.firstChild.textContent = soundOn ? "Ton an" : "Ton aus";
+    if(!soundOn && "speechSynthesis" in window) speechSynthesis.cancel();
+    else say("Ton eingeschaltet", {interrupt:true});
+  });
+
+  // ---- Zielauswahl aus ROUTES ----
+  Object.keys(ROUTES).map(Number).sort(function(a,b){ return a - b; }).forEach(function(id){
+    var o = document.createElement("option");
+    o.value = String(id);
+    o.textContent = ROUTES[id].name + " (Tag " + id + ")";
+    destSel.appendChild(o);
+  });
+  destSel.addEventListener("change", function(){
+    var v = destSel.value ? parseInt(destSel.value, 10) : null;
+    if(v != null && ROUTES[v])
+      say("Ziel gewählt: " + ROUTES[v].name + ". Drücken Sie Navigation starten.", {interrupt:true});
+    else
+      say("Kein Ziel gewählt.", {interrupt:true});
+  });
+
+  // ---- Start: Validierung + Routentabellen in der Konsole ----
+  Object.keys(ROUTES).forEach(function(id){
+    validateRouteData(ROUTES[id].tagIds, parseInt(id, 10));
+  });
+
+  try{
+    detector = new AR.Detector({ dictionaryName: "APRILTAG_36h11" });
+  }catch(e){
+    showError("Interner Fehler beim Laden der Erkennung: " + e);
+  }
+})();
+</script>
+</body>
+</html>
