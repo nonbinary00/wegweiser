@@ -9,7 +9,8 @@
 // importiert).
 
 import {
-  gate, retryBtn, navStartBtn, navEndBtn, repeatBtn, whereBtn, flipBtn, muteBtn, destSel
+  gate, retryBtn, navStartBtn, navEndBtn, repeatBtn, whereBtn, flipBtn, muteBtn, destSel,
+  logExportBtn, logClearBtn
 } from './dom.js';
 import { NODES } from './graph-data.js';
 import { markerName, metersDE } from './graph.js';
@@ -21,6 +22,7 @@ import {
 import { startCamera, showError, running, toggleFacing } from './camera.js';
 import { say, toggleSound, soundOn } from './speech.js';
 import { setDetector } from './detector-state.js';
+import { exportJson, clear } from './logger.js';
 
   // ---- Bedienung ----
   gate.addEventListener("click", function(){ if(!running) startCamera(); });
@@ -73,6 +75,16 @@ import { setDetector } from './detector-state.js';
     muteBtn.firstChild.textContent = soundOn ? "Ton an" : "Ton aus";
     if(!soundOn && "speechSynthesis" in window) speechSynthesis.cancel();
     else say("Ton eingeschaltet", {interrupt:true});
+  });
+
+  // ---- Logging-Panel (neu, Feldtest-Instrumentierung) ----
+  logExportBtn.addEventListener("click", function(){
+    exportJson();
+    say("Log exportiert.", {interrupt:true});
+  });
+  logClearBtn.addEventListener("click", function(){
+    clear();
+    say("Log gelöscht.", {interrupt:true});
   });
 
   // ---- Zielauswahl aus NODES (destination:true) ----

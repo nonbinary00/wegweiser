@@ -65,6 +65,17 @@
     <button class="ctrl" id="muteBtn">Ton an<small>Sprache</small></button>
   </div>
 
+  <!-- ==================== Logging-Panel (neu, Feldtest-Instrumentierung) ==================== -->
+  <div id="logPanel" style="padding-top:8px">
+    <label class="sr" for="testNameInput">Testname</label>
+    <input id="testNameInput" type="text" placeholder="Testname" aria-label="Testname"
+      style="width:100%;border:2px solid #2a2a2a;background:#141414;color:#fff;border-radius:14px;padding:13px 12px;font-size:1rem;font-weight:700">
+  </div>
+  <div class="btnrow">
+    <button class="ctrl" id="logExportBtn">Log exportieren<small id="logCounter">0 Einträge</small></button>
+    <button class="ctrl danger" id="logClearBtn">Log löschen</button>
+  </div>
+
 <!-- ==================== Bibliotheken (js-aruco2), klassische Skripte, unveraendert ==================== -->
 <script src="./vendor/cv.js"></script>
 <script src="./vendor/aruco2.js"></script>

@@ -14,6 +14,7 @@ import { destSel, uiState } from './dom.js';
 import { say, speaking } from './speech.js';
 import { updatePanel } from './ui.js';
 import { W, H } from './frame-state.js';
+import { record, getTestName } from './logger.js';
 
   // ==================== ZUSTANDSMODELL ====================
   // Kernschleife pro Abschnitt A->B:
@@ -70,6 +71,20 @@ import { W, H } from './frame-state.js';
   var stopSaidAt = 0;
   var offRouteSaid = {};          // fremde Tags: höchstens EINMAL pro Abschnitt melden
 
+  // ---- Instrumentierung (neu, nur fuer Feldtest-Logging) ----
+  // Diese Variablen beeinflussen KEINE Navigationsentscheidung; sie werden ausschliesslich
+  // gelesen, um SEGMENT_SUMMARY/ROUTE_*-Ereignisse mit Zahlen zu fuellen.
+  var routeRunId = null;          // eine Id pro Routenlauf, gesetzt in startNavigation()
+  var segLostCount = 0;           // Anzahl LOST_STOPPED-Uebergaenge im aktuellen Abschnitt
+  var segReacquireCount = 0;      // Anzahl Wiederfindungen im aktuellen Abschnitt
+  var segLostMs = 0;              // Summe der Zeit (ms) im aktuellen Abschnitt in LOST_STOPPED
+  var segLostSince = null;        // Zeitpunkt des aktuellen Verlusts (falls gerade verloren)
+  var segTrackingStartedAt = null;// Zeitpunkt, an dem TRACKING fuer diesen Abschnitt begann
+
+  function generateRouteRunId(){
+    return "run_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+  }
+
   function setNavState(s){
     navState = s;
     uiState.textContent = s;
@@ -116,10 +131,30 @@ import { W, H } from './frame-state.js';
     trackDetCount = 0;
     arrivalBelowCount = 0;
     lastTrackDbgAt = 0;
+    // ---- Instrumentierung (neu): pro Abschnitt zuruecksetzen ----
+    segLostCount = 0;
+    segReacquireCount = 0;
+    segLostMs = 0;
+    segLostSince = null;
+    segTrackingStartedAt = null;
   }
 
 
+  // ---- Instrumentierung (neu): reine ES5-Kopie von `data` + routeRunId angehaengt,
+  // ohne die existierenden Aufrufstellen von navLog() anzufassen. ----
+  function mergeRouteRunId(data){
+    var merged = {};
+    if(data){
+      for(var k in data){
+        if(Object.prototype.hasOwnProperty.call(data, k)) merged[k] = data[k];
+      }
+    }
+    merged.routeRunId = routeRunId;
+    return merged;
+  }
+
   function navLog(msg, data){
+    record(msg, mergeRouteRunId(data));
     if(!NAV_DEBUG) return;
     try{ console.log("[NavDbg " + Math.round(performance.now()) + "ms] " + msg,
                      data ? JSON.stringify(data) : ""); }catch(e){}
@@ -147,9 +182,16 @@ import { W, H } from './frame-state.js';
     say("Ziel gewählt: " + markerName(destId) + ". Richten Sie das Smartphone auf die " +
         "nächste Markierung in Ihrer Nähe. Von dort wird die Route berechnet.",
         {interrupt:true});
+    // ---- Instrumentierung (neu) ----
+    routeRunId = generateRouteRunId();
+    navLog("ROUTE_START", { destinationId: destId, destination: markerName(destId),
+      testName: getTestName() });
   }
 
   function endNavigation(announce){
+    // ---- Instrumentierung (neu): vor dem Zuruecksetzen erfassen, ob eine laufende
+    // (noch nicht angekommene) Route abgebrochen wird. ----
+    var wasCancelled = navigationActive && !destinationReached;
     navigationActive = false;
     pathTagIds = null;
     segIndex = -1;
@@ -161,15 +203,21 @@ import { W, H } from './frame-state.js';
     setNavState(NavState.IDLE);
     updatePanel(null);
     if(announce) say("Navigation beendet.", {interrupt:true});
+    // ---- Instrumentierung (neu) ----
+    if(wasCancelled) navLog("ROUTE_CANCELLED", {});
+    routeRunId = null;
   }
 
   // Abschnitt segIndex beginnen: nach dem Tag am ENDE der Kante suchen.
   function beginSegment(){
     var edge = currentEdge();
+    var fromTag = pathTagIds[segIndex];
     expectedNextTagId = pathTagIds[segIndex + 1];
     resetSegmentState();
     setNavState(NavState.SEARCHING_NEXT_TAG);
     updatePanel(null);
+    // ---- Instrumentierung (neu) ----
+    navLog("SEGMENT_START", { segIndex: segIndex, fromTag: fromTag, toTag: expectedNextTagId });
   }
 
   // Startknoten bestätigt: Route berechnen und ersten Abschnitt beginnen.
@@ -196,6 +244,8 @@ import { W, H } from './frame-state.js';
        "und suchen Sie die nächste Markierung.");
     lastRouteInstruction = start;
     say("Route berechnet. " + start, {interrupt:true});
+    // ---- Instrumentierung (neu) ----
+    navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
     beginSegment();
   }
 
@@ -220,6 +270,8 @@ import { W, H } from './frame-state.js';
     lastRouteInstruction = edge.found;
     say(edge.found, {interrupt:true});
     updatePanel(dist);
+    // ---- Instrumentierung (neu) ----
+    segTrackingStartedAt = performance.now();
   }
 
   // Punkt erreicht (Distanz <= Schwelle oder Near-Loss-Fallback).
@@ -227,6 +279,26 @@ import { W, H } from './frame-state.js';
     var edge = currentEdge();
     var reachedTagId = pathTagIds[segIndex + 1];
     currentTagId = reachedTagId;
+
+    // ---- Instrumentierung (neu): Zusammenfassung des GERADE abgeschlossenen Abschnitts,
+    // ausschliesslich aus bereits vorhandenen nav.js-Variablen, keine Duplizierung. ----
+    navLog("SEGMENT_SUMMARY", {
+      segIndex: segIndex,
+      fromTag: pathTagIds[segIndex],
+      toTag: reachedTagId,
+      reason: reason || "distance-threshold",
+      edgeDistanceM: edge ? edge.distanceM : null,
+      lastRawDist: r1(lastRawDist),
+      lastEma: r1(emaDist),
+      minSegDist: r1(minTrackDist),
+      trackingDurationMs: segTrackingStartedAt != null ?
+        Math.round(performance.now() - segTrackingStartedAt) : null,
+      detectionCount: trackDetCount,
+      lostCount: segLostCount,
+      reacquireCount: segReacquireCount,
+      lostTotalMs: Math.round(segLostMs),
+      awayWarned: awayWarned
+    });
 
     if(reachedTagId === destinationId){
       navLog("REACHED destination", { tag: reachedTagId, reason: reason || "distance-threshold" });
@@ -254,6 +326,8 @@ import { W, H } from './frame-state.js';
     setNavState(NavState.DESTINATION_REACHED);
     say(t, {interrupt:true});
     updatePanel(null);
+    // ---- Instrumentierung (neu) ----
+    navLog("ROUTE_END", { destinationId: destinationId, reason: "arrived" });
   }
 
   // ---- TRACKING: laufende Distanzmessung zum Tag voraus ----
@@ -362,6 +436,11 @@ import { W, H } from './frame-state.js';
     // weggedreht, die Kamera verdeckt oder zu früh abgebogen haben.
     setNavState(NavState.LOST_STOPPED);
     stopSaidAt = now;
+    // ---- Instrumentierung (neu) ----
+    segLostCount++;
+    segLostSince = now;
+    navLog("LOST_STOPPED", { expectedTag: expectedNextTagId, lastEma: r1(emaDist),
+      lastRaw: r1(lastRawDist) });
     if(emaDist != null && emaDist <= SETTINGS.nearLostM){
       // Sehr nah verloren: vorsichtig weiter, Marke erneut suchen.
       say("Der Orientierungspunkt ist sehr nah. Gehen Sie langsam weiter " +
@@ -382,6 +461,10 @@ import { W, H } from './frame-state.js';
       if(d != null) emaDist = d;
       say("Markierung wieder gefunden." +
           (emaDist != null ? " Noch ungefähr " + metersDE(emaDist) + "." : ""), {interrupt:true});
+      // ---- Instrumentierung (neu) ----
+      segReacquireCount++;
+      if(segLostSince != null){ segLostMs += (now - segLostSince); segLostSince = null; }
+      navLog("REACQUIRED", { expectedTag: expectedNextTagId, dist: r1(emaDist) });
       return;
     }
     // Weiter verloren: Hinweis periodisch wiederholen.
@@ -482,6 +565,7 @@ export {
   wrongCandCount,
   lastExpectedVis,
   candLastSeenAt,
+  routeRunId,
   setNavState,
   currentEdge,
   startNavigation,

@@ -28,6 +28,12 @@
   var uiInstr = document.getElementById("uiInstr");
   var uiSource= document.getElementById("stepSource");
 
+  // ---- Logging-Panel (neu, Feldtest-Instrumentierung) ----
+  var testNameInput = document.getElementById("testNameInput");
+  var logCounter    = document.getElementById("logCounter");
+  var logExportBtn  = document.getElementById("logExportBtn");
+  var logClearBtn   = document.getElementById("logClearBtn");
+
 export {
   video,
   canvas,
@@ -53,5 +59,9 @@ export {
   uiDist,
   uiState,
   uiInstr,
-  uiSource
+  uiSource,
+  testNameInput,
+  logCounter,
+  logExportBtn,
+  logClearBtn
 };
