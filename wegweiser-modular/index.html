@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Wegweiser v13 – Distanz-Tracking + Ankunfts-Fix</title>
+<link rel="stylesheet" href="./css/wegweiser.css">
+</head>
+<body>
+  <h1>Wegweiser v12</h1>
+
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <video id="cam" playsinline muted autoplay></video>
+
+    <div id="status" aria-hidden="true">
+      <div id="room" class="empty">Bereit</div>
+      <div id="meta" class="empty"></div>
+    </div>
+
+    <!-- Von Screenreadern gelesene Live-Meldungen -->
+    <div id="live" class="sr" role="status" aria-live="assertive"></div>
+
+    <div id="gate">
+      <div style="font-size:1.6rem;font-weight:800;color:#fff">Kamera-Wegweiser</div>
+      <p>Route wählen, Kamera starten und den Markierungen Schritt für Schritt folgen.</p>
+      <button id="startBtn" class="big-btn">Kamera starten</button>
+      <p style="font-size:.85rem">Tippe irgendwo auf den Bildschirm. Erlaube den Kamera-Zugriff.</p>
+    </div>
+
+    <div id="err">
+      <h2>Kamera nicht verfügbar</h2>
+      <p id="errMsg"></p>
+      <button id="retryBtn" class="big-btn" style="min-width:180px;font-size:1.1rem;padding:16px 24px">Erneut versuchen</button>
+    </div>
+  </div>
+
+  <div id="destRow" style="padding-top:8px">
+    <label class="sr" for="destSel">Ziel wählen</label>
+    <select id="destSel" aria-label="Ziel wählen"
+      style="width:100%;border:2px solid #2a2a2a;background:#141414;color:#fff;border-radius:14px;padding:13px 12px;font-size:1rem;font-weight:700">
+      <option value="">Ziel: keins gewählt</option>
+    </select>
+  </div>
+
+  <div id="navPanel" aria-hidden="true">
+    <div>Ziel: <b id="uiDest">–</b></div>
+    <div>Zustand: <b id="navState">IDLE</b></div>
+    <div class="wide" style="font-size:1rem">Nächste Markierung: <b id="uiNext">–</b></div>
+    <div>Zuletzt bestätigt: <b id="uiCur">–</b></div>
+    <div>Distanz: <b id="uiDist">–</b></div>
+    <div>Schritt: <b id="stepSource">–</b></div>
+    <div class="wide">Anweisung: <b id="uiInstr">–</b></div>
+  </div>
+
+  <div class="btnrow">
+    <button class="ctrl primary" id="navStartBtn">Navigation starten</button>
+    <button class="ctrl danger" id="navEndBtn">Navigation beenden</button>
+  </div>
+  <div class="btnrow">
+    <button class="ctrl" id="repeatBtn">Anweisung wiederholen</button>
+    <button class="ctrl" id="whereBtn">Wo bin ich?</button>
+    <button class="ctrl" id="flipBtn">Kamera<small>vorn / hinten</small></button>
+    <button class="ctrl" id="muteBtn">Ton an<small>Sprache</small></button>
+  </div>
+
+<!-- ==================== Bibliotheken (js-aruco2), klassische Skripte, unveraendert ==================== -->
+<script src="./vendor/cv.js"></script>
+<script src="./vendor/aruco2.js"></script>
+<script src="./vendor/apriltag-36h11-dict.js"></script>
+<script src="./vendor/svd.js"></script>
+<script src="./vendor/posit.js"></script>
+
+<!-- ==================== App (ES-Module) ==================== -->
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
