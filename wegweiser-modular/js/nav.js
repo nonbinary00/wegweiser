@@ -277,7 +277,7 @@ import { record, getTestName } from './logger.js';
     segTrackingStartedAt = performance.now();
   }
 
-  // Punkt erreicht (Distanz <= Schwelle oder Near-Loss-Fallback).
+  // Punkt erreicht (Distanz <= Schwelle, Near-Loss-Fallback oder kontrollierter Skip).
   function reachPoint(reason){
     var edge = currentEdge();
     var reachedTagId = pathTagIds[segIndex + 1];
@@ -285,23 +285,29 @@ import { record, getTestName } from './logger.js';
 
     // ---- Instrumentierung (neu): Zusammenfassung des GERADE abgeschlossenen Abschnitts,
     // ausschliesslich aus bereits vorhandenen nav.js-Variablen, keine Duplizierung. ----
-    navLog("SEGMENT_SUMMARY", {
-      segIndex: segIndex,
-      fromTag: pathTagIds[segIndex],
-      toTag: reachedTagId,
-      reason: reason || "distance-threshold",
-      edgeDistanceM: edge ? edge.distanceM : null,
-      lastRawDist: r1(lastRawDist),
-      lastEma: r1(emaDist),
-      minSegDist: r1(minTrackDist),
-      trackingDurationMs: segTrackingStartedAt != null ?
-        Math.round(performance.now() - segTrackingStartedAt) : null,
-      detectionCount: trackDetCount,
-      lostCount: segLostCount,
-      reacquireCount: segReacquireCount,
-      lostTotalMs: Math.round(segLostMs),
-      awayWarned: awayWarned
-    });
+    // neu: bei reason==="skipped-by-next-tag" hat skipExpectedTag() bereits die
+    // korrekte SEGMENT_SUMMARY fuer den TATSAECHLICH nicht abgeschlossenen Abschnitt
+    // (z.B. 6->4) protokolliert; hier NICHT zusaetzlich eine zweite, falsch
+    // zugeordnete Summary fuer die synthetische Uebergangs-Kante (z.B. 4->7) erzeugen.
+    if(reason !== "skipped-by-next-tag"){
+      navLog("SEGMENT_SUMMARY", {
+        segIndex: segIndex,
+        fromTag: pathTagIds[segIndex],
+        toTag: reachedTagId,
+        reason: reason || "distance-threshold",
+        edgeDistanceM: edge ? edge.distanceM : null,
+        lastRawDist: r1(lastRawDist),
+        lastEma: r1(emaDist),
+        minSegDist: r1(minTrackDist),
+        trackingDurationMs: segTrackingStartedAt != null ?
+          Math.round(performance.now() - segTrackingStartedAt) : null,
+        detectionCount: trackDetCount,
+        lostCount: segLostCount,
+        reacquireCount: segReacquireCount,
+        lostTotalMs: Math.round(segLostMs),
+        awayWarned: awayWarned
+      });
+    }
 
     if(reachedTagId === destinationId){
       navLog("REACHED destination", { tag: reachedTagId, reason: reason || "distance-threshold" });
@@ -489,6 +495,82 @@ import { record, getTestName } from './logger.js';
     }
   }
 
+  // ==================== Kontrollierter Routen-Skip (neu) ====================
+  // KEIN genereller Graph-Shortcut: nur dieser eine, namentlich benannte Fall ist
+  // erlaubt (gerader Korridor 6->4->7; Tag 4 laesst sich beim schnellen Gehen leicht
+  // verpassen, waehrend Tag 7 bereits stabil sichtbar ist). Graph/EDGE_MAP/findPath()
+  // bleiben unveraendert; dies ist reine Laufzeit-Wiederherstellung, KEINE Kante 6->7.
+  var ROUTE_SKIP_RULES = {
+    4: { viaFrom: 6, to: 7 }
+  };
+
+  // Darf expectedNextTagId (Tag 4) zugunsten von confirmedTagId (Tag 7) uebersprungen
+  // werden? Prueft AUSSCHLIESSLICH gegen den bereits berechneten, aktuellen Pfad
+  // (pathTagIds) — keine erneute Pfadsuche, keine Graph-Aenderung.
+  function canSkipExpectedTag(confirmedTagId){
+    // Nur waehrend der Suche/Kandidatenphase fuer den erwarteten Tag moeglich —
+    // main-loop.js ruft onOtherTagConfirmed() ohnehin nur in diesem Zustand auf,
+    // diese Pruefung ist eine zusaetzliche Absicherung.
+    if(navState !== NavState.SEARCHING_NEXT_TAG && navState !== NavState.TAG_CANDIDATE) return false;
+    if(!pathTagIds || segIndex < 0 || expectedNextTagId == null) return false;
+    var rule = ROUTE_SKIP_RULES[expectedNextTagId];
+    if(!rule || rule.to !== confirmedTagId) return false;
+    var nextIdx = segIndex + 2;                                   // Index von confirmedTagId im Pfad
+    if(nextIdx >= pathTagIds.length) return false;                // kein Nachfolger -> Tag ist Ziel (Bed. 5)
+    if(pathTagIds[segIndex] !== rule.viaFrom) return false;        // Bed. 1+2: ...->6->4 im Pfad
+    if(pathTagIds[nextIdx] !== rule.to) return false;              // Bed. 3: 7 folgt direkt auf 4 im Pfad
+    if(expectedNextTagId === destinationId) return false;         // Bed. 5 (explizit)
+    return true;
+  }
+
+  // Fuehrt den Skip aus: Tag 4 gilt als uebersprungener Zwischenpunkt, Tag 7 wird wie
+  // ein normal erreichter Punkt behandelt. Reine Wiederverwendung von reachPoint()/
+  // beginSegment()/resetSegmentState() fuer Reset, Ansage und naechstes Segment —
+  // keine Duplizierung dieser Logik.
+  function skipExpectedTag(confirmedTagId){
+    var previousTag = pathTagIds[segIndex];   // Tag 6
+    var skippedTag = expectedNextTagId;       // Tag 4
+    var routeIndexBefore = segIndex;
+    var edgeBefore = currentEdge();           // Kante 6->4, BEVOR segIndex vorrueckt
+
+    navLog("SKIPPED_BY_NEXT_TAG", {
+      skippedTag: skippedTag,
+      confirmedTag: confirmedTagId,
+      previousTag: previousTag,
+      destinationId: destinationId,
+      routeIndexBefore: routeIndexBefore,
+      routeIndexAfter: routeIndexBefore + 1,
+      confirmationFrames: SETTINGS.otherTagFrames,
+      reason: "next-route-tag-confirmed"
+    });
+    // Zusammenfassung des NICHT abgeschlossenen Abschnitts 6->4 — einzige SEGMENT_SUMMARY
+    // fuer diesen Skip (siehe reason-Weiche in reachPoint()), BEVOR der Tracking-Zustand
+    // durch beginSegment()/resetSegmentState() zurueckgesetzt wird.
+    navLog("SEGMENT_SUMMARY", {
+      segIndex: routeIndexBefore,
+      fromTag: previousTag,
+      toTag: skippedTag,
+      reason: "skipped-by-next-tag",
+      edgeDistanceM: edgeBefore ? edgeBefore.distanceM : null,
+      lastRawDist: r1(lastRawDist),
+      lastEma: r1(emaDist),
+      minSegDist: r1(minTrackDist),
+      trackingDurationMs: segTrackingStartedAt != null ?
+        Math.round(performance.now() - segTrackingStartedAt) : null,
+      detectionCount: trackDetCount,
+      lostCount: segLostCount,
+      reacquireCount: segReacquireCount,
+      lostTotalMs: Math.round(segLostMs),
+      awayWarned: awayWarned
+    });
+
+    // segIndex auf die Kante skippedTag->confirmedTagId (4->7) vorruecken, damit
+    // reachPoint() confirmedTagId ganz normal als erreicht behandelt (Ansage, Reset,
+    // naechstes Segment).
+    segIndex = routeIndexBefore + 1;
+    reachPoint("skipped-by-next-tag");
+  }
+
   // Bekannter, aber NICHT erwarteter Tag: sehr zurückhaltend melden.
   //  - kurz aufblitzende fremde Tags werden IGNORIERT (Frame-Schwellen im tick)
   //  - der soeben erreichte Tag ist noch im Bild: normal, KEINE Meldung
@@ -496,6 +578,12 @@ import { record, getTestName } from './logger.js';
   //  - bereits passierter Routen-Tag: "zurück"-Warnung nur bei hoher Sicherheit
   function onOtherTagConfirmed(tagId){
     if(tagId === currentTagId) return;   // gerade erreicht — kein Fehler
+    // neu: kontrollierter Routen-Skip PRUEFEN, bevor die normale "fremder Tag"-Meldung
+    // (Off-Route-/Zurueck-Warnung) greift. Siehe canSkipExpectedTag()/skipExpectedTag().
+    if(canSkipExpectedTag(tagId)){
+      skipExpectedTag(tagId);
+      return;
+    }
     if(offRouteSaid[tagId]) return;      // pro Abschnitt nur einmal
     var now = performance.now();
     if(now - lastWrongTagAt < SETTINGS.wrongTagCooldownMs) return;
