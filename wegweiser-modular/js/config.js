@@ -33,7 +33,20 @@
     progressMinGapMs: 2500,       // Mindestabstand zwischen Zwischenansagen
     awayDeltaM: 1.2,              // Distanz steigt um so viel über Minimum => Warnung
     otherTagFrames: 6,            // fremder Tag: erst nach ~0,8 s stabiler Sicht melden
-    backTagFrames: 9              // "zurück"-Warnung erst bei sehr stabiler Sicht (~1,3 s)
+    backTagFrames: 9,             // "zurück"-Warnung erst bei sehr stabiler Sicht (~1,3 s)
+    longCorridorMinM: 25,         // neu: ab dieser GESAMT-Lauflaenge (mehrere aufeinander-
+                                  // folgende geradeaus-Kanten summiert) wird der laufende
+                                  // Live-Fortschritts-Check innerhalb einer Kante ueberhaupt
+                                  // ausgewertet (siehe handleTracking())
+    longCorridorFirstProgressM: 10, // neu: Mindest-Fortschritt seit der letzten automatischen
+                                  // Richtungs-/Rueckmeldungs-Ansage, bevor erneut gesprochen
+                                  // werden darf — verhindert sowohl Wiederholung bei nahen
+                                  // Zwischen-Tags ALS AUCH dauerhaftes Verstummen auf langen
+                                  // Routen (siehe directionSpeechDue() in nav.js)
+    lostReminderRepeatMs: 18000    // neu: Abstand zwischen kurzen "Suchen Sie weiter."-
+                                  // Erinnerungen waehrend LOST_STOPPED (deutlich seltener
+                                  // als vorher; ersetzt die lange Wiederholung ueber
+                                  // scanHintRepeatMs)
   };
 
   var SAFETY_SPEECH = "Der Wegweiser unterstützt die Orientierung anhand von Markierungen, " +

@@ -27,6 +27,32 @@ import { FLOOR_GEOMETRY, NODES, EDGES } from './graph-data.js';
     return (words[m] || m) + " Meter";
   }
 
+  // ==================== DEPARTURE_ACTIONS (neu) ====================
+  // Einzige Quelle der Wahrheit fuer "was der Nutzer BEI Kante.from tun muss, um in
+  // Richtung Kante.to weiterzugehen" (Abbiegen oder Geradeaus) — NICHT etwas, das beim
+  // Erreichen von Kante.to passiert. Gesprochen wird sie, sobald Tag "from" erreicht ist
+  // (siehe reachPoint() in nav.js, das dafuer die AUSGEHENDE Kante ab dem gerade
+  // erreichten Tag nachschlaegt). Jede Handlung wird GENAU EINMAL definiert (Abbiege-
+  // Erkennung + gesprochener Text). Neue Handlungen (z.B. spaeter "turn-slight-left"
+  // oder "turn-around") werden NUR hier ergaenzt — nav.js fragt ausschliesslich
+  // isTurnAction()/departureActionSpeech() ab und kennt keine Tag- oder routen-
+  // spezifischen Sonderfaelle. Kein Parsen von deutschem Sprachtext zur Verhaltens-
+  // Ableitung.
+  var DEPARTURE_ACTIONS = {
+    "turn-left":         { isTurn: true,  speech: "Biegen Sie links ab." },
+    "turn-right":        { isTurn: true,  speech: "Biegen Sie rechts ab." },
+    "continue-straight": { isTurn: false, speech: "Gehen Sie weiter geradeaus." }
+  };
+
+  function isTurnAction(edge){
+    var a = edge && DEPARTURE_ACTIONS[edge.departureAction];
+    return !!(a && a.isTurn);
+  }
+  function departureActionSpeech(edge){
+    var a = edge && DEPARTURE_ACTIONS[edge.departureAction];
+    return a ? a.speech : "Gehen Sie weiter geradeaus.";
+  }
+
   // ==================== AUTOMATIK: ROUTENWAHL (BFS) ====================
   function findPath(startId, destId){
     if(startId === destId) return [startId];
@@ -63,6 +89,9 @@ import { FLOOR_GEOMETRY, NODES, EDGES } from './graph-data.js';
       if(!e.found)         console.error("[Graph] Kante " + e.from + "->" + e.to + ": found-Text fehlt.");
       if(!e.reached)       console.error("[Graph] Kante " + e.from + "->" + e.to + ": reached-Text fehlt.");
       if(!e.searchHint)    console.warn ("[Graph] Kante " + e.from + "->" + e.to + ": searchHint fehlt.");
+      if(!DEPARTURE_ACTIONS[e.departureAction])
+        console.error("[Graph] Kante " + e.from + "->" + e.to + ": departureAction fehlt oder unbekannt ("
+                       + e.departureAction + ").");
     });
     var rows = [];
     Object.keys(NODES).map(Number).forEach(function(id){
@@ -86,5 +115,7 @@ export {
   markerName,
   metersDE,
   findPath,
-  pathToText
+  pathToText,
+  isTurnAction,
+  departureActionSpeech
 };

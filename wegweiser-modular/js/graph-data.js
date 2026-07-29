@@ -61,14 +61,34 @@
 
   // ==================== GRAPH: KANTEN (manuelles Ortswissen) ====================
   // GERICHTETE Kante A->B. Der Tag B liegt in Gehrichtung voraus.
-  //   found      – wird gesprochen, sobald Tag B erstmals im Bild bestätigt ist
-  //   reached    – wird gesprochen, wenn die Distanz zu B die Schwelle erreicht:
-  //                Ortsbeschreibung + nächste Aktion (abbiegen usw.)
+  //   found      – NICHT mehr automatisch gesprochen (nur Doku/Fallback), siehe nav.js
+  //   reached    – NICHT mehr automatisch bei Zwischen-Tags gesprochen (nur bei ARRIVALS
+  //                am tatsaechlichen Ziel); bleibt als Doku/Fallback erhalten
+  //   departureAction – neu: EINZIGE autoritative Quelle fuer "was der Nutzer TUN MUSS, UM
+  //                DIESE Kante zu gehen". WICHTIG: departureAction von Kante X->Y beschreibt
+  //                die Handlung BEI X (Abbiegen oder Geradeaus), BEVOR in Richtung Y
+  //                losgegangen wird — NICHT etwas, das beim Erreichen von Y passiert!
+  //                Wird daher gesprochen, wenn Tag X erreicht wird (naemlich als "naechste
+  //                Kante" X->Y ab diesem Punkt) — siehe reachPoint() in nav.js, das dafuer
+  //                die AUSGEHENDE Kante ab dem GERADE erreichten Tag nachschlaegt, nicht
+  //                die soeben abgeschlossene eingehende Kante. Beispiel: 8->10 beschreibt
+  //                die Handlung BEI Tag 8 (Ecke), um weiter zu Tag 10 (Drucker) zu gehen;
+  //                das wird angesagt, sobald Tag 8 erreicht ist. Ein zukuenftiger Zweig ab
+  //                Tag 8 (z.B. 8->12) koennte eine ANDERE departureAction haben, ohne 8->10
+  //                zu aendern — die Handlung haengt vom gewaehlten NAECHSTEN Schritt ab,
+  //                nicht am Tag selbst. Einer von: "turn-left", "turn-right",
+  //                "continue-straight" (siehe DEPARTURE_ACTIONS in graph.js). Ersetzt das
+  //                alte, nicht mehr verlaessliche "direction"-Feld UND das manuell
+  //                gepflegte "continueSpeech"-Feld. graph.js leitet daraus automatisch ab:
+  //                ob ein Abbiegen vorliegt (immer ansagen), ob mehrere Kanten zum selben
+  //                Geradeaus-Lauf gehoeren (fuer Rueckmeldungen akkumuliert), und den
+  //                gesprochenen Kurztext — eine neue Kante legt die Handlung also nur HIER
+  //                einmal fest; nav.js kennt keine Tag-spezifischen Sonderfaelle.
   //   searchHint – manuelle Hilfe, solange Tag B noch nicht gefunden ist
   //   reachedM   – optionale eigene Schwelle (Standard SETTINGS.reachedM)
   // distanceM wird automatisch aus FLOOR_GEOMETRY berechnet.
   var EDGES = [
-    { from:1, to:2, direction:"right",
+    { from:1, to:2,
       found:
         "Orientierungspunkt gefunden: Patrik. Gehen Sie geradeaus, ungefähr vier Meter. " +
         "Die Tür von Patrik befindet sich dann links. Halten Sie das Smartphone gerade vor sich.",
@@ -77,9 +97,12 @@
         "Biegen Sie rechts ab.",
       searchHint:
         "Nach dem Rechtsabbiegen: halten Sie das Smartphone gerade vor sich und " +
-        "bewegen Sie es langsam nach links und rechts, bis die nächste Markierung erkannt wird." },
+        "bewegen Sie es langsam nach links und rechts, bis die nächste Markierung erkannt wird.",
+      // Das Abbiegen passiert BEI Tag 2 (Patrik), nicht beim Gehen dieser Kante selbst —
+      // departureAction gehoert daher zu 2->3 (siehe dort), nicht hierher.
+      departureAction: "continue-straight" },
 
-    { from:2, to:3, direction:"right",
+    { from:2, to:3,
       found:
         "Orientierungspunkt gefunden: Flex. Gehen Sie geradeaus, ungefähr sechs Meter. " +
         "Die Tür befindet sich auf der linken Seite.",
@@ -87,9 +110,12 @@
         "Sie sind am Eingang Flex. Die Tür ist links. Gehen Sie weiter geradeaus.",
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
-        "Markierung bei Flex, geradeaus im Korridor." },
+        "Markierung bei Flex, geradeaus im Korridor.",
+      // Hierher gehoert das Rechtsabbiegen bei Patrik: es wird angesagt, sobald Tag 2
+      // erreicht ist, weil DIESE Kante (2->3) die naechste ausgehende Kante ab Tag 2 ist.
+      departureAction: "turn-right" },
 
-    { from:3, to:6, direction:"straight",
+    { from:3, to:6,
       found:
         "Orientierungspunkt gefunden: Korridor. Gehen Sie geradeaus, ungefähr fünf Meter. " +
         "Auf der linken Seite folgen zwei Türen zum Büro Alevtyna.",
@@ -97,9 +123,10 @@
         "Sie sind in der Mitte des Korridors. Gehen Sie weiter geradeaus.",
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
-        "Markierung geradeaus im Korridor." },
+        "Markierung geradeaus im Korridor.",
+      departureAction: "continue-straight" },
 
-    { from:6, to:4, direction:"straight",
+    { from:6, to:4,
       found:
         "Orientierungspunkt gefunden: Martin. Gehen Sie geradeaus, ungefähr neun Meter, " +
         "und halten Sie sich an der rechten Wand. Sie passieren zwei Türen auf der linken Seite.",
@@ -107,9 +134,10 @@
         "Sie sind bei Martin. Der Eingang Martin liegt vor Ihnen. Gehen Sie weiter geradeaus.",
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
-        "Markierung bei Martin, geradeaus im Korridor." },
+        "Markierung bei Martin, geradeaus im Korridor.",
+      departureAction: "continue-straight" },
 
-    { from:4, to:7, direction:"straight",
+    { from:4, to:7,
       found:
         "Orientierungspunkt gefunden: Leonie. Gehen Sie geradeaus, ungefähr sieben Meter. " +
         "Die Tür zu Leonie befindet sich links.",
@@ -117,28 +145,31 @@
         "Sie sind bei Leonie. Die Tür ist links. Gehen Sie weiter geradeaus.",
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
-        "Markierung bei Leonie." },
+        "Markierung bei Leonie.",
+      departureAction: "continue-straight" },
 
-    { from:7, to:8, direction:"straight",
+    { from:7, to:8,
       found:
         "Orientierungspunkt gefunden: Ecke. Gehen Sie geradeaus, ungefähr sechs Meter, " +
         "bis zur Ecke.",
       reached:
-        "Sie haben die Ecke erreicht. Biegen Sie links ab.",
+        "Sie haben die Ecke erreicht. Gehen Sie weiter geradeaus.",
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
-        "Markierung an der Ecke, geradeaus voraus." },
+        "Markierung an der Ecke, geradeaus voraus.",
+      departureAction: "continue-straight" },
 
-    { from:8, to:10, direction:"left",
+    { from:8, to:10,
       found:
         "Orientierungspunkt gefunden: Drucker. Gehen Sie geradeaus, ungefähr vier Meter.",
       reached:
         "Sie sind beim Drucker. Gehen Sie weiter geradeaus.",
       searchHint:
-        "Nach dem Linksabbiegen: bewegen Sie das Smartphone langsam nach links und rechts " +
-        "und suchen Sie die Markierung beim Drucker." },
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
+        "Markierung beim Drucker, geradeaus im Korridor.",
+      departureAction: "continue-straight" },
 
-    { from:10, to:11, direction:"straight",
+    { from:10, to:11,
       found:
         "Orientierungspunkt gefunden: Ende des Korridors. Gehen Sie geradeaus, ungefähr " +
         "zehn Meter, und halten Sie sich an der linken Wand. Sie passieren zwei Türen links.",
@@ -146,9 +177,12 @@
         "Sie haben das Ende des Korridors erreicht. Die Tür befindet sich links.",
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
-        "Markierung am Ende des Korridors, geradeaus voraus." },
+        "Markierung am Ende des Korridors, geradeaus voraus.",
+      // Tag 11 hat keine Nachfolge-Kante -> ist auf jeder Route, die ihn enthaelt,
+      // automatisch das Ziel; departureAction hier nur der Vollstaendigkeit halber.
+      departureAction: "continue-straight" },
 
-    { from:4, to:5, direction:"right",
+    { from:4, to:5,
       found:
         "Orientierungspunkt gefunden: Tischtennis. Gehen Sie geradeaus, ungefähr elf Meter, " +
         "in Richtung Küche. Die Küchentür befindet sich links.",
@@ -156,7 +190,9 @@
         "Sie sind bei Tischtennis. Die Küchentür befindet sich links.",
       searchHint:
         "Wenden Sie sich in Richtung Küche und bewegen Sie das Smartphone langsam " +
-        "nach links und rechts, bis die Markierung bei Tischtennis erkannt wird." }
+        "nach links und rechts, bis die Markierung bei Tischtennis erkannt wird.",
+      // Tag 5 hat ebenfalls keine Nachfolge-Kante -> immer Ziel; siehe Kommentar oben.
+      departureAction: "continue-straight" }
   ];
 
   // Ankunftsansage am ZIEL (ersetzt das reached der letzten Kante).
