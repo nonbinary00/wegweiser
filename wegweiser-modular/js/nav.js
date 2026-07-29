@@ -63,6 +63,8 @@ import { record, getTestName } from './logger.js';
   var lastRawDist = null;         // v13: letzte gueltige Roh-Distanz
   var lastRawAt = 0;              // v13: Zeitpunkt der letzten gueltigen Messung
   var trackDetCount = 0;          // v13: Anzahl gueltiger Messungen im aktuellen Abschnitt
+  var trackingConfirmed = false;  // neu: erst nach SETTINGS.trackingConfirmDetections
+                                   // gueltigen Messungen darf ueberhaupt "verloren" gemeldet werden
   var arrivalBelowCount = 0;      // v13: Frames in Folge mit arrivalDistance <= Schwelle
   var lastTrackDbgAt = 0;         // v13: Drossel fuer Debug-Log
   var milestonesM = [];           // Zwischenansage-Punkte, abhängig von der Abschnittslänge
@@ -129,6 +131,7 @@ import { record, getTestName } from './logger.js';
     rawRecent = [];                  // v13
     lastRawDist = null; lastRawAt = 0;
     trackDetCount = 0;
+    trackingConfirmed = false;
     arrivalBelowCount = 0;
     lastTrackDbgAt = 0;
     // ---- Instrumentierung (neu): pro Abschnitt zuruecksetzen ----
@@ -342,6 +345,14 @@ import { record, getTestName } from './logger.js';
       trackDetCount++;
       rawRecent.push(rawDist);
       if(rawRecent.length > SETTINGS.rawWindowN) rawRecent.shift();
+      // neu: Tracking gilt erst als bestaetigt, wenn der erwartete Tag mindestens
+      // trackingConfirmDetections mal gueltig gemessen wurde. Vorher darf kein
+      // Verlust ("TAG LOST"/LOST_STOPPED/Stopp-Ansage/REACQUIRED) ausgeloest werden.
+      if(!trackingConfirmed && trackDetCount >= SETTINGS.trackingConfirmDetections){
+        trackingConfirmed = true;
+        navLog("TRACKING_CONFIRMED", { expectedTag: expectedNextTagId,
+          detections: trackDetCount, raw: r1(rawDist), ema: r1(emaDist) });
+      }
     }
     var recentMin = rawRecent.length ? Math.min.apply(null, rawRecent) : null;
 
@@ -403,6 +414,9 @@ import { record, getTestName } from './logger.js';
     }
 
     // Tag nicht (mehr) im Bild
+    // neu: Tracking noch nicht bestaetigt (< trackingConfirmDetections gueltige
+    // Messungen) -> keine Verlust-Erkennung, Anwendung bleibt effektiv im Suchzustand.
+    if(!trackingConfirmed) return;
     var lostFor = now - expectedLastSeenAt;
     if(lostFor <= SETTINGS.trackLostStopMs) return;  // kurzes Flackern ignorieren
 

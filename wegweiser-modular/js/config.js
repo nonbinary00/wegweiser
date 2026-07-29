@@ -27,7 +27,9 @@
                                   // stabil bis <= diese Distanz angenaehert wurde
     nearLossMinDets: 6,           // v13: ... und mindestens so viele Messungen im Abschnitt vorlagen
     rawWindowN: 5,                // v13: Fenster der letzten Roh-Distanzen (juengstes Minimum)
-    trackLostStopMs: 1300,        // Tag so lange weg (>= 1-1,5 s) => "Stopp"-Ansage
+    trackingConfirmDetections: 3, // neu: so viele gueltige Messungen des erwarteten Tags
+                                  // noetig, bevor "verloren" ueberhaupt gemeldet werden darf
+    trackLostStopMs: 1800,        // Tag so lange weg (>= 1,8 s) => "Stopp"-Ansage
     progressMinGapMs: 2500,       // Mindestabstand zwischen Zwischenansagen
     awayDeltaM: 1.2,              // Distanz steigt um so viel über Minimum => Warnung
     otherTagFrames: 6,            // fremder Tag: erst nach ~0,8 s stabiler Sicht melden
