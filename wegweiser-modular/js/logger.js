@@ -80,6 +80,18 @@ function clear(){
 
 function pad2(n){ return (n < 10 ? "0" : "") + n; }
 
+// Fallback fuer Browser ohne Web-Share-Files-Unterstuetzung (unveraendert ggue. vorher).
+function downloadJsonBlob(blob, filename){
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+}
+
 function exportJson(){
   var payload = {
     metadata: {
@@ -91,19 +103,39 @@ function exportJson(){
     events: buffer
   };
   var json = JSON.stringify(payload, null, 2);
-  var blob = new Blob([json], { type: "application/json" });
-  var url = URL.createObjectURL(blob);
   var ts = new Date();
   var filename = "wegweiser-v13-log-" +
     ts.getFullYear() + pad2(ts.getMonth() + 1) + pad2(ts.getDate()) + "-" +
     pad2(ts.getHours()) + pad2(ts.getMinutes()) + pad2(ts.getSeconds()) + ".json";
-  var a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+  var blob = new Blob([json], { type: "application/json" });
+
+  // iOS/Safari: blob: URLs oeffnen als Webseite statt Datei anzubieten, und die
+  // Share Sheet zeigt "In Dateien sichern" nur bei einem echten File in navigator.share.
+  // Deshalb bevorzugt: Web Share API mit echtem File-Objekt, Download nur als Fallback.
+  var file;
+  try{ file = new File([blob], filename, { type: "application/json" }); }catch(e){ file = null; }
+
+  if (
+    file &&
+    navigator.share &&
+    navigator.canShare &&
+    navigator.canShare({ files: [file] })
+  ) {
+    navigator.share({
+      files: [file],
+      title: filename
+    }).catch(function(e) {
+      // The user intentionally closed the Share Sheet.
+      if (e && e.name === "AbortError") return;
+
+      // File sharing failed, so use the normal download fallback.
+      downloadJsonBlob(blob, filename);
+    });
+
+    return;
+  }
+
+  downloadJsonBlob(blob, filename);
 }
 
 // ---- Selbst-Initialisierung beim Laden des Moduls (analog speech.js/pickVoice) ----
