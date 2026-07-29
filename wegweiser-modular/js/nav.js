@@ -496,12 +496,14 @@ import { record, getTestName } from './logger.js';
   }
 
   // ==================== Kontrollierter Routen-Skip (neu) ====================
-  // KEIN genereller Graph-Shortcut: nur dieser eine, namentlich benannte Fall ist
-  // erlaubt (gerader Korridor 6->4->7; Tag 4 laesst sich beim schnellen Gehen leicht
-  // verpassen, waehrend Tag 7 bereits stabil sichtbar ist). Graph/EDGE_MAP/findPath()
-  // bleiben unveraendert; dies ist reine Laufzeit-Wiederherstellung, KEINE Kante 6->7.
+  // KEIN genereller Graph-Shortcut: nur diese namentlich benannten Faelle sind erlaubt
+  // (gerader Korridor; der erwartete Zwischen-Tag laesst sich beim schnellen Gehen
+  // leicht verpassen, waehrend der naechste Tag bereits stabil sichtbar ist). Graph/
+  // EDGE_MAP/findPath() bleiben unveraendert; dies ist reine Laufzeit-Wiederherstellung,
+  // KEINE Kanten 6->7 oder 4->8.
   var ROUTE_SKIP_RULES = {
-    4: { viaFrom: 6, to: 7 }
+    4: { viaFrom: 6, to: 7 },
+    7: { viaFrom: 4, to: 8 }
   };
 
   // Darf expectedNextTagId (Tag 4) zugunsten von confirmedTagId (Tag 7) uebersprungen
