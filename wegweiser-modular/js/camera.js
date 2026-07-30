@@ -15,12 +15,18 @@
 import { video, gate, errBox, errMsg } from './dom.js';
 import { SAFETY_SPEECH } from './config.js';
 import { say } from './speech.js';
+import { record } from './logger.js';
 import { scheduleNext } from './main-loop.js';
 
   var stream = null;
   var facing = "environment";
   var running = false;
   var safetyGiven = false;
+  // neu (Audit-Ziel 6): verhindert, dass DIESELBE Kamera-Fehlermeldung bei
+  // wiederholten Versuchen (z.B. mehrfaches Druecken von "Erneut versuchen")
+  // erneut gesprochen wird — die visuelle Anzeige (errMsg) wird davon NICHT
+  // beeinflusst und aktualisiert sich weiterhin bei jedem Versuch.
+  var lastSpokenCameraError = null;
 
   // ---- Kamera ----
   function stopStream(){ if(stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; } }
@@ -28,7 +34,8 @@ import { scheduleNext } from './main-loop.js';
   async function startCamera(){
     errBox.style.display = "none";
     if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-      return showError("Dieser Browser unterstützt keinen Kamera-Zugriff. Bitte Safari oder Chrome verwenden und die Seite über HTTPS öffnen.");
+      return showError("Dieser Browser unterstützt keinen Kamera-Zugriff. Bitte Safari oder Chrome verwenden und die Seite über HTTPS öffnen.",
+        { source: "camera.unsupported" });
     }
     stopStream();
     try{
@@ -38,17 +45,19 @@ import { scheduleNext } from './main-loop.js';
       });
     }catch(e){
       try{ stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:true }); }
-      catch(e2){ return showError(errText(e2)); }
+      catch(e2){ return showError(errText(e2), { source: "camera.permissionError" }); }
     }
     video.srcObject = stream;
     try{ await video.play(); }catch(e){}
     gate.style.display = "none";
     running = true;
+    lastSpokenCameraError = null;   // neu: erfolgreicher Start -> naechster Fehler darf wieder gesprochen werden
     if(!safetyGiven){
-      say("Wegweiser bereit. " + SAFETY_SPEECH, {interrupt:true});
+      say("Wegweiser bereit. " + SAFETY_SPEECH,
+        { interrupt:true, source:"camera.readyFirstTime", category:"STATUS" });
       safetyGiven = true;
     } else {
-      say("Wegweiser bereit.", {interrupt:true});
+      say("Wegweiser bereit.", { interrupt:true, source:"camera.ready", category:"STATUS" });
     }
     scheduleNext();
   }
@@ -58,7 +67,24 @@ import { scheduleNext } from './main-loop.js';
     if(n === "NotFoundError" || n === "OverconstrainedError") return "Keine passende Kamera gefunden. Versuche die andere Kamera.";
     return "Kamera konnte nicht gestartet werden (" + (n || "Fehler") + ").";
   }
-  function showError(msg){ running = false; errMsg.textContent = msg; errBox.style.display = "flex"; }
+
+  // neu (Audit-Ziel 6): opts.source identifiziert die Fehlerart fuer die Log-
+  // Auswertung; opts.spokenText erlaubt eine kurze, unverfaengliche gesprochene
+  // Alternative, falls `msg` selbst rohen technischen Text enthaelt (siehe app.js,
+  // Detektor-Ladefehler) — msg (das visuelle Fehlerfeld) bleibt IMMER unveraendert.
+  function showError(msg, opts){
+    opts = opts || {};
+    running = false;
+    errMsg.textContent = msg;
+    errBox.style.display = "flex";
+    var spokenText = opts.spokenText || msg;
+    if(spokenText !== lastSpokenCameraError){
+      lastSpokenCameraError = spokenText;
+      say(spokenText, { interrupt: true, source: opts.source || "camera.error",
+        category: "SAFETY_CRITICAL" });
+    }
+    record("CAMERA_ERROR", { message: msg, source: opts.source || "camera.error" });
+  }
 
   function toggleFacing(){
     facing = (facing === "environment") ? "user" : "environment";

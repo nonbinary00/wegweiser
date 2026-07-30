@@ -17,26 +17,40 @@ import { markerName, metersDE, EDGE_MAP } from './graph.js';
 import {
   startNavigation, endNavigation, lastRouteInstruction, destinationReached, currentTagId,
   navigationActive, expectedNextTagId, pathTagIds, segIndex,
-  destinationId, routeRunId, setCandidate, setEmaDist
+  destinationId, routeRunId, navState, setCandidate, setEmaDist
 } from './nav.js';
 import { startCamera, showError, running, toggleFacing } from './camera.js';
-import { say, toggleSound, soundOn } from './speech.js';
+import { say, toggleSound, soundOn, cancelSpeech } from './speech.js';
 import { setDetector } from './detector-state.js';
 import { exportJson, clear, record } from './logger.js';
+
+  // ---- TTS-Observability (neu): gemeinsame Metadaten fuer app.js-Ansagen, analog zu
+  // nav.js' ttsOpts() — dieses Modul hat keinen eigenen navState-Zaehler, liest den
+  // aktuellen Wert aber live aus dem (bereits importierten) nav.js-Export.
+  function appTtsOpts(extra){
+    var o = { state: navState, expectedTag: expectedNextTagId, routeRunId: routeRunId };
+    if(extra) for(var k in extra) o[k] = extra[k];
+    return o;
+  }
 
   // ---- Bedienung ----
   gate.addEventListener("click", function(){ if(!running) startCamera(); });
   retryBtn.addEventListener("click", startCamera);
 
   navStartBtn.addEventListener("click", function(){
-    if(!running){ say("Bitte zuerst die Kamera starten.", {interrupt:true}); return; }
+    if(!running){
+      say("Bitte zuerst die Kamera starten.",
+        appTtsOpts({interrupt:true, source:"app.cameraNotRunning", category:"STATUS"}));
+      return;
+    }
     startNavigation();
   });
   navEndBtn.addEventListener("click", function(){ endNavigation(true); });
 
   repeatBtn.addEventListener("click", function(){
-    if(lastRouteInstruction) say(lastRouteInstruction, {interrupt:true});
-    else say("Noch keine Anweisung vorhanden.", {interrupt:true});
+    var opts = appTtsOpts({interrupt:true, source:"app.repeatInstruction", category:"NAVIGATION_CONTEXT"});
+    if(lastRouteInstruction) say(lastRouteInstruction, opts);
+    else say("Noch keine Anweisung vorhanden.", opts);
   });
 
   // neu: verbleibende Strecke ausschliesslich aus den bereits bekannten Kanten-Distanzen
@@ -77,7 +91,7 @@ import { exportJson, clear, record } from './logger.js';
     } else {
       p = "Keine Navigation aktiv. Bitte wählen Sie ein Ziel und starten Sie die Navigation.";
     }
-    say(p, {interrupt:true});
+    say(p, appTtsOpts({interrupt:true, source:"app.whereAmI", category:"NAVIGATION_CONTEXT"}));
     record("TTS_WHERE_AM_I", { text: p, routeRunId: routeRunId });
   });
 
@@ -89,18 +103,21 @@ import { exportJson, clear, record } from './logger.js';
   muteBtn.addEventListener("click", function(){
     toggleSound();
     muteBtn.firstChild.textContent = soundOn ? "Ton an" : "Ton aus";
-    if(!soundOn && "speechSynthesis" in window) speechSynthesis.cancel();
-    else say("Ton eingeschaltet", {interrupt:true});
+    // neu: cancelSpeech() statt direktem speechSynthesis.cancel() — protokolliert die
+    // dadurch verdraengte Anfrage korrekt als TTS_CANCELLED, statt spurlos zu
+    // verschwinden (Audit-Befund F-10).
+    if(!soundOn) cancelSpeech("app.muteToggleOff");
+    else say("Ton eingeschaltet", appTtsOpts({interrupt:true, source:"app.muteToggleOn", category:"STATUS"}));
   });
 
   // ---- Logging-Panel (neu, Feldtest-Instrumentierung) ----
   logExportBtn.addEventListener("click", function(){
     exportJson();
-    say("Log exportiert.", {interrupt:true});
+    say("Log exportiert.", appTtsOpts({interrupt:true, source:"app.logExported", category:"STATUS"}));
   });
   logClearBtn.addEventListener("click", function(){
     clear();
-    say("Log gelöscht.", {interrupt:true});
+    say("Log gelöscht.", appTtsOpts({interrupt:true, source:"app.logCleared", category:"STATUS"}));
   });
 
   // ---- Zielauswahl aus NODES (destination:true) ----
@@ -114,13 +131,23 @@ import { exportJson, clear, record } from './logger.js';
   destSel.addEventListener("change", function(){
     var v = destSel.value ? parseInt(destSel.value, 10) : null;
     if(v != null && NODES[v] && NODES[v].destination)
-      say("Ziel gewählt: " + NODES[v].name + ". Drücken Sie Navigation starten.", {interrupt:true});
+      say("Ziel gewählt: " + NODES[v].name + ". Drücken Sie Navigation starten.",
+        appTtsOpts({interrupt:true, source:"app.destinationSelected", category:"STATUS"}));
     else
-      say("Kein Ziel gewählt.", {interrupt:true});
+      say("Kein Ziel gewählt.", appTtsOpts({interrupt:true, source:"app.destinationCleared", category:"STATUS"}));
   });
 
   try{
     setDetector(new AR.Detector({ dictionaryName: "APRILTAG_36h11" }));
   }catch(e){
-    showError("Interner Fehler beim Laden der Erkennung: " + e);
+    // neu: kurzer, unverfaenglicher gesprochener Hinweis statt der rohen Exception —
+    // die technische Detailmeldung ("Interner Fehler beim Laden der Erkennung: " + e)
+    // bleibt UNVERAENDERT im visuellen Fehler-Feld (errMsg), wird aber NICHT mehr
+    // woertlich gesprochen (Audit-Anforderung: "avoid exposing raw technical exception
+    // text through TTS").
+    showError("Interner Fehler beim Laden der Erkennung: " + e, {
+      source: "camera.detectorLoadError",
+      spokenText: "Ein interner Fehler ist beim Starten der Erkennung aufgetreten. " +
+        "Bitte laden Sie die Seite neu."
+    });
   }

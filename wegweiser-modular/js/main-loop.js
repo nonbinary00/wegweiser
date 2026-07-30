@@ -15,6 +15,7 @@ import { W, H, setFrameSize } from './frame-state.js';
 import { MARKERS, markerName } from './graph.js';
 import { distanceMeters } from './distance.js';
 import { showRoom, showIdle, updatePanel, drawMarker } from './ui.js';
+import { record } from './logger.js';
 import {
   navState, NavState, navigationActive, pathTagIds, destinationReached, destinationId,
   currentTagId, expectedNextTagId, segIndex, emaDist, candId, candCount, wrongCandId,
@@ -25,6 +26,13 @@ import {
   setCandidate, setEmaDist
 } from './nav.js';
 import { running } from './camera.js';
+
+  // neu (Audit-Ziel 6): technische Detektor-Ausnahmen bleiben NUR im technischen Log
+  // (nie gesprochen — Detektor-Ausnahmen koennen pro Frame auftreten, siehe Aufrufer
+  // unten) und werden gedrosselt (hoechstens alle 5s ein Log-Eintrag), damit eine
+  // dauerhaft fehlschlagende Erkennung nicht den Log-Puffer flutet. Aendert NICHTS am
+  // bestehenden Fallback-Verhalten (`detected = []`).
+  var lastDetectorErrorLogAt = 0;
 
   // ==================== HAUPTSCHLEIFE ====================
   function tick(){
@@ -38,7 +46,14 @@ import { running } from './camera.js';
       ctx.drawImage(video, 0, 0, W, H);
       var img = ctx.getImageData(0, 0, W, H);
       var detected = [];
-      try{ detected = detector.detect(img); }catch(e){ detected = []; }
+      try{ detected = detector.detect(img); }catch(e){
+        detected = [];
+        var errNow = performance.now();
+        if(errNow - lastDetectorErrorLogAt > 5000){
+          lastDetectorErrorLogAt = errNow;
+          record("DETECTOR_EXCEPTION", { message: (e && e.message) || String(e) });
+        }
+      }
 
       var now = performance.now();
       var expectedDet = null, bestKnown = null, bestKnownDist = Infinity;

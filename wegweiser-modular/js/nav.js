@@ -104,16 +104,22 @@ import { record, getTestName } from './logger.js';
       var suppressedData = { text: text, activeDirectionText: activeDirectionText };
       for(var k in (logData || {})) suppressedData[k] = logData[k];
       navLog("TTS_STRAIGHT_SUPPRESSED_DUPLICATE", suppressedData);
-      return false;
+      return { speechId: null, accepted: false, spoken: false, failed: false,
+               suppressionReason: "duplicate-direction", error: null };
     }
-    if(say(text, opts)){
+    // neu (Audit-Korrektur F-1/Ziel 4): activeDirectionText darf NUR aktualisiert
+    // werden, wenn say() die Anfrage TATSAECHLICH angenommen hat (result.accepted) —
+    // vorher wurde jeder Wahrheitswert von say() (auch "stumm/beschaeftigt/fehlgeschlagen"
+    // faelschlich als "true" behandelt bei stumm) als Erfolg gewertet, was den Dedup-
+    // Zustand verfaelschen konnte.
+    var result = say(text, opts);
+    if(result.accepted){
       activeDirectionText = text;
-      var spokenData = { text: text };
+      var spokenData = { text: text, speechId: result.speechId };
       for(var k2 in (logData || {})) spokenData[k2] = logData[k2];
       navLog(logEvent, spokenData);
-      return true;
     }
-    return false;
+    return result;
   }
 
   // Gemeinsame Log-Nutzlast fuer alle Stopp-Entscheidungen (Anforderung: expectedTag,
@@ -225,10 +231,23 @@ import { record, getTestName } from './logger.js';
   }
   function r1(v){ return v == null ? null : Math.round(v * 100) / 100; }
 
+  // ---- TTS-Observability (neu) ----
+  // Baut die gemeinsamen say()-Metadaten (state/expectedTag/routeRunId) aus dem
+  // AKTUELLEN Modul-Zustand zum Zeitpunkt des Aufrufs; `extra` kann jedes Feld gezielt
+  // ueberschreiben (z.B. expectedTag, falls die naechste erwartete Markierung an dieser
+  // Stelle noch nicht in expectedNextTagId steht). source/category MUESSEN in `extra`
+  // mitgegeben werden.
+  function ttsOpts(extra){
+    var o = { state: navState, expectedTag: expectedNextTagId, routeRunId: routeRunId };
+    if(extra) for(var k in extra) o[k] = extra[k];
+    return o;
+  }
+
   function startNavigation(){
     var destId = destSel.value ? parseInt(destSel.value, 10) : null;
     if(destId == null || !NODES[destId] || !NODES[destId].destination){
-      say("Bitte wählen Sie zuerst ein Ziel.", {interrupt:true});
+      say("Bitte wählen Sie zuerst ein Ziel.",
+        ttsOpts({interrupt:true, source:"nav.noDestinationSelected", category:"STATUS"}));
       return;
     }
     destinationId = destId;
@@ -244,19 +263,29 @@ import { record, getTestName } from './logger.js';
     currentScanDelayMs = SETTINGS.scanHintAfterMs;
     setNavState(NavState.SEARCHING_START_TAG);
     updatePanel(null);
+    // neu: routeRunId wird JETZT (vor der Ansage) statt erst danach erzeugt — reine
+    // Instrumentierungs-Reihenfolge (eine zufaellige Id), damit die Route-Start-Ansage
+    // sie im TTS-Log mitfuehren kann. Keine Auswirkung auf Navigationslogik.
+    routeRunId = generateRouteRunId();
     say("Ziel gewählt: " + markerName(destId) + ". Richten Sie das Smartphone auf die " +
         "nächste Markierung in Ihrer Nähe. Von dort wird die Route berechnet.",
-        {interrupt:true});
+        ttsOpts({interrupt:true, source:"nav.routeStart", category:"NAVIGATION_CONTEXT"}));
     // ---- Instrumentierung (neu) ----
-    routeRunId = generateRouteRunId();
     navLog("ROUTE_START", { destinationId: destId, destination: markerName(destId),
       testName: getTestName() });
   }
 
-  function endNavigation(announce){
-    // ---- Instrumentierung (neu): vor dem Zuruecksetzen erfassen, ob eine laufende
-    // (noch nicht angekommene) Route abgebrochen wird. ----
-    var wasCancelled = navigationActive && !destinationReached;
+  function endNavigation(announce, reason){
+    // ---- Instrumentierung (neu, Audit-Korrektur Ziel 5): vor dem Zuruecksetzen
+    // erfassen, WELCHER der drei unterscheidbaren Faelle vorliegt — manueller Abbruch
+    // (Route lief noch, Ziel nicht erreicht), Beenden NACH Zielankunft (kein Abbruch),
+    // oder ein zukuenftiger Fehler-Reset (reason==="error", heute von keiner
+    // Aufrufstelle ausgeloest, aber die Unterscheidung ist ab jetzt moeglich, ohne das
+    // Fehler-System neu zu entwerfen). wasActive/wasReached MUESSEN vor jedem Reset
+    // gelesen werden. ----
+    var wasActive = navigationActive;
+    var wasReached = destinationReached;
+    var effectiveReason = reason || (wasReached ? "after-arrival" : "manual");
     navigationActive = false;
     pathTagIds = null;
     segIndex = -1;
@@ -268,9 +297,23 @@ import { record, getTestName } from './logger.js';
     resetActiveDirectionState();
     setNavState(NavState.IDLE);
     updatePanel(null);
-    if(announce) say("Navigation beendet.", {interrupt:true});
-    // ---- Instrumentierung (neu) ----
-    if(wasCancelled) navLog("ROUTE_CANCELLED", {});
+    if(announce){
+      say("Navigation beendet.",
+        ttsOpts({interrupt:true, source:"nav.navigationEnded", category:"STATUS"}));
+    }
+    // ---- Instrumentierung (neu): EIN Ereignis feuert immer (unabhaengig von
+    // `announce`), damit die Sprach- und die Protokoll-Bedingung nicht mehr
+    // auseinanderlaufen koennen (Audit-Befund F-6). Die eigentliche Ankunfts-
+    // Bestaetigung (ROUTE_END) wird weiterhin ausschliesslich in
+    // arriveAtDestination() geloggt — hier geht es nur um das Beenden/Abbrechen
+    // selbst, NIE um eine normal abgeschlossene Route als "abgebrochen" zu werten. ----
+    navLog("NAVIGATION_END_REQUESTED", { announce: !!announce, wasActive: wasActive,
+      wasReached: wasReached, reason: effectiveReason });
+    if(wasActive && !wasReached && effectiveReason !== "error"){
+      navLog("ROUTE_CANCELLED", { reason: effectiveReason });
+    } else if(effectiveReason === "error"){
+      navLog("ROUTE_RESET_ERROR", { reason: "error", wasActive: wasActive, wasReached: wasReached });
+    }
     routeRunId = null;
   }
 
@@ -297,7 +340,7 @@ import { record, getTestName } from './logger.js';
       var t = (OFF_ROUTE_HINTS[tagId] || ("Sie sind bei " + markerName(tagId) + ".")) +
               " Von hier ist noch kein Weg zum Ziel beschrieben. " +
               "Bitte gehen Sie zum Eingang und suchen Sie Tag 1.";
-      say(t, {interrupt:true});
+      say(t, ttsOpts({interrupt:true, source:"nav.noPathFound", category:"NAVIGATION_CONTEXT"}));
       setNavState(NavState.SEARCHING_START_TAG);
       return;
     }
@@ -309,7 +352,8 @@ import { record, getTestName } from './logger.js';
       ("Sie sind bei " + markerName(tagId) + ". Halten Sie das Smartphone vor sich " +
        "und suchen Sie die nächste Markierung.");
     lastRouteInstruction = start;
-    say("Route berechnet. " + start, {interrupt:true});
+    say("Route berechnet. " + start, ttsOpts({interrupt:true, source:"nav.routeCalculated",
+      category:"NAVIGATION_CONTEXT", expectedTag: p[1]}));
     // ---- Instrumentierung (neu) ----
     navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
     beginSegment();
@@ -392,18 +436,25 @@ import { record, getTestName } from './logger.js';
       // Echtes Abbiegen: MUSS IMMER hoerbar sein (nie durch Dedup unterdrueckt) — direkt
       // say() statt speakDirectionIfNew(), aber activeDirectionText wird trotzdem auf den
       // Abbiege-Text gesetzt, damit die naechste Geradeaus-Bestaetigung danach korrekt
-      // als NEU erkannt wird (nicht identisch mit dem vorherigen Abbiege-Text).
-      say(t, {interrupt:true});
+      // als NEU erkannt wird (nicht identisch mit dem vorherigen Abbiege-Text). Dieses
+      // unconditional-Update ist ABSICHTLICH unabhaengig von result.accepted (anders als
+      // die Faelle unten, die ueber speakDirectionIfNew laufen): der logische
+      // "aktuelle Richtungszeiger" muss auch bei stummem Modus weiterlaufen, sonst
+      // wuerde die naechste Geradeaus-Ansage nach einem Entstummen faelschlich als
+      // Duplikat einer NIE gehoerten Abbiege-Ansage unterdrueckt.
+      var turnResult = say(t, ttsOpts({interrupt:true, source:"nav.turnInstruction",
+        category:"ACTION_REQUIRED"}));
       activeDirectionText = t;
       navLog("TTS_DIRECTION", { reachedTag: reachedTagId, action: nextEdge.departureAction,
-        isTurn: true, text: t });
+        isTurn: true, text: t, speechId: turnResult.speechId });
     } else {
       // Kein Abbiegen: ueber die gemeinsame Dedup-Logik ansagen — auf einem langen
       // geraden Korridor mit mehreren Zwischen-Tags wird dies nur beim ERSTEN
       // Zwischen-Tag nach dem letzten Abbiegen tatsaechlich gesprochen; jeder weitere
       // Zwischen-Tag auf DERSELBEN Geradeaus-Strecke wird als Duplikat unterdrueckt
       // (TTS_STRAIGHT_SUPPRESSED_DUPLICATE) — genau EINE Ansage pro Korridor.
-      speakDirectionIfNew(t, {interrupt:true}, "TTS_STRAIGHT",
+      speakDirectionIfNew(t, ttsOpts({interrupt:true, source:"nav.reachPointStraight",
+        category:"NAVIGATION_CONTEXT"}), "TTS_STRAIGHT",
         { reachedTag: reachedTagId, action: nextEdge.departureAction, trigger: "reached-tag" });
     }
     segIndex++;
@@ -423,11 +474,12 @@ import { record, getTestName } from './logger.js';
     var t = ARRIVALS[destinationId] || ("Ziel erreicht. Sie sind bei " + markerName(destinationId) + ".");
     lastRouteInstruction = t;
     setNavState(NavState.DESTINATION_REACHED);
-    say(t, {interrupt:true});
+    var destResult = say(t, ttsOpts({interrupt:true, source:"nav.destinationArrival",
+      category:"ACTION_REQUIRED"}));
     updatePanel(null);
     // ---- Instrumentierung (neu) ----
     navLog("ROUTE_END", { destinationId: destinationId, reason: "arrived" });
-    navLog("TTS_DESTINATION", { destinationId: destinationId, text: t });
+    navLog("TTS_DESTINATION", { destinationId: destinationId, text: t, speechId: destResult.speechId });
   }
 
   // ---- TRACKING: laufende Distanzmessung zum Tag voraus ----
@@ -496,8 +548,9 @@ import { record, getTestName } from './logger.js';
       // Distanz steigt deutlich über das Minimum -> Nutzer entfernt sich
       if(!awayWarned && minTrackDist != null &&
          emaDist - minTrackDist >= SETTINGS.awayDeltaM && !speaking()){
-        if(say("Sie entfernen sich von der Markierung. Bleiben Sie stehen.", {}))
-          awayWarned = true;
+        var awayResult = say("Sie entfernen sich von der Markierung. Bleiben Sie stehen.",
+          ttsOpts({source:"nav.awayWarning", category:"ACTION_REQUIRED"}));
+        if(awayResult.accepted) awayWarned = true;
       }
       return;
     }
@@ -584,7 +637,8 @@ import { record, getTestName } from './logger.js';
         var edge = currentEdge();
         var isTurnNext = !!(edge && isTurnAction(edge));
         var recoveryText = isTurnNext ? departureActionSpeech(edge) : "Gehen Sie weiter geradeaus.";
-        speakDirectionIfNew(recoveryText, {interrupt:true}, "TTS_RECOVERY_STRAIGHT",
+        speakDirectionIfNew(recoveryText, ttsOpts({interrupt:true, source:"nav.reacquired",
+          category:"NAVIGATION_CONTEXT"}), "TTS_RECOVERY_STRAIGHT",
           { expectedTag: expectedNextTagId, trigger: "recovery-after-stop", isTurn: isTurnNext });
       }
       return;
@@ -615,14 +669,15 @@ import { record, getTestName } from './logger.js';
         lostText = "Stopp. Suchen Sie die Markierung. Bewegen Sie die Kamera langsam " +
                    "nach links und rechts.";
       }
-      say(lostText, {interrupt:true});
+      var lostResult = say(lostText, ttsOpts({interrupt:true, source:"nav.lostInstruction",
+        category:"SAFETY_CRITICAL"}));
       lostInstructionSpoken = true;
       lostSpeechPending = false;
       resetActiveDirectionState();   // Vertrauensbasis zuruecksetzen -> Wiederaufnahme spricht frisch
       stopSaidAt = now;
       navLog("TTS_LOST_INSTRUCTION", { expectedTag: expectedNextTagId,
         variant: (emaDist != null && emaDist <= SETTINGS.nearLostM) ? "near" : "stop",
-        text: lostText, lostForMs: Math.round(elapsed) });
+        text: lostText, lostForMs: Math.round(elapsed), speechId: lostResult.speechId });
       return;
     }
 
@@ -631,8 +686,9 @@ import { record, getTestName } from './logger.js';
     // (SETTINGS.lostReminderRepeatMs statt scanHintRepeatMs).
     if(lostInstructionSpoken && now - stopSaidAt >= SETTINGS.lostReminderRepeatMs && !speaking()){
       stopSaidAt = now;
-      say("Suchen Sie weiter.", {});
-      navLog("TTS_LOST_REMINDER", { expectedTag: expectedNextTagId });
+      var reminderResult = say("Suchen Sie weiter.",
+        ttsOpts({source:"nav.lostReminder", category:"STATUS"}));
+      navLog("TTS_LOST_REMINDER", { expectedTag: expectedNextTagId, speechId: reminderResult.speechId });
     }
   }
 
@@ -859,7 +915,14 @@ import { record, getTestName } from './logger.js';
                               // beginnt, optionale Vibration, KEINE Ankunftsansage hier
 
     if(wasLostPending) resetActiveDirectionState();
-    speakDirectionIfNew("Gehen Sie weiter geradeaus.", {}, "TTS_STRAIGHT",
+    // Audit-Korrektur (F-1/Ziel 4): dies war der EINZIGE Richtungs-Bestaetigungs-Aufruf
+    // ohne interrupt:true — konnte dadurch bei belegtem TTS-Kanal spurlos verworfen
+    // werden UND den Dedup-Zustand fuer die naechste Ansage verfaelschen. Jetzt wie
+    // alle anderen Richtungs-Bestaetigungen konsistent interrupt:true; der gesprochene
+    // Text ("Gehen Sie weiter geradeaus.") bleibt UNVERAENDERT.
+    speakDirectionIfNew("Gehen Sie weiter geradeaus.",
+      ttsOpts({interrupt:true, source:"nav.forwardSkipConfirmation", category:"NAVIGATION_CONTEXT"}),
+      "TTS_STRAIGHT",
       { confirmedTag: confirmedTagId,
         trigger: wasLostPending ? "forward-retarget-after-lost" : "forward-retarget" });
   }
@@ -874,16 +937,19 @@ import { record, getTestName } from './logger.js';
     if(offRouteSaid[tagId]) return;      // pro Abschnitt nur einmal
     var now = performance.now();
     if(now - lastWrongTagAt < SETTINGS.wrongTagCooldownMs) return;
-    var p;
+    var p, source;
     var passedIdx = pathTagIds ? pathTagIds.indexOf(tagId) : -1;
     if(passedIdx >= 0 && passedIdx <= segIndex){
       p = "Sie gehen möglicherweise zurück. Sie sind wieder bei " + markerName(tagId) +
           ". Bitte folgen Sie der letzten Anweisung.";
+      source = "nav.backTagWarning";
     } else {
       p = (OFF_ROUTE_HINTS[tagId] || ("Erkannt: " + markerName(tagId) + ".")) +
           " Diese Markierung liegt nicht auf dem Weg. Bitte folgen Sie der letzten Anweisung.";
+      source = "nav.offRouteWarning";
     }
-    if(say(p, {})){
+    var result = say(p, ttsOpts({source: source, category:"ACTION_REQUIRED"}));
+    if(result.accepted){
       lastWrongTagAt = now;
       offRouteSaid[tagId] = true;
     }
@@ -907,7 +973,8 @@ import { record, getTestName } from './logger.js';
     var msg = { left:"Markierung links.", right:"Markierung rechts.",
                 up:"Smartphone etwas höher.", down:"Smartphone etwas tiefer.",
                 center:"Markierung mittig." }[zone];
-    if(say(msg, {})){ lastAimZone = zone; lastAimAt = now; }
+    var result = say(msg, ttsOpts({source:"nav.aimGuidance", category:"ACTION_REQUIRED"}));
+    if(result.accepted){ lastAimZone = zone; lastAimAt = now; }
   }
 
   // Suchhinweise (vor dem ersten Kontakt mit dem Kanten-Tag). Wiederholen sich.
@@ -930,7 +997,8 @@ import { record, getTestName } from './logger.js';
     } else {
       msg = "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie eine Markierung in Ihrer Nähe.";
     }
-    if(say(msg, {})){
+    var result = say(msg, ttsOpts({source:"nav.scanHint", category:"ACTION_REQUIRED"}));
+    if(result.accepted){
       scanHintCount++;
       lastScanHintAt = now;
     }
