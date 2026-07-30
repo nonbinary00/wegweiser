@@ -123,9 +123,25 @@ import { running } from './camera.js';
           if(expectedDet) touchExpectedSeen(now);
           // v13: frische Roh-Distanz dieses Frames mitgeben (Ankunftslogik)
           handleTracking(now, expectedVisual, expectedDet ? expectedDet.dist : null);
+          // neu (Feldtest-Fix): Vorgriffs-Kandidaten-Pruefung LAEUFT WEITER, auch
+          // waehrend der erwartete Tag bereits normal getrackt wird — ein einmal
+          // bestaetigter Tag durfte die Pruefung fuer den Rest des Abschnitts nicht
+          // mehr komplett stillegen. ABER: der erwartete Tag hat IMMER Vorrang — ist
+          // er GENAU DIESEN Frame selbst erkannt (expectedDet), wird die Vorgriffs-
+          // Pruefung diesen Frame ausgesetzt (kein Reset, siehe candMemoryMs-Toleranz
+          // in updateSkipCandidate()).
+          if(!startPhase && !expectedDet) updateSkipCandidate(detectedWithDist, now);
         } else if(navState === NavState.LOST_STOPPED){
           if(expectedDet) touchExpectedSeen(now);
           handleLostStopped(now, expectedDet);
+          // neu (Feldtest-Fix): auch waehrend LOST_STOPPED weiter nach dem einen
+          // erlaubten, sichtbaren Vorgriffs-Tag suchen — der Nutzer muss nicht zum
+          // verlorenen Tag zurueckkehren, wenn der naechste Routen-Tag bereits sicher
+          // erreichbar und sichtbar ist (siehe beginTrackingForwardCandidate(), das
+          // LOST_STOPPED ueber resetSegmentState()/onNextTagFound() sauber beendet).
+          // Auch hier hat eine Wiederfindung des urspruenglich erwarteten Tags Vorrang
+          // (kein Aufruf in dem Frame, in dem expectedDet selbst wieder erkannt wird).
+          if(!startPhase && !expectedDet) updateSkipCandidate(detectedWithDist, now);
         } else if(expectedDet){
           // Such-/Startphase: Multi-Frame-Bestätigung
           touchExpectedSeen(now);
@@ -164,11 +180,11 @@ import { running } from './camera.js';
           // neu: eigenstaendige Vorgriffs-Kandidaten-Pruefung (kontrollierter Skip,
           // generisch aus pathTagIds/EDGE_MAP abgeleitet) — komplett getrennt von der
           // obigen wrongCand-Logik, inspiziert ALLE decodierten Tags (detectedWithDist),
-          // nicht nur bestKnown. Laeuft NUR in diesem Zweig (expectedDet ist diesmal
-          // falsy), wodurch der normale erwartete Tag automatisch Vorrang hat: sobald
-          // er selbst wieder sichtbar ist, greift ausschliesslich der Zweig oben, und
-          // diese Pruefung pausiert einfach (kein Reset, siehe candMemoryMs-Toleranz
-          // in updateSkipCandidate()).
+          // nicht nur bestKnown. Wird AUCH aus den TRACKING-/LOST_STOPPED-Zweigen oben
+          // aufgerufen (Feldtest-Fix) — HIER (expectedDet diesmal falsy, waehrend der
+          // Suche/Kandidatenphase) ist nur einer von vier Aufrufpunkten. Prioritaet des
+          // normal erwarteten Tags ergibt sich strukturell: im expectedDet-Zweig oben
+          // wird NICHT aufgerufen, solange dessen eigene Bestaetigung laeuft.
           if(!startPhase){
             updateSkipCandidate(detectedWithDist, now);
           }

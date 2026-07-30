@@ -90,11 +90,16 @@ import { record, getTestName } from './logger.js';
   var straightRunProgressM = 0;         // bereits ABGESCHLOSSENE Kantenlaenge seit Laufbeginn
   var straightRunReassured = false;     // wurde die einmalige Zwischen-Rueckmeldung fuer
                                          // diesen Lauf bereits gesprochen?
+  var lastForwardProgressSpeechAt = 0;  // neu: Cooldown fuer die kurze Vorgriffs-
+                                         // Fortschritts-Ansage (siehe beginTrackingForward-
+                                         // Candidate()) — verhindert Wiederholung bei
+                                         // mehreren Retargets im selben geraden Lauf.
 
   function resetStraightRunState(){
     straightRunTotalM = null;
     straightRunProgressM = 0;
     straightRunReassured = false;
+    lastForwardProgressSpeechAt = 0;
   }
 
   // ---- Instrumentierung (neu, nur fuer Feldtest-Logging) ----
@@ -647,91 +652,166 @@ import { record, getTestName } from './logger.js';
     skipCandLastSeenAt = 0;
   }
 
-  // Ermittelt den FRUEHESTEN, diesmal sichtbaren Tag weiter vorne auf pathTagIds, der
-  // ohne Ueberspringen eines NOCH NICHT angesagten Abbiegens erreichbar waere.
-  // detectedList: [{id, dist}, ...] — ALLE diesmal decodierten Tags, nicht nur bestKnown.
-  // Sicherheitsfrage: "wuerde die Auswahl dieses Tags ein noch nicht gesprochenes
-  // Abbiegen ueberspringen?" — NICHT "enthaelt irgendeine Kante ab dem AKTUELLEN Tag
-  // ein Abbiegen" (die Kante segIndex->expectedIdx wurde bereits angesagt, als
-  // pathTagIds[segIndex] erreicht wurde; sie wird daher bewusst NICHT geprueft).
-  function findForwardStraightCandidate(detectedList){
-    if(!pathTagIds || segIndex < 0 || expectedNextTagId == null) return null;
-    var expectedIdx = segIndex + 1;
-    var farthestIdx = expectedIdx;
-    var i = expectedIdx;
-    while(i + 1 < pathTagIds.length){
-      var e = EDGE_MAP[pathTagIds[i] + "->" + pathTagIds[i + 1]];
-      if(!e || isTurnAction(e)) break;   // erstes NOCH NICHT angesagtes Abbiegen -> Grenze
-      i++;
-      farthestIdx = i;
+  // Generischer Helfer (siehe Anforderung): sind ALLE Kanten zwischen fromIdx und
+  // toIdx auf dem gegebenen aktiven Pfad ohne ein noch nicht angesagtes Abbiegen
+  // passierbar? Einzige heute im Graphen vorhandene "Manöver"-Kategorie ist
+  // turn-left/turn-right (siehe DEPARTURE_ACTIONS in graph.js); es gibt in den
+  // aktuellen Routendaten KEINE separate Kodierung fuer Tuer-/Treppen-/Aufzug-
+  // Uebergaenge oder Pflicht-Stopps (recherchiert, nicht geraten) — sollten solche
+  // Kanten spaeter ergaenzt werden, muessen sie als neuer departureAction-Wert mit
+  // isTurn:true (oder einer verallgemeinerten "blocksForwardSkip"-Markierung) im
+  // Graphen erscheinen; dieser Helfer wuerde sie dann automatisch beruecksichtigen,
+  // ohne Code-Aenderung hier.
+  function isForwardTagReachableWithoutManeuver(activePath, fromIdx, toIdx){
+    if(!activePath || fromIdx < 0 || toIdx <= fromIdx || toIdx >= activePath.length) return false;
+    for(var i = fromIdx; i < toIdx; i++){
+      var e = EDGE_MAP[activePath[i] + "->" + activePath[i + 1]];
+      if(!e || isTurnAction(e)) return false;
     }
-    for(var k = expectedIdx + 1; k <= farthestIdx; k++){
-      for(var j = 0; j < detectedList.length; j++){
-        if(detectedList[j].id === pathTagIds[k]){
-          return { tagId: pathTagIds[k], targetIdx: k, dist: detectedList[j].dist };
-        }
-      }
-    }
-    return null;
+    return true;
   }
 
-  // Pro Frame von main-loop.js aufgerufen (NUR wenn der erwartete Tag selbst diesmal
-  // NICHT sichtbar ist — das gibt dem normalen Pfad automatisch Vorrang, siehe
-  // main-loop.js). Haelt eine EIGENSTAENDIGE, "klebrige" Bestaetigungsserie: ein
-  // gleichzeitig sichtbarer weiter entfernter Tag kann einen bereits aktiven, naeheren
-  // Kandidaten NIE verdraengen; ein kurzzeitiges Verschwinden des aktiven Kandidaten
-  // wird bis SETTINGS.candMemoryMs toleriert, bevor ueberhaupt ein anderer Kandidat in
-  // Betracht gezogen wird.
-  function updateSkipCandidate(detectedList, now){
-    if(navState !== NavState.SEARCHING_NEXT_TAG && navState !== NavState.TAG_CANDIDATE) return;
-    if(!pathTagIds || segIndex < 0 || expectedNextTagId == null) return;
+  // Durchsucht ALLE diesmal decodierten Tags (nicht nur bestKnown) nach dem BESTEN
+  // gueltigen Vorgriffs-Kandidaten auf dem aktiven Pfad: muss (1) ueberhaupt auf
+  // pathTagIds liegen, (2) echt VOR dem erwarteten Tag liegen (weiter vorne, nicht
+  // dahinter/schon passiert), (3) ohne ein noch nicht angesagtes Abbiegen erreichbar
+  // sein (isForwardTagReachableWithoutManeuver()). "Bester" = der FRUEHESTE gueltige
+  // sichtbare Tag (staerkster zuverlaessiger Beleg fuer Fortschritt: ein gleichzeitig
+  // sichtbarer WEITERER entfernter Tag koennte durch eine andere Tuer/einen anderen
+  // Korridor/Glaswand sichtbar sein, siehe Sicherheitsanforderung) — niemals der
+  // geometrisch naechste. Gibt auch alle abgelehnten Sichtungen mit Grund zurueck,
+  // fuer die FORWARD_CANDIDATE_REJECTED-Protokollierung.
+  function findVisibleForwardCandidate(detectedList){
+    var result = { candidate: null, rejections: [] };
+    if(!pathTagIds || expectedNextTagId == null) return result;
+    var expectedIdx = pathTagIds.indexOf(expectedNextTagId);
+    if(expectedIdx < 0) return result;
 
-    var found = findForwardStraightCandidate(detectedList);
-
-    if(found && found.tagId === skipCandTagId){
-      skipCandCount++;
-      skipCandTargetIdx = found.targetIdx;
-      skipCandDist = found.dist;
-      skipCandLastSeenAt = now;
-      navLog("SKIP_CANDIDATE_PROGRESS", { expectedTag: expectedNextTagId,
-        candidateTag: skipCandTagId, count: skipCandCount,
-        neededFrames: SETTINGS.otherTagFrames, state: navState });
-    } else if(skipCandTagId != null && (now - skipCandLastSeenAt) <= SETTINGS.candMemoryMs){
-      // Aktiver Kandidat diesmal nicht die fruehste sichtbare Wahl (abwesend, oder ein
-      // weiter entfernter Tag ist sichtbar) — aber noch innerhalb der Toleranz. NICHTS
-      // aendern: kein Reset, kein Wechsel zu einem anderen (weiter entfernten) Tag.
-    } else if(found){
-      if(skipCandTagId != null){
-        navLog("SKIP_CANDIDATE_EXPIRED", { expectedTag: expectedNextTagId,
-          expiredCandidateTag: skipCandTagId, countAtExpiry: skipCandCount, state: navState });
+    for(var d = 0; d < detectedList.length; d++){
+      var tagId = detectedList[d].id;
+      var idx = pathTagIds.indexOf(tagId);
+      if(idx < 0){
+        result.rejections.push({ tagId: tagId, pathIndex: null, reason: "NOT_ON_ACTIVE_PATH" });
+        continue;
       }
-      skipCandTagId = found.tagId;
-      skipCandTargetIdx = found.targetIdx;
-      skipCandDist = found.dist;
+      if(idx <= expectedIdx){
+        // idx === expectedIdx kann hier strukturell nicht vorkommen: main-loop.js
+        // ruft diese Pruefung nur auf, wenn expectedNextTagId selbst diesmal NICHT
+        // erkannt wurde (siehe updateSkipCandidate()-Kommentar). idx < expectedIdx
+        // ist ein bereits passierter Tag.
+        result.rejections.push({ tagId: tagId, pathIndex: idx, reason: "BEHIND_CURRENT_POSITION" });
+        continue;
+      }
+      if(!isForwardTagReachableWithoutManeuver(pathTagIds, expectedIdx, idx)){
+        result.rejections.push({ tagId: tagId, pathIndex: idx, reason: "MANEUVER_BETWEEN" });
+        continue;
+      }
+      if(result.candidate == null || idx < result.candidate.targetIdx){
+        result.candidate = { tagId: tagId, targetIdx: idx, expectedIdx: expectedIdx,
+          dist: detectedList[d].dist };
+      }
+    }
+    return result;
+  }
+
+  // Pro Frame von main-loop.js aufgerufen — WAEHREND SEARCHING_NEXT_TAG, TAG_CANDIDATE,
+  // TRACKING UND LOST_STOPPED, aber NIE in einem Frame, in dem der erwartete Tag selbst
+  // diesmal erkannt wird (siehe main-loop.js: Aufruf nur bei !expectedDet) — das gibt
+  // dem normalen erwarteten Tag in JEDEM Zustand Vorrang. Haelt eine EIGENSTAENDIGE,
+  // "klebrige" Bestaetigungsserie: da findVisibleForwardCandidate() IMMER den
+  // fruehesten gueltigen sichtbaren Tag liefert, kann ein gleichzeitig sichtbarer
+  // weiter entfernter Tag einen bereits aktiven, naeheren Kandidaten strukturell nie
+  // verdraengen; ein kurzzeitiges Verschwinden des aktiven Kandidaten wird bis
+  // SETTINGS.candMemoryMs toleriert, bevor die Serie verworfen wird.
+  function updateSkipCandidate(detectedList, now){
+    if(navState !== NavState.SEARCHING_NEXT_TAG && navState !== NavState.TAG_CANDIDATE &&
+       navState !== NavState.TRACKING && navState !== NavState.LOST_STOPPED) return;
+    if(!pathTagIds || expectedNextTagId == null) return;
+
+    var detectedTagIds = detectedList.map(function(d){ return d.id; });
+    var scan = findVisibleForwardCandidate(detectedList);
+    var best = scan.candidate;
+    var expectedIdx = pathTagIds.indexOf(expectedNextTagId);
+
+    navLog("FORWARD_SCAN", { destinationTag: destinationId, activePath: pathTagIds,
+      state: navState, expectedTag: expectedNextTagId,
+      forwardCandidateTag: best ? best.tagId : null, expectedPathIndex: expectedIdx,
+      candidatePathIndex: best ? best.targetIdx : null, detectedTagIds: detectedTagIds });
+
+    for(var r = 0; r < scan.rejections.length; r++){
+      var rej = scan.rejections[r];
+      navLog("FORWARD_CANDIDATE_REJECTED", { state: navState, expectedTag: expectedNextTagId,
+        expectedPathIndex: expectedIdx, forwardCandidateTag: rej.tagId,
+        candidatePathIndex: rej.pathIndex, detectedTagIds: detectedTagIds,
+        blockingReason: rej.reason });
+    }
+
+    if(best && best.tagId === skipCandTagId){
+      skipCandCount++;
+      skipCandTargetIdx = best.targetIdx;
+      skipCandDist = best.dist;
+      skipCandLastSeenAt = now;
+      navLog("FORWARD_CANDIDATE_PROGRESS", { state: navState, expectedTag: expectedNextTagId,
+        forwardCandidateTag: skipCandTagId, expectedPathIndex: best.expectedIdx,
+        candidatePathIndex: best.targetIdx, detectedTagIds: detectedTagIds,
+        count: skipCandCount, neededFrames: SETTINGS.otherTagFrames });
+    } else if(skipCandTagId != null && (now - skipCandLastSeenAt) <= SETTINGS.candMemoryMs){
+      // Aktiver Kandidat diesmal nicht die fruehste gueltige sichtbare Wahl (abwesend,
+      // oder ein weiter entfernter Tag ist sichtbar) — aber noch innerhalb der
+      // Toleranz. NICHTS aendern: kein Reset, kein Wechsel.
+    } else if(best){
+      if(skipCandTagId != null){
+        navLog("FORWARD_CANDIDATE_REJECTED", { state: navState, expectedTag: expectedNextTagId,
+          expectedPathIndex: expectedIdx, forwardCandidateTag: skipCandTagId,
+          candidatePathIndex: skipCandTargetIdx, detectedTagIds: detectedTagIds,
+          blockingReason: "INSUFFICIENT_CONFIRMATION", countAtRejection: skipCandCount });
+      }
+      skipCandTagId = best.tagId;
+      skipCandTargetIdx = best.targetIdx;
+      skipCandDist = best.dist;
       skipCandCount = 1;
       skipCandLastSeenAt = now;
-      navLog("SKIP_CANDIDATE_STARTED", { expectedTag: expectedNextTagId,
-        candidateTag: found.tagId, candidateTargetIdx: found.targetIdx, state: navState });
+      navLog("FORWARD_CANDIDATE_STARTED", { state: navState, expectedTag: expectedNextTagId,
+        forwardCandidateTag: best.tagId, expectedPathIndex: best.expectedIdx,
+        candidatePathIndex: best.targetIdx, detectedTagIds: detectedTagIds });
     } else if(skipCandTagId != null){
-      navLog("SKIP_CANDIDATE_EXPIRED", { expectedTag: expectedNextTagId,
-        expiredCandidateTag: skipCandTagId, countAtExpiry: skipCandCount, state: navState });
+      navLog("FORWARD_CANDIDATE_REJECTED", { state: navState, expectedTag: expectedNextTagId,
+        expectedPathIndex: expectedIdx, forwardCandidateTag: skipCandTagId,
+        candidatePathIndex: skipCandTargetIdx, detectedTagIds: detectedTagIds,
+        blockingReason: "INSUFFICIENT_CONFIRMATION", countAtRejection: skipCandCount });
       resetSkipCandidate();
     }
 
     if(skipCandTagId != null && skipCandCount >= SETTINGS.otherTagFrames){
       var tagId = skipCandTagId, targetIdx = skipCandTargetIdx, dist = skipCandDist;
+      var previousExpectedTag = expectedNextTagId, previousExpectedIdx = expectedIdx,
+          previousSegIndex = segIndex, previousState = navState;
+      var skippedTagIds = pathTagIds.slice(previousExpectedIdx, targetIdx);
       resetSkipCandidate();
+      navLog("FORWARD_PROGRESS_CONFIRMED", { destinationTag: destinationId,
+        activePath: pathTagIds, state: previousState, expectedTag: previousExpectedTag,
+        forwardCandidateTag: tagId, expectedPathIndex: previousExpectedIdx,
+        candidatePathIndex: targetIdx, skippedTagIds: skippedTagIds,
+        confirmationFrames: SETTINGS.otherTagFrames });
       beginTrackingForwardCandidate(targetIdx, tagId, dist, now);
+      navLog("TRACKING_RETARGETED", { destinationTag: destinationId, activePath: pathTagIds,
+        state: previousState, expectedTag: previousExpectedTag, forwardCandidateTag: tagId,
+        expectedPathIndex: previousExpectedIdx, candidatePathIndex: targetIdx,
+        previousPathIndex: previousSegIndex, newPathIndex: segIndex,
+        skippedTagIds: skippedTagIds, newExpectedTag: expectedNextTagId,
+        reason: "forward-progress-confirmed" });
     }
   }
 
   // Bestaetigte Kandidatur -> NUR Umschalten des verfolgten Tags (wie ein normales
-  // "gefunden", siehe onNextTagFound()) — KEINE Ansage, KEINE synthetische Ankunft.
-  // Tag 4 (und jeder weitere uebersprungene Zwischen-Tag) wird aus der aktiven
-  // Verfolgung entfernt, OHNE als "erreicht" gezaehlt zu werden (currentTagId bleibt
-  // unveraendert); currentEdge() zeigt danach auf die Kante ZUM Kandidaten (z.B. 4->7),
-  // deren Distanz spaeter — bei TATSAECHLICHER Ankunft — ganz normal von reachPoint()
-  // addiert wird, wie im nicht uebersprungenen Fall.
+  // "gefunden", siehe onNextTagFound()) — KEINE Ankunft, KEIN reachPoint(), KEIN
+  // REACHED. Alle uebersprungenen Zwischen-Tags werden aus der aktiven Verfolgung
+  // entfernt, OHNE als "erreicht" gezaehlt zu werden (currentTagId bleibt
+  // unveraendert); currentEdge() zeigt danach auf die Kante ZUM Kandidaten, deren
+  // Distanz spaeter — bei TATSAECHLICHER Ankunft — ganz normal von reachPoint()
+  // addiert wird, wie im nicht uebersprungenen Fall. Einzige Sprachausgabe hier: eine
+  // kurze, entkoppelte Fortschritts-Rueckmeldung (Cooldown ueber
+  // lastForwardProgressSpeechAt) — KEINE Ankunfts- oder Richtungsansage.
   function beginTrackingForwardCandidate(targetIdx, confirmedTagId, dist, now){
     var routeIndexBefore = segIndex;
     var bypassedTags = pathTagIds.slice(routeIndexBefore + 1, targetIdx);
@@ -754,7 +834,26 @@ import { record, getTestName } from './logger.js';
     resetSegmentState();     // frische EMA/Tracking-Zustaende — keine Reste vom
                               // abgebrochenen Verfolgen des uebersprungenen Tags
     onNextTagFound(dist);    // identischer Uebergang wie bei normalem Fund: TRACKING
-                              // beginnt, optionale Vibration, KEINE Sprachausgabe hier
+                              // beginnt, optionale Vibration, KEINE Ankunftsansage hier
+
+    // neu: kurze, unaufdringliche Fortschritts-Rueckmeldung — NICHT die Ankunfts-
+    // oder Richtungsansage (die kommt ausschliesslich spaeter ueber reachPoint(),
+    // wenn confirmedTagId TATSAECHLICH per Distanz erreicht wird). Cooldown
+    // (SETTINGS.progressMinGapMs, ueber lastForwardProgressSpeechAt) verhindert
+    // Wiederholung bei mehreren Retargets im selben geraden Lauf; nicht-interrupt,
+    // damit sie keine wichtigere Ansage (Stopp/Ziel/Abbiegen) verdraengt.
+    var nowTs = performance.now();
+    if(!speaking() && (nowTs - lastForwardProgressSpeechAt) >= SETTINGS.progressMinGapMs){
+      var isDestinationCandidate = confirmedTagId === destinationId;
+      var progressText = isDestinationCandidate
+        ? "Das Ziel befindet sich geradeaus. Gehen Sie weiter geradeaus."
+        : "Weiter geradeaus.";
+      if(say(progressText, {})){
+        lastForwardProgressSpeechAt = nowTs;
+        navLog("TTS_FORWARD_PROGRESS", { confirmedTag: confirmedTagId,
+          isDestination: isDestinationCandidate, text: progressText });
+      }
+    }
   }
 
   // Bekannter, aber NICHT erwarteter Tag: sehr zurückhaltend melden.
