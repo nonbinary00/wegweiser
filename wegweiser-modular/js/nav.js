@@ -87,6 +87,10 @@ import { record, getTestName } from './logger.js';
   var lastSpokenWasStraight = false;    // ob die letzte automatische Ansage "geradeaus" war
   var lastDirectionSpeechAt = 0;        // performance.now() der letzten Richtungs-/Rueckmeldungs-Ansage
   var lastDirectionSpeechProgressM = 0; // straightRunProgressM-Stand zu diesem Zeitpunkt
+  var straightRunReassuranceCount = 0;  // neu: Anzahl bereits gesprochener "Sie sind richtig.
+                                         // Weiter geradeaus."-Rueckmeldungen im aktuellen Lauf
+                                         // (die anfaengliche volle Anweisung zaehlt NICHT mit;
+                                         // siehe SETTINGS.longCorridorMaxReassurances)
 
   function resetStraightRunState(){
     straightRunTotalM = null;
@@ -94,6 +98,7 @@ import { record, getTestName } from './logger.js';
     lastSpokenWasStraight = false;
     lastDirectionSpeechAt = 0;
     lastDirectionSpeechProgressM = 0;
+    straightRunReassuranceCount = 0;
   }
 
   // Darf die naechste automatische Richtungs-/Rueckmeldungs-Ansage erfolgen? Niemals
@@ -101,9 +106,13 @@ import { record, getTestName } from './logger.js';
   // danach erst wieder, nachdem seit der letzten Ansage mindestens
   // SETTINGS.longCorridorFirstProgressM neue Strecke zurueckgelegt wurde. Das verhindert
   // sowohl Wiederholung an nahen Zwischen-Tags ALS AUCH endloses Verstummen auf sehr
-  // langen Routen.
+  // langen Routen. Zusaetzlich: eine Rueckmeldung (nicht die anfaengliche volle Anweisung)
+  // darf hoechstens SETTINGS.longCorridorMaxReassurances mal pro Lauf erfolgen (siehe
+  // straightRunReassuranceCount) — sonst wuerde ein sehr langer Korridor beliebig viele
+  // Rueckmeldungen bekommen, nur weil genug Distanz zurueckgelegt wurde.
   function directionSpeechDue(currentProgressM){
     if(!lastSpokenWasStraight) return true;
+    if(straightRunReassuranceCount >= SETTINGS.longCorridorMaxReassurances) return false;
     return (currentProgressM - lastDirectionSpeechProgressM) >= SETTINGS.longCorridorFirstProgressM;
   }
 
@@ -394,10 +403,12 @@ import { record, getTestName } from './logger.js';
       // "Gehen Sie weiter geradeaus." bei jedem einzelnen Zwischen-Tag wiederholen.
       straightRunProgressM += (edge && edge.distanceM != null) ? edge.distanceM : 0;
       if(directionSpeechDue(straightRunProgressM)){
-        var speechText = lastSpokenWasStraight ? "Sie sind richtig. Weiter geradeaus." : t;
+        var wasReassurance = lastSpokenWasStraight;
+        var speechText = wasReassurance ? "Sie sind richtig. Weiter geradeaus." : t;
         say(speechText, {interrupt:true});
         navLog("TTS_DIRECTION", { reachedTag: reachedTagId, action: nextEdge.departureAction,
           isTurn: false, text: speechText, straightRunProgressM: r1(straightRunProgressM) });
+        if(wasReassurance) straightRunReassuranceCount++;
         lastSpokenWasStraight = true;
         lastDirectionSpeechAt = nowTs;
         lastDirectionSpeechProgressM = straightRunProgressM;
@@ -507,7 +518,13 @@ import { record, getTestName } from './logger.js';
          straightRunTotalM >= SETTINGS.longCorridorMinM && edge.distanceM != null){
         var withinEdgeM = Math.max(0, edge.distanceM - emaDist);
         var liveProgressM = straightRunProgressM + withinEdgeM;
-        if(directionSpeechDue(liveProgressM) && emaDist > reachedM + 0.5 &&
+        // neu: keine Rueckmeldung mehr, wenn der erwartete Tag das gewaehlte Ziel ist
+        // und die zuverlaessige Rest-Distanz ("arrival", s.o. — min. aus Roh-/EMA-Messung,
+        // dieselbe Groesse wie fuer die REACHED-Erkennung) unter der konfigurierten
+        // Naeherungsschwelle liegt. Verhindert "Weiter geradeaus." kurz vor "Ziel erreicht."
+        var nearTarget = expectedNextTagId === destinationId &&
+                          arrival < SETTINGS.longCorridorNoReassuranceNearTargetM;
+        if(!nearTarget && directionSpeechDue(liveProgressM) && emaDist > reachedM + 0.5 &&
            (now - lastProgressAt) >= SETTINGS.progressMinGapMs && !speaking()){
           // NICHT departureActionSpeech(edge) verwenden: "edge" (die aktuell verfolgte
           // Kante) kann selbst mit einem Abbiegen BEGINNEN (dessen Ansage bereits beim
@@ -515,10 +532,12 @@ import { record, getTestName } from './logger.js';
           // bestaetigt, nie ein Abbiegen wiederholt. Wie in reachPoint(): erste Ansage
           // seit Start/Abbiegen/Wiederaufnahme -> volle Anweisung; danach nur die kurze
           // Rueckmeldung.
-          var liveSpeechText = lastSpokenWasStraight ? "Sie sind richtig. Weiter geradeaus."
-                                                      : "Gehen Sie weiter geradeaus.";
+          var wasReassurance = lastSpokenWasStraight;
+          var liveSpeechText = wasReassurance ? "Sie sind richtig. Weiter geradeaus."
+                                               : "Gehen Sie weiter geradeaus.";
           if(say(liveSpeechText, {})){
             lastProgressAt = now;
+            if(wasReassurance) straightRunReassuranceCount++;
             lastSpokenWasStraight = true;
             lastDirectionSpeechAt = now;
             lastDirectionSpeechProgressM = liveProgressM;
@@ -526,6 +545,11 @@ import { record, getTestName } from './logger.js';
               segIndex: segIndex, liveProgressM: r1(liveProgressM), emaDist: r1(emaDist),
               text: liveSpeechText, reason: "long-corridor-progress" });
           }
+        } else if(nearTarget){
+          navLog("TTS_PROGRESS_REASSURANCE_SUPPRESSED_NEAR_TARGET", {
+            expectedTag: expectedNextTagId, segIndex: segIndex,
+            liveProgressM: r1(liveProgressM), arrival: r1(arrival),
+            thresholdM: SETTINGS.longCorridorNoReassuranceNearTargetM });
         }
       }
       // Distanz steigt deutlich über das Minimum -> Nutzer entfernt sich
@@ -707,6 +731,14 @@ import { record, getTestName } from './logger.js';
       lostTotalMs: Math.round(segLostMs),
       awayWarned: awayWarned
     });
+
+    // neu: die uebersprungene Kante previousTag->skippedTag (6->4) wird NIE als eigene
+    // Kante an reachPoint() uebergeben (dessen currentEdge() sieht nach dem Vorruecken
+    // von segIndex unten nur noch skippedTag->confirmedTagId, also 4->7) und ging daher
+    // bisher im Geradeaus-Fortschritt verloren (straightRunProgressM stimmte danach nicht
+    // mehr mit der tatsaechlich zurueckgelegten Strecke ueberein). Hier EINMALIG addieren,
+    // BEVOR reachPoint() gleich zusaetzlich die Kante 4->7 addiert.
+    straightRunProgressM += (edgeBefore && edgeBefore.distanceM != null) ? edgeBefore.distanceM : 0;
 
     // segIndex auf die Kante skippedTag->confirmedTagId (4->7) vorruecken, damit
     // reachPoint() confirmedTagId ganz normal als erreicht behandelt (Ansage, Reset,

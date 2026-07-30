@@ -43,6 +43,19 @@
                                   // werden darf — verhindert sowohl Wiederholung bei nahen
                                   // Zwischen-Tags ALS AUCH dauerhaftes Verstummen auf langen
                                   // Routen (siehe directionSpeechDue() in nav.js)
+    longCorridorMaxReassurances: 2, // neu: harte Obergrenze an "Sie sind richtig. Weiter
+                                  // geradeaus."-Rueckmeldungen pro zusammenhaengendem
+                                  // Geradeaus-Lauf, OHNE die anfaengliche volle Anweisung
+                                  // ("Gehen Sie weiter geradeaus.") mitzuzaehlen. Verhindert
+                                  // auf sehr langen Korridoren, dass die distanzbasierte
+                                  // directionSpeechDue()-Pruefung beliebig oft ausloest
+                                  // (siehe straightRunReassuranceCount in nav.js)
+    longCorridorNoReassuranceNearTargetM: 5, // neu: keine Geradeaus-Rueckmeldung mehr, wenn
+                                  // der erwartete Tag das gewaehlte Ziel ist UND die
+                                  // zuverlaessige Rest-Distanz (min. aus Roh-/EMA-Messung)
+                                  // unter diesem Wert liegt — verhindert eine Rueckmeldung
+                                  // unmittelbar vor der Ziel-Ankunftsansage (siehe
+                                  // handleTracking() in nav.js)
     lostReminderRepeatMs: 18000    // neu: Abstand zwischen kurzen "Suchen Sie weiter."-
                                   // Erinnerungen waehrend LOST_STOPPED (deutlich seltener
                                   // als vorher; ersetzt die lange Wiederholung ueber
