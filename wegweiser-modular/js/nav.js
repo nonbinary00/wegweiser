@@ -67,39 +67,69 @@ import { record, getTestName } from './logger.js';
                                    // gueltigen Messungen darf ueberhaupt "verloren" gemeldet werden
   var arrivalBelowCount = 0;      // v13: Frames in Folge mit arrivalDistance <= Schwelle
   var lastTrackDbgAt = 0;         // v13: Drossel fuer Debug-Log
-  var lastProgressAt = 0;
   var awayWarned = false;
   var stopSaidAt = 0;
   var offRouteSaid = {};          // fremde Tags: höchstens EINMAL pro Abschnitt melden
-  var lostInstructionSpoken = false; // neu: ob in der aktuellen Verlust-Episode bereits
-                                      // eine Stopp-/Verlust-Ansage erfolgt ist (steuert,
-                                      // ob die Wiederfindung "Weitergehen." ansagt)
+  var lostInstructionSpoken = false; // ob in der aktuellen Verlust-Episode bereits eine
+                                      // TATSAECHLICH GESPROCHENE Stopp-Ansage erfolgt ist
+                                      // (steuert, ob die Wiederfindung etwas ansagt)
+  var lostSpeechPending = false;     // neu (TTS-Aufraeumung): LOST_STOPPED wurde erreicht,
+                                      // aber die Stopp-ANSAGE ist noch zurueckgehalten
+                                      // (siehe SETTINGS.lostSpeechDelayMs) — der interne
+                                      // Zustandsuebergang (trackLostStopMs) bleibt unveraendert,
+                                      // NUR die Sprachausgabe wird zusaetzlich verzoegert.
+  var lostSpeechPendingSince = 0;    // performance.now() bei Eintritt in LOST_STOPPED
 
-  // ---- Geradeaus-Lauf (ROUTEN-Zustand — bewusst NICHT in resetSegmentState()) ----
-  // Ein "Lauf" kann mehrere aufeinanderfolgende Kanten mit departureAction "continue-straight"
-  // umfassen (z.B. 3->6->4->7 ist geometrisch EIN gerader Korridor, obwohl im Graphen als
-  // drei Kanten modelliert). Diese Variablen ueberleben daher Abschnittswechsel und werden
-  // NUR bei einem echten Abbiegen, Routenstart/-abbruch oder Zielankunft zurueckgesetzt
-  // (siehe resetStraightRunState()). Vereinfacht ggue. der fruehren Fassung: JEDE
-  // Zwischen-Tag-Ansage ist jetzt immer die volle "Gehen Sie weiter geradeaus." (siehe
-  // reachPoint()) — es gibt keine Alternation/Wiederholungssperre mehr dafuer. Einzige
-  // verbleibende Zusatzfunktion: auf einem sehr langen geraden Korridor darf WAEHREND
-  // des Gehens (nicht erst beim naechsten Tag) hoechstens EINMAL eine kurze Rueckmeldung
-  // "Weiter geradeaus." erfolgen (siehe handleTracking()).
-  var straightRunTotalM = null;         // Gesamtlaenge des aktuellen Laufs (mehrere Kanten), oder null
-  var straightRunProgressM = 0;         // bereits ABGESCHLOSSENE Kantenlaenge seit Laufbeginn
-  var straightRunReassured = false;     // wurde die einmalige Zwischen-Rueckmeldung fuer
-                                         // diesen Lauf bereits gesprochen?
-  var lastForwardProgressSpeechAt = 0;  // neu: Cooldown fuer die kurze Vorgriffs-
-                                         // Fortschritts-Ansage (siehe beginTrackingForward-
-                                         // Candidate()) — verhindert Wiederholung bei
-                                         // mehreren Retargets im selben geraden Lauf.
+  // ---- Gemeinsamer Dedup-Zustand fuer die "aktive Richtungsansage" (neu, TTS-Aufraeumung) ----
+  // EIN einziger geteilter Zustand fuer ALLE Stellen, die "Gehen Sie weiter geradeaus."
+  // oder eine Abbiege-Ansage sprechen koennten (reachPoint(), Wiederaufnahme nach Stopp,
+  // Vorgriffs-Retarget) — verhindert, dass mehrere unabhaengige Mechanismen dieselbe
+  // Formulierung wiederholt aussprechen. activeDirectionText haelt die zuletzt TATSAECHLICH
+  // gesprochene Richtungs-Formulierung; ein erneuter Versuch mit demselben Text wird
+  // unterdrueckt, bis sich die aktive Richtung aendert (Abbiegen setzt sie direkt neu) oder
+  // der Zustand gezielt zurueckgesetzt wird (Routenstart/-ende, Zielankunft, tatsaechlich
+  // gesprochenes Stopp, Vorgriffs-Retarget waehrend eines anstehenden Verlusts).
+  var activeDirectionText = null;
 
-  function resetStraightRunState(){
-    straightRunTotalM = null;
-    straightRunProgressM = 0;
-    straightRunReassured = false;
-    lastForwardProgressSpeechAt = 0;
+  function resetActiveDirectionState(){
+    activeDirectionText = null;
+  }
+
+  // Versucht, `text` als Richtungsansage zu sprechen — NUR wenn sie sich von der aktuell
+  // aktiven Richtungsansage unterscheidet. Bei Unterdrueckung wird IMMER
+  // TTS_STRAIGHT_SUPPRESSED_DUPLICATE geloggt (keine Sprachausgabe dabei); bei
+  // tatsaechlicher Ansage wird logEvent geloggt und activeDirectionText aktualisiert.
+  function speakDirectionIfNew(text, opts, logEvent, logData){
+    if(activeDirectionText === text){
+      var suppressedData = { text: text, activeDirectionText: activeDirectionText };
+      for(var k in (logData || {})) suppressedData[k] = logData[k];
+      navLog("TTS_STRAIGHT_SUPPRESSED_DUPLICATE", suppressedData);
+      return false;
+    }
+    if(say(text, opts)){
+      activeDirectionText = text;
+      var spokenData = { text: text };
+      for(var k2 in (logData || {})) spokenData[k2] = logData[k2];
+      navLog(logEvent, spokenData);
+      return true;
+    }
+    return false;
+  }
+
+  // Gemeinsame Log-Nutzlast fuer alle Stopp-Entscheidungen (Anforderung: expectedTag,
+  // aktive Route, Navigationszustand, Verlustdauer, aktiver Vorgriffs-Kandidat,
+  // Vorgriffs-Bestaetigungszaehler, ob Stopp bereits gesprochen wurde, Abbruchgrund).
+  function buildLostDecisionLogData(now, cancellationReason){
+    return {
+      expectedTag: expectedNextTagId,
+      activePath: pathTagIds,
+      state: navState,
+      lostDurationMs: lostSpeechPendingSince ? Math.round(now - lostSpeechPendingSince) : null,
+      activeForwardCandidate: skipCandTagId,
+      forwardConfirmationCount: skipCandCount,
+      stopAlreadySpoken: lostInstructionSpoken,
+      cancellationReason: cancellationReason || null
+    };
   }
 
   // ---- Instrumentierung (neu, nur fuer Feldtest-Logging) ----
@@ -151,11 +181,12 @@ import { record, getTestName } from './logger.js';
     candId = null; candCount = 0;
     lastAimZone = null; lastAimAt = 0;
     minTrackDist = null;
-    lastProgressAt = 0;
     awayWarned = false;
     stopSaidAt = 0;
     offRouteSaid = {};
     lostInstructionSpoken = false;
+    lostSpeechPending = false;       // neu: defensiv, falls ein Segment mitten in einer
+    lostSpeechPendingSince = 0;      // anstehenden Stopp-Ansage endet (siehe handleLostStopped())
     emaDist = null;
     rawRecent = [];                  // v13
     lastRawDist = null; lastRawAt = 0;
@@ -209,7 +240,7 @@ import { record, getTestName } from './logger.js';
     destinationReached = false;
     lastRouteInstruction = "";
     resetSegmentState();
-    resetStraightRunState();
+    resetActiveDirectionState();
     currentScanDelayMs = SETTINGS.scanHintAfterMs;
     setNavState(NavState.SEARCHING_START_TAG);
     updatePanel(null);
@@ -234,7 +265,7 @@ import { record, getTestName } from './logger.js';
     destinationId = null;
     destinationReached = false;
     resetSegmentState();
-    resetStraightRunState();
+    resetActiveDirectionState();
     setNavState(NavState.IDLE);
     updatePanel(null);
     if(announce) say("Navigation beendet.", {interrupt:true});
@@ -294,33 +325,10 @@ import { record, getTestName } from './logger.js';
   // eigentliche Anweisung erst SPAETER, unabhaengig davon, bei reachPoint() gesprochen
   // wird (siehe dort).
   function onNextTagFound(dist){
-    var edge = currentEdge();
     setNavState(NavState.TRACKING);
     minTrackDist = dist != null ? dist : null;
-    lastProgressAt = performance.now();
     awayWarned = false;
     if(expectedNextTagId !== destinationId) buzz(50);
-    // Geradeaus-Lauf ueber mehrere Kanten hinweg erkennen: nur wenn noch kein Lauf aktiv
-    // ist (sonst laeuft bereits einer, siehe reachPoint()). Die AKTUELL verfolgte Kante
-    // gehoert IMMER zum (moeglicherweise gerade erst beginnenden) Lauf dazu — auch wenn
-    // SIE SELBST mit einem Abbiegen beginnt (das Abbiegen passierte ja bereits beim
-    // vorherigen reachPoint()-Aufruf; diese Kante wird DANACH geradeaus gegangen). Danach
-    // wird nur so lange weitergeschaut, wie KEINE weitere Kante ein Abbiegen erfordert.
-    // Reine Vorausschau ueber bereits bekannte EDGE_MAP-Distanzen entlang des
-    // BERECHNETEN Pfads — keine neue Kamera-Messung, keine Graph-Aenderung. Wird fuer
-    // die einmalige Zwischen-Rueckmeldung auf sehr langen Korridoren gebraucht (siehe
-    // handleTracking()).
-    if(edge && straightRunTotalM == null){
-      var totalM = edge.distanceM || 0;
-      var i = segIndex + 1;
-      while(i < pathTagIds.length - 1){
-        var e2 = EDGE_MAP[pathTagIds[i] + "->" + pathTagIds[i + 1]];
-        if(!e2 || isTurnAction(e2)) break;
-        totalM += e2.distanceM || 0;
-        i++;
-      }
-      straightRunTotalM = totalM;
-    }
     updatePanel(dist);
     // ---- Instrumentierung (neu) ----
     segTrackingStartedAt = performance.now();
@@ -381,23 +389,22 @@ import { record, getTestName } from './logger.js';
     lastRouteInstruction = t;
 
     if(isTurn){
-      // Echtes Abbiegen: genau einmal ansagen, danach jeden laufenden Geradeaus-Lauf
-      // beenden. Die optionale einmalige Korridor-Rueckmeldung ("Weiter geradeaus.")
-      // lebt ausschliesslich in handleTracking() — hier nicht dupliziert.
+      // Echtes Abbiegen: MUSS IMMER hoerbar sein (nie durch Dedup unterdrueckt) — direkt
+      // say() statt speakDirectionIfNew(), aber activeDirectionText wird trotzdem auf den
+      // Abbiege-Text gesetzt, damit die naechste Geradeaus-Bestaetigung danach korrekt
+      // als NEU erkannt wird (nicht identisch mit dem vorherigen Abbiege-Text).
       say(t, {interrupt:true});
+      activeDirectionText = t;
       navLog("TTS_DIRECTION", { reachedTag: reachedTagId, action: nextEdge.departureAction,
         isTurn: true, text: t });
-      resetStraightRunState();
     } else {
-      // Kein Abbiegen: die soeben abgeschlossene Kante zum laufenden Korridor-Fortschritt
-      // addieren (straightRunProgressM wird von handleTracking() fuer die getrennte,
-      // EINMALIGE Zwischen-Rueckmeldung auf sehr langen Korridoren gebraucht), dann
-      // bedingungslos genau EINMAL "Gehen Sie weiter geradeaus." ansagen — keine
-      // Alternation, keine Wiederholungssperre, keine Unterdrueckung dieser Ansage.
-      straightRunProgressM += (edge && edge.distanceM != null) ? edge.distanceM : 0;
-      say(t, {interrupt:true});
-      navLog("TTS_DIRECTION", { reachedTag: reachedTagId, action: nextEdge.departureAction,
-        isTurn: false, text: t, straightRunProgressM: r1(straightRunProgressM) });
+      // Kein Abbiegen: ueber die gemeinsame Dedup-Logik ansagen — auf einem langen
+      // geraden Korridor mit mehreren Zwischen-Tags wird dies nur beim ERSTEN
+      // Zwischen-Tag nach dem letzten Abbiegen tatsaechlich gesprochen; jeder weitere
+      // Zwischen-Tag auf DERSELBEN Geradeaus-Strecke wird als Duplikat unterdrueckt
+      // (TTS_STRAIGHT_SUPPRESSED_DUPLICATE) — genau EINE Ansage pro Korridor.
+      speakDirectionIfNew(t, {interrupt:true}, "TTS_STRAIGHT",
+        { reachedTag: reachedTagId, action: nextEdge.departureAction, trigger: "reached-tag" });
     }
     segIndex++;
     // beginSegment() setzt expectedNextTagId SOFORT auf den naechsten Tag und
@@ -412,7 +419,7 @@ import { record, getTestName } from './logger.js';
     destinationReached = true;
     navigationActive = false;
     expectedNextTagId = null;
-    resetStraightRunState();
+    resetActiveDirectionState();
     var t = ARRIVALS[destinationId] || ("Ziel erreicht. Sie sind bei " + markerName(destinationId) + ".");
     lastRouteInstruction = t;
     setNavState(NavState.DESTINATION_REACHED);
@@ -486,38 +493,6 @@ import { record, getTestName } from './logger.js';
         minTrackDist = recentMin;
         awayWarned = false;
       }
-      // Einmalige Zwischen-Rueckmeldung WAEHREND einer laufenden Geradeaus-Kante, NUR
-      // auf einem genuegend langen zusammenhaengenden Korridor (SETTINGS.longCorridorMinM)
-      // — kurze Abschnitte bekommen ihre einzige Rueckmeldung bereits bei Ankunft
-      // (reachPoint()). Hoechstens EINMAL pro Lauf (straightRunReassured), keine
-      // Wiederholung, keine Alternation mit der Ansage bei reachPoint(). Nicht-interrupt:
-      // darf keine wichtigere Ansage (Stopp/Ziel/Abbiegen) ueberschreiben — emaDist >
-      // reachedM + 0.5 haelt Abstand zur bevorstehenden Ankunfts-Ansage; die zusaetzliche
-      // nearTarget-Pruefung unterdrueckt sie zusaetzlich kurz vor dem gewaehlten Ziel.
-      if(edge && straightRunTotalM != null &&
-         straightRunTotalM >= SETTINGS.longCorridorMinM && edge.distanceM != null){
-        var withinEdgeM = Math.max(0, edge.distanceM - emaDist);
-        var liveProgressM = straightRunProgressM + withinEdgeM;
-        var nearTarget = expectedNextTagId === destinationId &&
-                          arrival < SETTINGS.longCorridorNoReassuranceNearTargetM;
-        if(!straightRunReassured && !nearTarget &&
-           liveProgressM >= SETTINGS.longCorridorFirstProgressM &&
-           emaDist > reachedM + 0.5 &&
-           (now - lastProgressAt) >= SETTINGS.progressMinGapMs && !speaking()){
-          if(say("Weiter geradeaus.", {})){
-            lastProgressAt = now;
-            straightRunReassured = true;
-            navLog("TTS_PROGRESS_REASSURANCE", { expectedTag: expectedNextTagId,
-              segIndex: segIndex, liveProgressM: r1(liveProgressM), emaDist: r1(emaDist),
-              text: "Weiter geradeaus.", reason: "long-corridor-progress" });
-          }
-        } else if(nearTarget){
-          navLog("TTS_PROGRESS_REASSURANCE_SUPPRESSED_NEAR_TARGET", {
-            expectedTag: expectedNextTagId, segIndex: segIndex,
-            liveProgressM: r1(liveProgressM), arrival: r1(arrival),
-            thresholdM: SETTINGS.longCorridorNoReassuranceNearTargetM });
-        }
-      }
       // Distanz steigt deutlich über das Minimum -> Nutzer entfernt sich
       if(!awayWarned && minTrackDist != null &&
          emaDist - minTrackDist >= SETTINGS.awayDeltaM && !speaking()){
@@ -562,63 +537,99 @@ import { record, getTestName } from './logger.js';
 
     // Sonst: Verlust gilt NICHT als "erreicht". Der Nutzer könnte das Telefon
     // weggedreht, die Kamera verdeckt oder zu früh abgebogen haben.
+    // WICHTIG (TTS-Aufraeumung): der interne Zustandsuebergang zu LOST_STOPPED bleibt
+    // HIER unveraendert (weiterhin nach trackLostStopMs, unveraendert) — NUR die
+    // gesprochene Stopp-Ansage wird jetzt zusaetzlich um SETTINGS.lostSpeechDelayMs
+    // verzoegert (siehe handleLostStopped()), damit der erwartete Tag oder ein
+    // gueltiger Vorgriffs-Kandidat noch Zeit hat, sich zu bestaetigen, bevor "Stopp"
+    // tatsaechlich gesprochen wird.
     setNavState(NavState.LOST_STOPPED);
-    stopSaidAt = now;
     // ---- Instrumentierung (neu) ----
     segLostCount++;
     segLostSince = now;
     navLog("LOST_STOPPED", { expectedTag: expectedNextTagId, lastEma: r1(emaDist),
       lastRaw: r1(lastRawDist) });
-    // neu: einmalige, kurze Verlust-Ansage pro bestaetigter Verlust-Episode (kein
-    // Wiederholen bei jedem Frame — handleTracking() laeuft nach setNavState(LOST_STOPPED)
-    // ohnehin nicht mehr; handleLostStopped() uebernimmt). lostInstructionSpoken haelt
-    // fest, dass eine Stopp-/Verlust-Ansage in dieser Episode bereits erfolgt ist, damit
-    // die Wiederfindung unten weiss, dass "Weitergehen." angebracht ist.
-    var lostText;
-    if(emaDist != null && emaDist <= SETTINGS.nearLostM){
-      // Sehr nah verloren: vorsichtig weiter, Marke erneut suchen (kein volles "Stopp").
-      lostText = "Der Orientierungspunkt ist sehr nah. Gehen Sie langsam weiter " +
-                 "und suchen Sie die Markierung erneut.";
-    } else {
-      lostText = "Stopp. Suchen Sie die Markierung. Bewegen Sie die Kamera langsam " +
-                 "nach links und rechts.";
-    }
-    say(lostText, {interrupt:true});
-    lostInstructionSpoken = true;
-    navLog("TTS_LOST_INSTRUCTION", { expectedTag: expectedNextTagId,
-      variant: (emaDist != null && emaDist <= SETTINGS.nearLostM) ? "near" : "stop",
-      text: lostText });
+    lostSpeechPending = true;
+    lostSpeechPendingSince = now;
+    navLog("TTS_LOST_PENDING", buildLostDecisionLogData(now, null));
   }
 
-  // ---- LOST_STOPPED: warten, bis derselbe Tag wieder im Bild ist ----
+  // ---- LOST_STOPPED: warten, bis derselbe Tag wieder im Bild ist ODER ein gueltiger
+  // Vorgriffs-Kandidat bestaetigt wird (updateSkipCandidate() laeuft parallel weiter,
+  // siehe main-loop.js) ----
   function handleLostStopped(now, det){
     if(det){
       // Wieder gefunden: Messung geht weiter.
       setNavState(NavState.TRACKING);
       var d = (det.dist != null) ? det.dist : emaDist;
       if(d != null) emaDist = d;
-      // neu: kurze Wiederaufnahme-Ansage NUR "Weitergehen." (kein "Markierung wieder
-      // gefunden", keine Distanz) — und nur ueberhaupt, weil dieser Codepfad
-      // strukturell ausschliesslich nach einer bestaetigten Stopp-Episode erreicht
-      // wird (main-loop.js ruft handleLostStopped() nur im Zustand LOST_STOPPED auf).
-      say("Weitergehen.", {interrupt:true});
+      var wasStopSpoken = lostInstructionSpoken;
+      if(lostSpeechPending){
+        lostSpeechPending = false;
+        navLog("TTS_LOST_CANCELLED_EXPECTED_FOUND", buildLostDecisionLogData(now, "expected-tag-found"));
+      }
       // ---- Instrumentierung (neu) ----
       segReacquireCount++;
       if(segLostSince != null){ segLostMs += (now - segLostSince); segLostSince = null; }
       navLog("REACQUIRED", { expectedTag: expectedNextTagId, dist: r1(emaDist) });
       navLog("TTS_REACQUIRED_CONTINUE", { expectedTag: expectedNextTagId,
-        dist: r1(emaDist), wasLostInstructionSpoken: lostInstructionSpoken });
+        dist: r1(emaDist), wasLostInstructionSpoken: wasStopSpoken });
       lostInstructionSpoken = false;
-      // Der laufende Geradeaus-Lauf selbst (straightRunTotalM/straightRunProgressM/
-      // straightRunReassured) wird NICHT zurueckgesetzt — er ist ja nicht zu Ende,
-      // nur unterbrochen gewesen.
+      // neu: KEINE technische "Markierung wieder gefunden"-Ansage. Nur wenn zuvor
+      // TATSAECHLICH ein Stopp gesprochen wurde, wird die Wiederaufnahme einmal
+      // ueber die gemeinsame Dedup-Logik bestaetigt — war zuvor kein Stopp
+      // gesprochen, bleibt die Wiederaufnahme bewusst STUMM (der Nutzer wusste ja
+      // nicht, dass die Kamera den Tag kurz verloren hatte).
+      if(wasStopSpoken){
+        var edge = currentEdge();
+        var isTurnNext = !!(edge && isTurnAction(edge));
+        var recoveryText = isTurnNext ? departureActionSpeech(edge) : "Gehen Sie weiter geradeaus.";
+        speakDirectionIfNew(recoveryText, {interrupt:true}, "TTS_RECOVERY_STRAIGHT",
+          { expectedTag: expectedNextTagId, trigger: "recovery-after-stop", isTurn: isTurnNext });
+      }
       return;
     }
-    // Weiter verloren: NUR noch ein kurzer, seltener Hinweis — NICHT die volle
-    // Verlust-Ansage aus handleTracking() wiederholen (das waere derselbe "lange Text
-    // wiederholt sich"-Effekt nur mit anderem Wortlaut). Deutlich seltener als vorher
+
+    // Noch verloren.
+    if(lostSpeechPending){
+      var elapsed = now - lostSpeechPendingSince;
+      var forwardCandidateProgressing = skipCandTagId != null && skipCandCount > 0;
+      if(elapsed < SETTINGS.lostSpeechDelayMs){
+        return;   // weiter abwarten, keine Ansage, keine Erinnerung
+      }
+      if(forwardCandidateProgressing){
+        // Anforderung 4: solange ein gueltiger Vorgriffs-Kandidat gerade
+        // Bestaetigung sammelt, wird die Stopp-Ansage weiter zurueckgehalten (nicht
+        // endgueltig storniert — nur diese Pruef-Gelegenheit).
+        navLog("TTS_LOST_CANCELLED_FORWARD_CANDIDATE",
+          buildLostDecisionLogData(now, "forward-candidate-progressing"));
+        return;
+      }
+      if(speaking()) return;   // keine wichtigere Ansage unterbrechen
+      var lostText;
+      if(emaDist != null && emaDist <= SETTINGS.nearLostM){
+        // Sehr nah verloren: vorsichtig weiter, Marke erneut suchen (kein volles "Stopp").
+        lostText = "Der Orientierungspunkt ist sehr nah. Gehen Sie langsam weiter " +
+                   "und suchen Sie die Markierung erneut.";
+      } else {
+        lostText = "Stopp. Suchen Sie die Markierung. Bewegen Sie die Kamera langsam " +
+                   "nach links und rechts.";
+      }
+      say(lostText, {interrupt:true});
+      lostInstructionSpoken = true;
+      lostSpeechPending = false;
+      resetActiveDirectionState();   // Vertrauensbasis zuruecksetzen -> Wiederaufnahme spricht frisch
+      stopSaidAt = now;
+      navLog("TTS_LOST_INSTRUCTION", { expectedTag: expectedNextTagId,
+        variant: (emaDist != null && emaDist <= SETTINGS.nearLostM) ? "near" : "stop",
+        text: lostText, lostForMs: Math.round(elapsed) });
+      return;
+    }
+
+    // Stopp wurde bereits gesprochen: NUR noch ein kurzer, seltener Hinweis — NICHT
+    // die volle Verlust-Ansage wiederholen. Deutlich seltener als vorher
     // (SETTINGS.lostReminderRepeatMs statt scanHintRepeatMs).
-    if(now - stopSaidAt >= SETTINGS.lostReminderRepeatMs && !speaking()){
+    if(lostInstructionSpoken && now - stopSaidAt >= SETTINGS.lostReminderRepeatMs && !speaking()){
       stopSaidAt = now;
       say("Suchen Sie weiter.", {});
       navLog("TTS_LOST_REMINDER", { expectedTag: expectedNextTagId });
@@ -805,15 +816,22 @@ import { record, getTestName } from './logger.js';
 
   // Bestaetigte Kandidatur -> NUR Umschalten des verfolgten Tags (wie ein normales
   // "gefunden", siehe onNextTagFound()) — KEINE Ankunft, KEIN reachPoint(), KEIN
-  // REACHED. Alle uebersprungenen Zwischen-Tags werden aus der aktiven Verfolgung
-  // entfernt, OHNE als "erreicht" gezaehlt zu werden (currentTagId bleibt
-  // unveraendert); currentEdge() zeigt danach auf die Kante ZUM Kandidaten, deren
-  // Distanz spaeter — bei TATSAECHLICHER Ankunft — ganz normal von reachPoint()
-  // addiert wird, wie im nicht uebersprungenen Fall. Einzige Sprachausgabe hier: eine
-  // kurze, entkoppelte Fortschritts-Rueckmeldung (Cooldown ueber
-  // lastForwardProgressSpeechAt) — KEINE Ankunfts- oder Richtungsansage.
+  // REACHED (Anforderung 8: unveraendert). Alle uebersprungenen Zwischen-Tags werden
+  // aus der aktiven Verfolgung entfernt, OHNE als "erreicht" gezaehlt zu werden
+  // (currentTagId bleibt unveraendert); currentEdge() zeigt danach auf die Kante ZUM
+  // Kandidaten, deren Distanz spaeter — bei TATSAECHLICHER Ankunft — ganz normal von
+  // reachPoint() addiert wird, wie im nicht uebersprungenen Fall (auch wenn der
+  // Kandidat das gewaehlte Ziel ist — Anforderung 7: keine Ankunfts-Ansage hier,
+  // ausschliesslich "Gehen Sie weiter geradeaus."). Einzige Sprachausgabe hier laeuft
+  // ueber die gemeinsame Dedup-Logik (speakDirectionIfNew()) — bei gewoehnlichem
+  // Retarget waehrend fluessigen Gehens fast immer ein Duplikat der bereits aktiven
+  // Ansage und bleibt daher stumm (Anforderung 2: "nicht bei jedem Vorgriffs-
+  // Retarget"); war der Retarget waehrend eines anstehenden Verlusts, wird die
+  // Stopp-Ansage storniert und die aktive Richtung zurueckgesetzt, sodass HIER
+  // frisch bestaetigt wird (Anforderung 3).
   function beginTrackingForwardCandidate(targetIdx, confirmedTagId, dist, now){
     var routeIndexBefore = segIndex;
+    var wasLostPending = lostSpeechPending;
     var bypassedTags = pathTagIds.slice(routeIndexBefore + 1, targetIdx);
 
     var bypassedDistanceM = 0;
@@ -822,13 +840,17 @@ import { record, getTestName } from './logger.js';
       bypassedDistanceM += (e && e.distanceM != null) ? e.distanceM : 0;
     }
 
+    if(wasLostPending){
+      navLog("TTS_LOST_CANCELLED_RETARGET", buildLostDecisionLogData(now, "forward-retarget-confirmed"));
+      lostSpeechPending = false;
+    }
+
     navLog("SKIPPED_FORWARD", { previousTag: pathTagIds[routeIndexBefore],
       bypassedTags: bypassedTags, confirmedTag: confirmedTagId,
       routeIndexBefore: routeIndexBefore, routeIndexAfter: targetIdx - 1,
       confirmationFrames: SETTINGS.otherTagFrames, bypassedDistanceM: r1(bypassedDistanceM),
       reason: "forward-tag-confirmed" });
 
-    straightRunProgressM += bypassedDistanceM;
     segIndex = targetIdx - 1;
     expectedNextTagId = confirmedTagId;
     resetSegmentState();     // frische EMA/Tracking-Zustaende — keine Reste vom
@@ -836,24 +858,10 @@ import { record, getTestName } from './logger.js';
     onNextTagFound(dist);    // identischer Uebergang wie bei normalem Fund: TRACKING
                               // beginnt, optionale Vibration, KEINE Ankunftsansage hier
 
-    // neu: kurze, unaufdringliche Fortschritts-Rueckmeldung — NICHT die Ankunfts-
-    // oder Richtungsansage (die kommt ausschliesslich spaeter ueber reachPoint(),
-    // wenn confirmedTagId TATSAECHLICH per Distanz erreicht wird). Cooldown
-    // (SETTINGS.progressMinGapMs, ueber lastForwardProgressSpeechAt) verhindert
-    // Wiederholung bei mehreren Retargets im selben geraden Lauf; nicht-interrupt,
-    // damit sie keine wichtigere Ansage (Stopp/Ziel/Abbiegen) verdraengt.
-    var nowTs = performance.now();
-    if(!speaking() && (nowTs - lastForwardProgressSpeechAt) >= SETTINGS.progressMinGapMs){
-      var isDestinationCandidate = confirmedTagId === destinationId;
-      var progressText = isDestinationCandidate
-        ? "Das Ziel befindet sich geradeaus. Gehen Sie weiter geradeaus."
-        : "Weiter geradeaus.";
-      if(say(progressText, {})){
-        lastForwardProgressSpeechAt = nowTs;
-        navLog("TTS_FORWARD_PROGRESS", { confirmedTag: confirmedTagId,
-          isDestination: isDestinationCandidate, text: progressText });
-      }
-    }
+    if(wasLostPending) resetActiveDirectionState();
+    speakDirectionIfNew("Gehen Sie weiter geradeaus.", {}, "TTS_STRAIGHT",
+      { confirmedTag: confirmedTagId,
+        trigger: wasLostPending ? "forward-retarget-after-lost" : "forward-retarget" });
   }
 
   // Bekannter, aber NICHT erwarteter Tag: sehr zurückhaltend melden.

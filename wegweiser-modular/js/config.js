@@ -29,22 +29,18 @@
     rawWindowN: 5,                // v13: Fenster der letzten Roh-Distanzen (juengstes Minimum)
     trackingConfirmDetections: 3, // neu: so viele gueltige Messungen des erwarteten Tags
                                   // noetig, bevor "verloren" ueberhaupt gemeldet werden darf
-    trackLostStopMs: 1800,        // Tag so lange weg (>= 1,8 s) => "Stopp"-Ansage
-    progressMinGapMs: 2500,       // Mindestabstand zwischen Zwischenansagen
+    trackLostStopMs: 1800,        // Tag so lange weg (>= 1,8 s) => internes LOST_STOPPED
+                                  // (Zustandsuebergang, UNVERAENDERT) — bestimmt NICHT mehr
+                                  // direkt die gesprochene Stopp-Ansage, siehe lostSpeechDelayMs
     awayDeltaM: 1.2,              // Distanz steigt um so viel über Minimum => Warnung
     otherTagFrames: 6,            // fremder Tag: erst nach ~0,8 s stabiler Sicht melden
     backTagFrames: 9,             // "zurück"-Warnung erst bei sehr stabiler Sicht (~1,3 s)
-    longCorridorMinM: 15,         // ab dieser GESAMT-Lauflaenge (mehrere aufeinander-
-                                  // folgende geradeaus-Kanten summiert) wird ueberhaupt
-                                  // eine einmalige Zwischen-Rueckmeldung erwogen (siehe
-                                  // handleTracking()) — 15 m, da Buerokorridore meist
-                                  // kuerzer als 25 m sind
-    longCorridorFirstProgressM: 8, // Mindest-Fortschritt seit Laufbeginn, bevor die
-                                  // einmalige Rueckmeldung "Weiter geradeaus." erlaubt ist
-    longCorridorNoReassuranceNearTargetM: 5, // keine Rueckmeldung mehr, wenn der erwartete
-                                  // Tag das gewaehlte Ziel ist UND die zuverlaessige
-                                  // Rest-Distanz unter diesem Wert liegt — verhindert eine
-                                  // Rueckmeldung unmittelbar vor der Ziel-Ankunftsansage
+    lostSpeechDelayMs: 4500,      // neu (TTS-Aufraeumung): zusaetzliche Verzoegerung NACH dem
+                                  // Eintritt in LOST_STOPPED, bevor die gesprochene Stopp-
+                                  // Ansage tatsaechlich erfolgt — gibt dem erwarteten Tag oder
+                                  // einem gueltigen Vorgriffs-Tag Zeit, sich zu bestaetigen,
+                                  // OHNE den bestehenden trackLostStopMs-Zustandsuebergang zu
+                                  // veraendern oder umzudeuten (siehe handleLostStopped())
     lostReminderRepeatMs: 18000    // neu: Abstand zwischen kurzen "Suchen Sie weiter."-
                                   // Erinnerungen waehrend LOST_STOPPED (deutlich seltener
                                   // als vorher; ersetzt die lange Wiederholung ueber

@@ -133,15 +133,19 @@ import { running } from './camera.js';
           if(!startPhase && !expectedDet) updateSkipCandidate(detectedWithDist, now);
         } else if(navState === NavState.LOST_STOPPED){
           if(expectedDet) touchExpectedSeen(now);
-          handleLostStopped(now, expectedDet);
-          // neu (Feldtest-Fix): auch waehrend LOST_STOPPED weiter nach dem einen
-          // erlaubten, sichtbaren Vorgriffs-Tag suchen — der Nutzer muss nicht zum
-          // verlorenen Tag zurueckkehren, wenn der naechste Routen-Tag bereits sicher
-          // erreichbar und sichtbar ist (siehe beginTrackingForwardCandidate(), das
-          // LOST_STOPPED ueber resetSegmentState()/onNextTagFound() sauber beendet).
-          // Auch hier hat eine Wiederfindung des urspruenglich erwarteten Tags Vorrang
-          // (kein Aufruf in dem Frame, in dem expectedDet selbst wieder erkannt wird).
+          // neu (TTS-Aufraeumung): updateSkipCandidate() MUSS hier VOR handleLostStopped()
+          // laufen. Grund: ein Vorgriffs-Retarget kann in DIESEM Frame abschliessen und
+          // navState sofort auf TRACKING umschalten (beginTrackingForwardCandidate() ->
+          // onNextTagFound()) — laeuft handleLostStopped() danach noch fuer denselben
+          // Frame, wuerde es faelschlich eine bereits verlassene LOST_STOPPED-Episode
+          // weiterbehandeln (Race: die verzoegerte Stopp-Ansage koennte im selben Frame
+          // noch gesprochen werden, obwohl der Retarget sie gerade storniert hat). Der
+          // navState-Check danach stellt sicher, dass handleLostStopped() nur noch
+          // laeuft, wenn WIRKLICH noch LOST_STOPPED ist.
           if(!startPhase && !expectedDet) updateSkipCandidate(detectedWithDist, now);
+          if(navState === NavState.LOST_STOPPED){
+            handleLostStopped(now, expectedDet);
+          }
         } else if(expectedDet){
           // Such-/Startphase: Multi-Frame-Bestätigung
           touchExpectedSeen(now);
