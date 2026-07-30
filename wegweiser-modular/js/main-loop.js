@@ -20,7 +20,7 @@ import {
   currentTagId, expectedNextTagId, segIndex, emaDist, candId, candCount, wrongCandId,
   wrongCandCount, lastExpectedVis, candLastSeenAt,
   setNavState, handleTracking, handleLostStopped, onStartTagConfirmed, onNextTagFound,
-  onOtherTagConfirmed, scanHint, aimGuidance,
+  onOtherTagConfirmed, updateSkipCandidate, scanHint, aimGuidance,
   touchExpectedSeen, touchCandidateSeen, setLastExpectedVisual, setWrongCandidate,
   setCandidate, setEmaDist
 } from './nav.js';
@@ -43,11 +43,16 @@ import { running } from './camera.js';
       var now = performance.now();
       var expectedDet = null, bestKnown = null, bestKnownDist = Infinity;
       var startPhase = navigationActive && pathTagIds == null;
+      // neu: ALLE diesmal decodierten Tags mit ihrer Distanz, fuer die eigenstaendige
+      // Vorgriffs-Kandidaten-Pruefung (updateSkipCandidate() in nav.js) — unabhaengig
+      // davon, welcher Tag als expectedDet/bestKnown ausgewaehlt wird.
+      var detectedWithDist = [];
 
       for(var i = 0; i < detected.length; i++){
         var mk = detected[i];
         var known = MARKERS[mk.id];
         var d = distanceMeters(mk.corners, MARKER_SIZE_M);
+        detectedWithDist.push({ id: mk.id, dist: d });
         var isExpected = navigationActive &&
           (startPhase ? !!known : mk.id === expectedNextTagId);
         if(navigationActive && !destinationReached){
@@ -155,6 +160,17 @@ import { running } from './camera.js';
             }
           } else {
             setWrongCandidate(null, 0);
+          }
+          // neu: eigenstaendige Vorgriffs-Kandidaten-Pruefung (kontrollierter Skip,
+          // generisch aus pathTagIds/EDGE_MAP abgeleitet) — komplett getrennt von der
+          // obigen wrongCand-Logik, inspiziert ALLE decodierten Tags (detectedWithDist),
+          // nicht nur bestKnown. Laeuft NUR in diesem Zweig (expectedDet ist diesmal
+          // falsy), wodurch der normale erwartete Tag automatisch Vorrang hat: sobald
+          // er selbst wieder sichtbar ist, greift ausschliesslich der Zweig oben, und
+          // diese Pruefung pausiert einfach (kein Reset, siehe candMemoryMs-Toleranz
+          // in updateSkipCandidate()).
+          if(!startPhase){
+            updateSkipCandidate(detectedWithDist, now);
           }
           if(navState === NavState.SEARCHING_NEXT_TAG || navState === NavState.SEARCHING_START_TAG){
             scanHint();
