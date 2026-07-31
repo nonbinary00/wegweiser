@@ -128,13 +128,17 @@ import { exportJson, clear, record } from './logger.js';
     o.textContent = NODES[id].name + " (Tag " + id + ")";
     destSel.appendChild(o);
   });
+  // neu (VoiceOver-Fix, Ziel 7): destSel ist ein natives <select> — VoiceOver kuendigt
+  // die gewaehlte Option bereits selbst an. Die bisherigen say()-Aufrufe hier haben
+  // dieselbe Information ein zweites Mal ueber die Anwendungs-TTS gesprochen (Ziel 1-3:
+  // dieselbe Ansage darf nicht doppelt erfolgen). Stattdessen steuert dieser Handler
+  // jetzt ausschliesslich den aktivierten/deaktivierten Zustand von "Navigation
+  // starten" (Ziel 5/6) — ein rein nativer Zustand, den VoiceOver ohnehin selbst
+  // ("deaktiviert"/"aktiviert") ankuendigt, keine zusaetzliche Sprachausgabe noetig.
   destSel.addEventListener("change", function(){
     var v = destSel.value ? parseInt(destSel.value, 10) : null;
-    if(v != null && NODES[v] && NODES[v].destination)
-      say("Ziel gewählt: " + NODES[v].name + ". Drücken Sie Navigation starten.",
-        appTtsOpts({interrupt:true, source:"app.destinationSelected", category:"STATUS"}));
-    else
-      say("Kein Ziel gewählt.", appTtsOpts({interrupt:true, source:"app.destinationCleared", category:"STATUS"}));
+    var hasDestination = v != null && NODES[v] && NODES[v].destination;
+    navStartBtn.disabled = !hasDestination;
   });
 
   try{

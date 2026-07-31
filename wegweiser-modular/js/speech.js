@@ -71,7 +71,17 @@ import { record } from './logger.js';
     opts = opts || {};
     var speechId = nextSpeechId();
     var requestedAt = performance.now();
-    liveEl.textContent = ""; liveEl.textContent = text;
+    // neu (VoiceOver-Fix, Ziel 1-3): #live ist ein aria-live="assertive"-Element und
+    // wird daher von VoiceOver UNABHAENGIG von speechSynthesis vorgelesen — jede
+    // bisherige, unbedingte Zuweisung hier hat JEDEN gesprochenen Satz doppelt
+    // angekuendigt (einmal ueber VoiceOver, einmal ueber speechSynthesis). Ab jetzt
+    // wird #live NUR noch aktualisiert, wenn die Aufrufstelle das ausdruecklich per
+    // opts.announceToVoiceOver anfordert (bisher nur camera.js fuer Barrierefreiheits-
+    // Fehler) — Navigations-Ansagen (nav.js) fordern dies nicht an und erreichen
+    // VoiceOver damit nicht mehr doppelt.
+    if(opts.announceToVoiceOver){
+      liveEl.textContent = ""; liveEl.textContent = text;
+    }
 
     var base = {
       speechId: speechId,

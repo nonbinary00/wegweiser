@@ -80,8 +80,12 @@ import { scheduleNext } from './main-loop.js';
     var spokenText = opts.spokenText || msg;
     if(spokenText !== lastSpokenCameraError){
       lastSpokenCameraError = spokenText;
+      // neu (VoiceOver-Fix): dies ist eine Barrierefreiheits-Fehlermeldung (Kamera
+      // nicht verfuegbar/Zugriff verweigert) — genau die Kategorie, die laut Audit
+      // weiterhin ueber VoiceOver ANGEKUENDIGT werden soll, daher hier ausdruecklich
+      // angefordert (siehe say() in speech.js).
       say(spokenText, { interrupt: true, source: opts.source || "camera.error",
-        category: "SAFETY_CRITICAL" });
+        category: "SAFETY_CRITICAL", announceToVoiceOver: true });
     }
     record("CAMERA_ERROR", { message: msg, source: opts.source || "camera.error" });
   }
