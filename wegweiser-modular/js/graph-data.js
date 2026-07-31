@@ -53,10 +53,13 @@
 
   // Ansage, wenn die Navigation AN diesem Knoten beginnt (erster bestätigter Tag).
   // Beschreibt den Ort und die Aktion, um den NÄCHSTEN Tag vor die Kamera zu bekommen.
+  // neu: KEINE Vorschau mehr auf das spaetere Abbiegen bei Tag 2 (das wird dort erneut
+  // und tatsaechlich zum richtigen Zeitpunkt angesagt, siehe reachPoint() in nav.js) —
+  // nur noch, was der Nutzer JETZT tun muss. Reiner Text, keine Routen-/Kantendaten
+  // beruehrt.
   var START_TEXTS = {
-    1: "Sie befinden sich am Eingang. Gehen Sie ungefähr zwei Meter geradeaus. " +
-       "Links befindet sich die Küche, rechts befinden sich die Büros. " +
-       "Biegen Sie danach rechts ab und halten Sie das Smartphone vor sich."
+    1: "Sie befinden sich am Eingang. Links befindet sich die Küche, rechts befinden " +
+       "sich die Büros. Gehen Sie geradeaus und halten Sie das Smartphone vor sich."
   };
 
   // ==================== GRAPH: KANTEN (manuelles Ortswissen) ====================

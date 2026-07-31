@@ -95,6 +95,120 @@ import { record, getTestName } from './logger.js';
     activeDirectionText = null;
   }
 
+  // ---- Bestaetigung "geradeaus" NACH einem echten Abbiegen (neu) ----
+  // Rein additiver Zustand: merkt sich, dass ein ECHTES Abbiegen soeben angesagt wurde
+  // (isTurn===true in reachPoint(), siehe dort) und die anschliessende Bestaetigung
+  // "Gehen Sie geradeaus." noch aussteht, bis der NAECHSTE erwartete Tag zum ERSTEN MAL
+  // ueber den bestehenden onNextTagFound()-Pfad bestaetigt wird (normale Suche ODER
+  // Vorgriffs-Retarget — bei Vorgriffs-Retarget wird dieser Zustand jedoch VORHER explizit
+  // storniert, siehe beginTrackingForwardCandidate(), weil dort bereits eine eigene
+  // "Gehen Sie weiter geradeaus."-Bestaetigung erfolgt). An (routeRunId, expectedTag)
+  // gebunden, damit ein spaeter/anderswo eintreffender Tag NIE faelschlich als
+  // Abschluss dieses konkreten Abbiegens gewertet wird. Beeinflusst KEINE
+  // Erkennungs-, Routen- oder Abbiege-Logik — nur, OB zusaetzlich "Gehen Sie
+  // geradeaus." gesprochen wird.
+  // neu (Bugfix): begrenzte, gedrosselte Wiederholung, falls der TTS-Kanal genau im
+  // Moment des ersten Versuchs belegt ist ("busy") — OHNE bei jedem Frame erneut zu
+  // versuchen. postTurnAttempts zaehlt JEDEN Sprechversuch (der erste eingeschlossen);
+  // postTurnNextRetryAt drosselt, wann der NAECHSTE Versuch fruehestens stattfinden darf.
+  var POST_TURN_RETRY_INTERVAL_MS = 400;   // 300-500ms Fenster laut Vorgabe
+  var POST_TURN_MAX_ATTEMPTS = 3;          // insgesamt, ersten Versuch eingeschlossen
+
+  var postTurnPending = false;
+  var postTurnRouteRunId = null;
+  var postTurnTurnTag = null;       // Tag, AN DEM das Abbiegen angesagt wurde
+  var postTurnExpectedTag = null;   // Tag, dessen Bestaetigung die Ansage abschliesst
+  var postTurnAttempts = 0;
+  var postTurnNextRetryAt = 0;
+
+  function setPostTurnPending(turnTag, expectedTag){
+    postTurnPending = true;
+    postTurnRouteRunId = routeRunId;
+    postTurnTurnTag = turnTag;
+    postTurnExpectedTag = expectedTag;
+    postTurnAttempts = 0;
+    postTurnNextRetryAt = 0;
+    navLog("POST_TURN_CONFIRMATION_PENDING", { routeRunId: routeRunId, turnTag: turnTag,
+      expectedTag: expectedTag, reason: "turn-instruction-accepted" });
+  }
+
+  function clearPostTurnPending(reason){
+    if(!postTurnPending) return;
+    navLog("POST_TURN_CONFIRMATION_CLEARED", { routeRunId: postTurnRouteRunId,
+      turnTag: postTurnTurnTag, expectedTag: postTurnExpectedTag, reason: reason,
+      attempts: postTurnAttempts });
+    postTurnPending = false;
+    postTurnRouteRunId = null;
+    postTurnTurnTag = null;
+    postTurnExpectedTag = null;
+    postTurnAttempts = 0;
+    postTurnNextRetryAt = 0;
+  }
+
+  // Einziger Ort, der tatsaechlich versucht, die anstehende Nach-Abbiege-Bestaetigung
+  // zu sprechen — aufrufbar sowohl aus onNextTagFound() (der erste, sofortige Versuch)
+  // als auch aus handleTracking() (laeuft bereits jeden Tick waehrend TRACKING; siehe
+  // dort). Spricht NIEMALS pro Frame: der erste Versuch (postTurnAttempts===0) laeuft
+  // sofort durch, JEDER weitere Versuch ist zusaetzlich durch postTurnNextRetryAt
+  // gedrosselt (mindestens POST_TURN_RETRY_INTERVAL_MS seit dem letzten Versuch).
+  // Prueft vor JEDEM Versuch erneut: Route aktiv, gleicher Routenlauf, gleicher
+  // erwarteter Tag, weiterhin im TRACKING-Zustand, Ziel noch nicht erreicht, Zustand
+  // noch nicht anderweitig geloescht (erste Zeile). Keine Erkennungs-, Routen-,
+  // Vorgriffs- oder Verlust-Logik wird hier gelesen oder veraendert.
+  function tryPostTurnConfirmation(){
+    if(!postTurnPending) return;
+    if(!navigationActive || destinationReached) return;
+    if(postTurnRouteRunId !== routeRunId) return;
+    if(postTurnExpectedTag !== expectedNextTagId) return;
+    if(navState !== NavState.TRACKING) return;
+
+    var now = performance.now();
+    if(postTurnAttempts > 0 && now < postTurnNextRetryAt) return;   // Drossel — kein Versuch pro Frame
+
+    postTurnAttempts++;
+    var isRetry = postTurnAttempts > 1;
+    var turnTagForLog = postTurnTurnTag, expectedTagForLog = postTurnExpectedTag;
+    if(isRetry){
+      navLog("POST_TURN_CONFIRMATION_RETRY_ATTEMPT", { routeRunId: routeRunId,
+        turnTag: turnTagForLog, expectedTag: expectedTagForLog, attempt: postTurnAttempts });
+    }
+
+    var confirmResult = speakDirectionIfNew("Gehen Sie geradeaus.",
+      ttsOpts({interrupt:true, source:"nav.postTurnConfirmation", category:"NAVIGATION_CONTEXT"}),
+      "POST_TURN_CONFIRMATION_SPOKEN",
+      { turnTag: turnTagForLog, expectedTag: expectedTagForLog, attempt: postTurnAttempts });
+
+    if(confirmResult.accepted){
+      if(isRetry){
+        navLog("POST_TURN_CONFIRMATION_RETRY_ACCEPTED", { routeRunId: routeRunId,
+          turnTag: turnTagForLog, expectedTag: expectedTagForLog, attempt: postTurnAttempts,
+          speechId: confirmResult.speechId });
+      }
+      clearPostTurnPending("confirmed");
+      return;
+    }
+
+    if(confirmResult.suppressionReason === "busy"){
+      if(postTurnAttempts >= POST_TURN_MAX_ATTEMPTS){
+        navLog("POST_TURN_CONFIRMATION_RETRY_ABANDONED", { routeRunId: routeRunId,
+          turnTag: turnTagForLog, expectedTag: expectedTagForLog, attempts: postTurnAttempts,
+          reason: "busy-max-attempts" });
+        clearPostTurnPending("retry-exhausted-busy");
+      } else {
+        postTurnNextRetryAt = now + POST_TURN_RETRY_INTERVAL_MS;
+        navLog("POST_TURN_CONFIRMATION_RETRY_SCHEDULED", { routeRunId: routeRunId,
+          turnTag: turnTagForLog, expectedTag: expectedTagForLog, attempt: postTurnAttempts,
+          nextRetryInMs: POST_TURN_RETRY_INTERVAL_MS });
+      }
+      return;
+    }
+
+    // "muted"/"unsupported"/sofortiger Fehlschlag: nicht wiederholbar (naechster
+    // Versuch wuerde denselben Grund liefern) — sofort mit explizitem Grund loeschen,
+    // statt den Zustand unbegrenzt haengen zu lassen.
+    clearPostTurnPending("suppressed-" + (confirmResult.suppressionReason || "failed"));
+  }
+
   // Versucht, `text` als Richtungsansage zu sprechen — NUR wenn sie sich von der aktuell
   // aktiven Richtungsansage unterscheidet. Bei Unterdrueckung wird IMMER
   // TTS_STRAIGHT_SUPPRESSED_DUPLICATE geloggt (keine Sprachausgabe dabei); bei
@@ -260,6 +374,7 @@ import { record, getTestName } from './logger.js';
     lastRouteInstruction = "";
     resetSegmentState();
     resetActiveDirectionState();
+    clearPostTurnPending("route-start");
     currentScanDelayMs = SETTINGS.scanHintAfterMs;
     setNavState(NavState.SEARCHING_START_TAG);
     updatePanel(null);
@@ -295,9 +410,18 @@ import { record, getTestName } from './logger.js';
     destinationReached = false;
     resetSegmentState();
     resetActiveDirectionState();
+    clearPostTurnPending("route-end");
     setNavState(NavState.IDLE);
     updatePanel(null);
-    if(announce){
+    // neu (Audit-Korrektur): NACH erfolgreicher Zielankunft wurde die Ankunfts-Ansage
+    // (arriveAtDestination(), "Ziel erreicht...") bereits gesprochen — "Navigation
+    // beendet." wuerde diese Information nur redundant wiederholen (und koennte, falls
+    // die Ankunfts-Ansage noch liefe, sie unnoetig unterbrechen). wasReached wurde HIER
+    // OBEN, VOR dem Zuruecksetzen von destinationReached, gelesen und beschreibt exakt
+    // "kam diese Beendigung NACH einer bereits erfolgten Zielankunft" — bei echtem
+    // manuellem Abbruch VOR Ankunft (wasReached===false) bleibt "Navigation beendet."
+    // unveraendert erhalten.
+    if(announce && !wasReached){
       say("Navigation beendet.",
         ttsOpts({interrupt:true, source:"nav.navigationEnded", category:"STATUS"}));
     }
@@ -379,6 +503,12 @@ import { record, getTestName } from './logger.js';
     navLog("TTS_SUPPRESSED_MARKER_FOUND", { expectedTag: expectedNextTagId,
       isDestination: expectedNextTagId === destinationId,
       buzzed: expectedNextTagId !== destinationId });
+
+    // neu: sofortiger erste Versuch der anstehenden Nach-Abbiege-Bestaetigung (falls
+    // eine ansteht) — Wiederholung bei "busy" uebernimmt tryPostTurnConfirmation()
+    // selbst (siehe dort); wird ab dem naechsten Tick zusaetzlich aus handleTracking()
+    // heraus erneut geprueft (gedrosselt, siehe dort), NICHT hier erneut aufgerufen.
+    tryPostTurnConfirmation();
   }
 
   // Punkt erreicht (Distanz <= Schwelle, Near-Loss-Fallback oder kontrollierter Skip).
@@ -429,7 +559,14 @@ import { record, getTestName } from './logger.js';
     // also existiert in der berechneten Route immer ein naechster Tag danach.
     var nextEdge = EDGE_MAP[reachedTagId + "->" + pathTagIds[segIndex + 2]];
     var isTurn = isTurnAction(nextEdge);
-    var t = departureActionSpeech(nextEdge);
+    // neu: bei einem ECHTEN Abbiegen wird der Text generisch aus der vorhandenen
+    // departureAction abgeleitet und mit "Stopp. " vorangestellt — GENAU EIN Ort im
+    // Code, der das tut, unabhaengig davon, welcher Tag/welche Kante betroffen ist
+    // (keine Tag-2-spezifische Sonderbehandlung). Kein neuer Stopp-Abstand, keine neue
+    // Schwelle: der Ausloeser bleibt exakt der bestehende REACHED-Zeitpunkt
+    // (arrival <= SETTINGS.reachedM, siehe handleTracking()).
+    var baseText = departureActionSpeech(nextEdge);
+    var t = isTurn ? ("Stopp. " + baseText) : baseText;
     lastRouteInstruction = t;
 
     if(isTurn){
@@ -460,7 +597,13 @@ import { record, getTestName } from './logger.js';
     segIndex++;
     // beginSegment() setzt expectedNextTagId SOFORT auf den naechsten Tag und
     // wechselt in SEARCHING_NEXT_TAG — ab dem naechsten Frame wird er erkannt.
+    // WICHTIG: erst NACH beginSegment() aufrufen, damit resetSegmentState() (das
+    // beginSegment() intern aufruft) NICHT versehentlich diesen Zustand ueberschreibt —
+    // resetSegmentState() ruehrt postTurnPending bewusst NICHT an (siehe dort).
     beginSegment();
+    if(isTurn){
+      setPostTurnPending(reachedTagId, expectedNextTagId);
+    }
     navLog("REACHED -> next segment", { reachedTag: reachedTagId,
       reason: reason || "distance-threshold", newExpectedTag: expectedNextTagId,
       state: navState });
@@ -471,6 +614,7 @@ import { record, getTestName } from './logger.js';
     navigationActive = false;
     expectedNextTagId = null;
     resetActiveDirectionState();
+    clearPostTurnPending("destination-arrival");
     var t = ARRIVALS[destinationId] || ("Ziel erreicht. Sie sind bei " + markerName(destinationId) + ".");
     lastRouteInstruction = t;
     setNavState(NavState.DESTINATION_REACHED);
@@ -485,6 +629,14 @@ import { record, getTestName } from './logger.js';
   // ---- TRACKING: laufende Distanzmessung zum Tag voraus ----
   // v13: rawDist = frische Roh-Messung dieses Frames (oder null).
   function handleTracking(now, visible, rawDist){
+    // neu (Bugfix): einziger "spaeterer, kontrollierter" Aufrufpunkt fuer die
+    // Nach-Abbiege-Bestaetigungs-Wiederholung — handleTracking() laeuft bereits jeden
+    // Tick waehrend TRACKING (main-loop.js, unveraendert), tryPostTurnConfirmation()
+    // selbst drosselt auf hoechstens einen Versuch pro POST_TURN_RETRY_INTERVAL_MS und
+    // ist ein sofortiger No-Op, sobald kein Zustand mehr aussteht — beruehrt keine der
+    // folgenden Distanz-/EMA-/REACHED-/Verlust-Berechnungen.
+    tryPostTurnConfirmation();
+
     var edge = currentEdge();
     var reachedM = (edge && edge.reachedM != null) ? edge.reachedM : SETTINGS.reachedM;
 
@@ -889,6 +1041,14 @@ import { record, getTestName } from './logger.js';
     var routeIndexBefore = segIndex;
     var wasLostPending = lostSpeechPending;
     var bypassedTags = pathTagIds.slice(routeIndexBefore + 1, targetIdx);
+
+    // neu: ein Vorgriffs-Retarget ueberspringt IMMER den Tag, auf den eine eventuell
+    // anstehende Nach-Abbiege-Bestaetigung wartet (findVisibleForwardCandidate() liefert
+    // nur Kandidaten ECHT VOR dem erwarteten Tag, siehe dort) — die eigene "Gehen Sie
+    // weiter geradeaus."-Bestaetigung weiter unten in dieser Funktion uebernimmt bereits
+    // die Rolle "Bestaetigung, dass es geradeaus weitergeht", daher wird hier storniert
+    // statt eine zweite, nie erreichbare Bestaetigung offen zu lassen.
+    clearPostTurnPending("forward-skip-retarget");
 
     var bypassedDistanceM = 0;
     for(var i = routeIndexBefore; i < targetIdx - 1; i++){
