@@ -378,13 +378,22 @@ import { record, getTestName } from './logger.js';
     currentScanDelayMs = SETTINGS.scanHintAfterMs;
     setNavState(NavState.SEARCHING_START_TAG);
     updatePanel(null);
-    // neu: routeRunId wird JETZT (vor der Ansage) statt erst danach erzeugt — reine
-    // Instrumentierungs-Reihenfolge (eine zufaellige Id), damit die Route-Start-Ansage
-    // sie im TTS-Log mitfuehren kann. Keine Auswirkung auf Navigationslogik.
+    // neu: routeRunId wird weiterhin hier (vor jeglicher Ansage) erzeugt — reine
+    // Instrumentierungs-Id, keine Auswirkung auf Navigationslogik.
     routeRunId = generateRouteRunId();
-    say("Ziel gewählt: " + markerName(destId) + ". Richten Sie das Smartphone auf die " +
-        "nächste Markierung in Ihrer Nähe. Von dort wird die Route berechnet.",
-        ttsOpts({interrupt:true, source:"nav.routeStart", category:"NAVIGATION_CONTEXT"}));
+    // neu (VoiceOver-Fix): die bisherige sofortige "Ziel gewählt..."-Ansage direkt bei
+    // Tastendruck ist ENTFERNT worden — sie lief synchron im selben Klick-Handler wie
+    // die VoiceOver-Doppeltipp-Aktivierung von "Navigation starten" und ueberlagerte
+    // dadurch garantiert VoiceOvers eigene Ansage der aktivierten Schaltflaeche
+    // (bestaetigtes Verhalten auf echtem Geraet). Es handelt sich um eine reine
+    // Tastendruck-Bestaetigung, die die spaeter ohnehin folgende, bereits bestehende
+    // Sprachfuehrung nur vorwegnahm: scanHint() (nav.js) meldet sich automatisch nach
+    // SETTINGS.scanHintAfterMs, falls noch kein Tag gefunden wurde, und
+    // onStartTagConfirmed() spricht die eigentliche erste Anweisung, sobald der erste
+    // Tag TATSAECHLICH bestaetigt ist — beide bereits vorhandene, zustandsgetriebene
+    // Ausloeser, kein neuer Timer noetig. lastRouteInstruction bleibt bewusst "" (siehe
+    // oben), bis onStartTagConfirmed() sie setzt; repeatBtn faengt den Zwischenzustand
+    // bereits ab ("Noch keine Anweisung vorhanden.", app.js).
     // ---- Instrumentierung (neu) ----
     navLog("ROUTE_START", { destinationId: destId, destination: markerName(destId),
       testName: getTestName() });
