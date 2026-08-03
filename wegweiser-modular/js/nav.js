@@ -209,6 +209,80 @@ import { record, getTestName } from './logger.js';
     clearPostTurnPending("suppressed-" + (confirmResult.suppressionReason || "failed"));
   }
 
+  // ---- Rueckversicherung auf langen geraden Korridoren (neu) ----
+  // Rein additiv, rein distanzbasiert aus bereits vorhandenen Kantendistanzen
+  // (EDGE_MAP[...].distanceM, dieselbe Quelle wie bypassedDistanceM im Vorgriffs-Skip
+  // und remainingRouteMeters() in app.js) — KEINE neue Distanzmessung, KEIN neuer
+  // Zeit-Timer, KEINE Aenderung an reachedM/Tracking/Verlust/Vorgriffs-Logik.
+  // corridorProgressM summiert die Distanz JEDER bereits abgeschlossenen, geraden
+  // Kante seit dem letzten Abbiegen (oder Routenstart/-ende/Zielankunft). Sobald der
+  // Abstand seit der letzten TATSAECHLICH gehoerten Geradeaus-Bestaetigung
+  // SETTINGS.longCorridorReassuranceM erreicht, darf "Gehen Sie weiter geradeaus."
+  // ERNEUT gesprochen werden — bewusst UNABHAENGIG von activeDirectionText/
+  // speakDirectionIfNew()'s Text-Gleichheits-Dedup (die auf einem langen, stillen
+  // Korridor sonst JEDE Wiederholung fuer immer unterdruecken wuerde, siehe
+  // Kommentar dort: "genau EINE Ansage pro Korridor") — activeDirectionText wird
+  // trotzdem aktualisiert, damit andere Aufrufstellen weiterhin korrekt gegen die
+  // zuletzt gehoerte Formulierung abgleichen.
+  var corridorProgressM = 0;          // aufsummierte gerade Distanz seit letztem Reset
+  var corridorLastReassuranceAtM = 0; // Wert von corridorProgressM bei der letzten
+                                       // TATSAECHLICH gehoerten Geradeaus-Bestaetigung
+                                       // (egal ob normale Ansage, Vorgriffs-Bestaetigung
+                                       // oder diese Rueckversicherung selbst)
+  var corridorActive = false;         // fuer STRAIGHT_CORRIDOR_STARTED, nur einmal pro Korridor
+
+  function resetCorridorState(reason){
+    if(!corridorActive && corridorProgressM === 0) return;
+    navLog("STRAIGHT_CORRIDOR_RESET", { reason: reason, progressAtResetM: r1(corridorProgressM) });
+    corridorProgressM = 0;
+    corridorLastReassuranceAtM = 0;
+    corridorActive = false;
+  }
+
+  // Schreibt die Distanz einer bereits abgeschlossenen, geraden Kante gut — aufgerufen
+  // aus reachPoint() (normal erreichter Zwischen-Tag) und beginTrackingForwardCandidate()
+  // (uebersprungene Kanten, siehe dort: nur Kandidaten OHNE Abbiegen dazwischen sind
+  // ueberhaupt als Vorgriffs-Ziel zulaessig, daher hier keine erneute Abbiege-Pruefung
+  // noetig). Loggt STRAIGHT_CORRIDOR_STARTED nur beim UEBERGANG von 0 auf >0 (nicht bei
+  // jedem weiteren Beitrag), STRAIGHT_CORRIDOR_PROGRESS bei jedem Beitrag — beides
+  // ausschliesslich an echten Segment-/Skip-Ereignissen, NIE pro Frame.
+  function creditCorridorProgress(distanceM){
+    if(distanceM == null || distanceM <= 0) return;
+    var wasActive = corridorActive;
+    corridorProgressM += distanceM;
+    corridorActive = true;
+    if(!wasActive){
+      navLog("STRAIGHT_CORRIDOR_STARTED", { progressM: r1(corridorProgressM) });
+    }
+    navLog("STRAIGHT_CORRIDOR_PROGRESS", { addedM: r1(distanceM), progressM: r1(corridorProgressM),
+      sinceReassuranceM: r1(corridorProgressM - corridorLastReassuranceAtM) });
+  }
+
+  // Prueft, ob seit der letzten gehoerten Geradeaus-Bestaetigung genug Korridor-
+  // Fortschritt vorliegt, um "Gehen Sie weiter geradeaus." erneut zu sprechen — NICHT
+  // ueber speakDirectionIfNew() (siehe Kommentar oben, wuerde durch Text-Gleichheit
+  // dauerhaft blockiert), sondern direkt ueber say() mit interrupt:false: darf NIEMALS
+  // eine wichtigere Ansage unterbrechen (Abbiegen/Stopp/Ankunft/Vorgriffs-Bestaetigung)
+  // und bleibt bei belegtem Kanal einfach bis zum naechsten Kanten-Ereignis stumm
+  // (kein eigener Retry-Mechanismus noetig, da corridorProgressM ohnehin weiterwaechst).
+  function maybeTriggerCorridorReassurance(){
+    if(!navigationActive || destinationReached) return;
+    var sinceLast = corridorProgressM - corridorLastReassuranceAtM;
+    if(sinceLast < SETTINGS.longCorridorReassuranceM) return;
+    var text = "Gehen Sie weiter geradeaus.";
+    var result = say(text, ttsOpts({source:"nav.corridorReassurance", category:"NAVIGATION_CONTEXT"}));
+    if(result.accepted){
+      activeDirectionText = text;
+      corridorLastReassuranceAtM = corridorProgressM;
+      navLog("STRAIGHT_REASSURANCE_TRIGGERED", { text: text, progressM: r1(corridorProgressM),
+        sinceLastM: r1(sinceLast), speechId: result.speechId });
+    } else {
+      navLog("STRAIGHT_REASSURANCE_SUPPRESSED", { progressM: r1(corridorProgressM),
+        sinceLastM: r1(sinceLast),
+        suppressionReason: result.suppressionReason || (result.failed ? "failed" : "unknown") });
+    }
+  }
+
   // Versucht, `text` als Richtungsansage zu sprechen — NUR wenn sie sich von der aktuell
   // aktiven Richtungsansage unterscheidet. Bei Unterdrueckung wird IMMER
   // TTS_STRAIGHT_SUPPRESSED_DUPLICATE geloggt (keine Sprachausgabe dabei); bei
@@ -375,6 +449,7 @@ import { record, getTestName } from './logger.js';
     resetSegmentState();
     resetActiveDirectionState();
     clearPostTurnPending("route-start");
+    resetCorridorState("route-start");
     currentScanDelayMs = SETTINGS.scanHintAfterMs;
     setNavState(NavState.SEARCHING_START_TAG);
     updatePanel(null);
@@ -420,6 +495,7 @@ import { record, getTestName } from './logger.js';
     resetSegmentState();
     resetActiveDirectionState();
     clearPostTurnPending("route-end");
+    resetCorridorState("route-end");
     setNavState(NavState.IDLE);
     updatePanel(null);
     // neu (Audit-Korrektur): NACH erfolgreicher Zielankunft wurde die Ankunfts-Ansage
@@ -566,6 +642,13 @@ import { record, getTestName } from './logger.js';
     // Y zu gehen — reachedTagId ist hier das neue X, pathTagIds[segIndex+2] das neue Y.
     // reachedTagId ist an dieser Stelle garantiert NICHT das Ziel (siehe Check oben),
     // also existiert in der berechneten Route immer ein naechster Tag danach.
+    // neu: die soeben abgeschlossene Kante ("edge") ist bereits zurueckgelegte,
+    // garantiert gerade Strecke (ihr eigenes Abbiegen-Erfordernis, falls vorhanden,
+    // wurde bereits BEIM VORHERIGEN reachPoint()-Aufruf entschieden und angesagt) —
+    // wird dem Korridor-Fortschritt IMMER gutgeschrieben, unabhaengig davon, ob JETZT
+    // (fuer die naechste Kante) ein Abbiegen ansteht.
+    creditCorridorProgress(edge ? edge.distanceM : null);
+
     var nextEdge = EDGE_MAP[reachedTagId + "->" + pathTagIds[segIndex + 2]];
     var isTurn = isTurnAction(nextEdge);
     // neu: bei einem ECHTEN Abbiegen wird der Text generisch aus der vorhandenen
@@ -593,15 +676,29 @@ import { record, getTestName } from './logger.js';
       activeDirectionText = t;
       navLog("TTS_DIRECTION", { reachedTag: reachedTagId, action: nextEdge.departureAction,
         isTurn: true, text: t, speechId: turnResult.speechId });
+      // neu: nach einem echten Abbiegen beginnt ein NEUER Korridor — bisheriger
+      // Fortschritt wird verworfen (die naechste Kante wurde ja gerade erst als
+      // Abbiegen angesagt, ihre Distanz wird erst gutgeschrieben, wenn sie tatsaechlich
+      // durchlaufen wurde, siehe oben beim naechsten reachPoint()-Aufruf).
+      resetCorridorState("turn");
     } else {
       // Kein Abbiegen: ueber die gemeinsame Dedup-Logik ansagen — auf einem langen
       // geraden Korridor mit mehreren Zwischen-Tags wird dies nur beim ERSTEN
       // Zwischen-Tag nach dem letzten Abbiegen tatsaechlich gesprochen; jeder weitere
       // Zwischen-Tag auf DERSELBEN Geradeaus-Strecke wird als Duplikat unterdrueckt
       // (TTS_STRAIGHT_SUPPRESSED_DUPLICATE) — genau EINE Ansage pro Korridor.
-      speakDirectionIfNew(t, ttsOpts({interrupt:true, source:"nav.reachPointStraight",
+      var straightResult = speakDirectionIfNew(t, ttsOpts({interrupt:true, source:"nav.reachPointStraight",
         category:"NAVIGATION_CONTEXT"}), "TTS_STRAIGHT",
         { reachedTag: reachedTagId, action: nextEdge.departureAction, trigger: "reached-tag" });
+      if(straightResult.accepted){
+        corridorLastReassuranceAtM = corridorProgressM;
+      }
+      // neu: falls die obige Ansage (korrekt) als Duplikat unterdrueckt wurde, ABER
+      // inzwischen genug Korridor-Distanz aufgelaufen ist, sorgt dies fuer die
+      // gelegentliche Rueckversicherung auf langen, sonst stillen Geradeausstrecken —
+      // no-op, falls straightResult.accepted true war (sinceLast dann 0) oder die
+      // 15-Meter-Schwelle noch nicht erreicht ist.
+      maybeTriggerCorridorReassurance();
     }
     segIndex++;
     // beginSegment() setzt expectedNextTagId SOFORT auf den naechsten Tag und
@@ -624,6 +721,7 @@ import { record, getTestName } from './logger.js';
     expectedNextTagId = null;
     resetActiveDirectionState();
     clearPostTurnPending("destination-arrival");
+    resetCorridorState("destination-arrival");
     var t = ARRIVALS[destinationId] || ("Ziel erreicht. Sie sind bei " + markerName(destinationId) + ".");
     lastRouteInstruction = t;
     setNavState(NavState.DESTINATION_REACHED);
@@ -1064,6 +1162,15 @@ import { record, getTestName } from './logger.js';
       var e = EDGE_MAP[pathTagIds[i] + "->" + pathTagIds[i + 1]];
       bypassedDistanceM += (e && e.distanceM != null) ? e.distanceM : 0;
     }
+    // neu: die uebersprungenen Kanten sind bereits zurueckgelegte Strecke, und
+    // isForwardTagReachableWithoutManeuver() (siehe updateSkipCandidate()) garantiert,
+    // dass JEDE Kante zwischen dem erwarteten Tag und dem Kandidaten "continue-straight"
+    // ist — ein Vorgriffs-Ziel mit einem Abbiegen dazwischen waere gar nicht erst als
+    // Kandidat zugelassen worden. Daher hier IMMER gutschreiben, ohne erneute Abbiege-
+    // Pruefung. Die letzte Kante INS Ziel (targetIdx-1 -> targetIdx) ist bewusst NICHT
+    // enthalten (wie bei bypassedDistanceM oben) — sie wird erst bei TATSAECHLICHER
+    // Ankunft ueber den normalen reachPoint()-Pfad gutgeschrieben.
+    creditCorridorProgress(bypassedDistanceM);
 
     if(wasLostPending){
       navLog("TTS_LOST_CANCELLED_RETARGET", buildLostDecisionLogData(now, "forward-retarget-confirmed"));
@@ -1089,11 +1196,20 @@ import { record, getTestName } from './logger.js';
     // werden UND den Dedup-Zustand fuer die naechste Ansage verfaelschen. Jetzt wie
     // alle anderen Richtungs-Bestaetigungen konsistent interrupt:true; der gesprochene
     // Text ("Gehen Sie weiter geradeaus.") bleibt UNVERAENDERT.
-    speakDirectionIfNew("Gehen Sie weiter geradeaus.",
+    // neu: Ergebnis erfassen — bei tatsaechlicher Ansage uebernimmt diese Bestaetigung
+    // die Rolle der Korridor-Rueckversicherung fuer diese Strecke (Anforderung: "die
+    // Skip-Ansage soll denselben 'letzte Geradeaus-Anweisung'-Zustand aktualisieren") —
+    // verhindert, dass kurz nach einem hoerbaren Vorgriffs-Retarget zusaetzlich noch
+    // die 15-Meter-Rueckversicherung ausgeloest wird, obwohl der Nutzer gerade erst
+    // eine gleichwertige Bestaetigung gehoert hat.
+    var skipResult = speakDirectionIfNew("Gehen Sie weiter geradeaus.",
       ttsOpts({interrupt:true, source:"nav.forwardSkipConfirmation", category:"NAVIGATION_CONTEXT"}),
       "TTS_STRAIGHT",
       { confirmedTag: confirmedTagId,
         trigger: wasLostPending ? "forward-retarget-after-lost" : "forward-retarget" });
+    if(skipResult.accepted){
+      corridorLastReassuranceAtM = corridorProgressM;
+    }
   }
 
   // Bekannter, aber NICHT erwarteter Tag: sehr zurückhaltend melden.
@@ -1138,10 +1254,25 @@ import { record, getTestName } from './logger.js';
     var now = performance.now();
     if(zone === lastAimZone) return;
     if(now - lastAimAt < SETTINGS.aimCooldownMs) return;
+
+    // neu: "Markierung mittig." entfernt — Zentrierung ist keine Handlungsanweisung
+    // (der Nutzer muss nichts mehr tun, im Gegensatz zu links/rechts/hoeher/tiefer).
+    // zone/lastAimZone/lastAimAt werden TROTZDEM aktualisiert (wie zuvor bei
+    // erfolgreicher Ansage), damit die bestehende Cooldown-/Uebergangs-Logik fuer die
+    // verbleibenden, echten Korrektur-Hinweise unveraendert weiterlaeuft — kein zweiter
+    // Log-Eintrag pro Frame: die obige zone===lastAimZone-Pruefung sorgt dafuer, dass
+    // dies nur EINMAL beim UEBERGANG in die Mitte protokolliert wird, nicht bei jedem
+    // weiteren Frame, in dem der Tag mittig bleibt.
+    if(zone === "center"){
+      lastAimZone = zone;
+      lastAimAt = now;
+      navLog("TTS_AIM_CENTER_SUPPRESSED", { expectedTag: expectedNextTagId, state: navState });
+      return;
+    }
+
     if(speaking()) return;
     var msg = { left:"Markierung links.", right:"Markierung rechts.",
-                up:"Smartphone etwas höher.", down:"Smartphone etwas tiefer.",
-                center:"Markierung mittig." }[zone];
+                up:"Smartphone etwas höher.", down:"Smartphone etwas tiefer." }[zone];
     var result = say(msg, ttsOpts({source:"nav.aimGuidance", category:"ACTION_REQUIRED"}));
     if(result.accepted){ lastAimZone = zone; lastAimAt = now; }
   }

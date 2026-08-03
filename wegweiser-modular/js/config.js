@@ -41,10 +41,16 @@
                                   // einem gueltigen Vorgriffs-Tag Zeit, sich zu bestaetigen,
                                   // OHNE den bestehenden trackLostStopMs-Zustandsuebergang zu
                                   // veraendern oder umzudeuten (siehe handleLostStopped())
-    lostReminderRepeatMs: 18000    // neu: Abstand zwischen kurzen "Suchen Sie weiter."-
+    lostReminderRepeatMs: 18000,   // neu: Abstand zwischen kurzen "Suchen Sie weiter."-
                                   // Erinnerungen waehrend LOST_STOPPED (deutlich seltener
                                   // als vorher; ersetzt die lange Wiederholung ueber
                                   // scanHintRepeatMs)
+    longCorridorReassuranceM: 15   // neu: nach so vielen aufsummierten Metern OHNE
+                                  // Abbiegen (siehe Korridor-Fortschritt in nav.js) darf
+                                  // "Gehen Sie weiter geradeaus." erneut gesprochen
+                                  // werden, auch wenn dieselbe Formulierung fuer diesen
+                                  // Korridor bereits einmal aktiv war — rein
+                                  // distanzbasiert, kein neuer Zeit-Timer
   };
 
   var SAFETY_SPEECH = "Der Wegweiser unterstützt die Orientierung anhand von Markierungen, " +
