@@ -11,13 +11,7 @@
   <h1>Wegweiser v12</h1>
 
   <div id="stage">
-    <canvas id="view"></canvas>
     <video id="cam" playsinline muted autoplay></video>
-
-    <div id="status" aria-hidden="true">
-      <div id="room" class="empty">Bereit</div>
-      <div id="meta" class="empty"></div>
-    </div>
 
     <!-- Von Screenreadern gelesene Live-Meldungen -->
     <div id="live" class="sr" role="status" aria-live="assertive"></div>
@@ -44,16 +38,6 @@
     </select>
   </div>
 
-  <div id="navPanel" aria-hidden="true">
-    <div>Ziel: <b id="uiDest">–</b></div>
-    <div>Zustand: <b id="navState">IDLE</b></div>
-    <div class="wide" style="font-size:1rem">Nächste Markierung: <b id="uiNext">–</b></div>
-    <div>Zuletzt bestätigt: <b id="uiCur">–</b></div>
-    <div>Distanz: <b id="uiDist">–</b></div>
-    <div>Schritt: <b id="stepSource">–</b></div>
-    <div class="wide">Anweisung: <b id="uiInstr">–</b></div>
-  </div>
-
   <div class="btnrow">
     <button class="ctrl primary" id="navStartBtn" disabled>Navigation starten</button>
     <button class="ctrl danger" id="navEndBtn">Navigation beenden</button>
@@ -65,16 +49,47 @@
     <button class="ctrl" id="muteBtn">Ton an<small>Sprache</small></button>
   </div>
 
-  <!-- ==================== Logging-Panel (neu, Feldtest-Instrumentierung) ==================== -->
-  <div id="logPanel" style="padding-top:8px">
-    <label class="sr" for="testNameInput">Testname</label>
-    <input id="testNameInput" type="text" placeholder="Testname" aria-label="Testname"
-      style="width:100%;border:2px solid #2a2a2a;background:#141414;color:#fff;border-radius:14px;padding:13px 12px;font-size:1rem;font-weight:700">
-  </div>
-  <div class="btnrow">
-    <button class="ctrl" id="logExportBtn">Log exportieren<small id="logCounter">0 Einträge</small></button>
-    <button class="ctrl danger" id="logClearBtn">Log löschen</button>
-  </div>
+  <!-- ==================== Test und Diagnose (neu, UX-Schritt 1): entwickler-/
+       feldtestorientierte Kamera-Vorschau, technisches Navigations-Panel und
+       Logging-Kontrollen, gebuendelt in einem nativen <details>-Element,
+       standardmaessig eingeklappt. ALLE IDs unveraendert aus dem bisherigen Markup
+       uebernommen -- js/dom.js greift ausschliesslich per getElementById zu und
+       funktioniert daher unabhaengig von dieser DOM-Position; die 2D-Rendering-
+       Context-Referenz von #view (main-loop.js, ueber ctx aus dom.js) bleibt beim
+       Verschieben im DOM erhalten. Kollabieren dieses <details> beeinflusst daher
+       NUR die Darstellung, NIE die Kamera-Verarbeitung (siehe Audit, Abschnitt 4). ==================== -->
+  <details id="diagnosticsPanel">
+    <summary>Test und Diagnose</summary>
+    <div class="diagBody">
+      <div class="diagPreview" aria-hidden="true">
+        <canvas id="view"></canvas>
+        <div id="status" aria-hidden="true">
+          <div id="room" class="empty">Bereit</div>
+          <div id="meta" class="empty"></div>
+        </div>
+      </div>
+
+      <div id="navPanel" aria-hidden="true">
+        <div>Ziel: <b id="uiDest">–</b></div>
+        <div>Zustand: <b id="navState">IDLE</b></div>
+        <div class="wide" style="font-size:1rem">Nächste Markierung: <b id="uiNext">–</b></div>
+        <div>Zuletzt bestätigt: <b id="uiCur">–</b></div>
+        <div>Distanz: <b id="uiDist">–</b></div>
+        <div>Schritt: <b id="stepSource">–</b></div>
+        <div class="wide">Anweisung: <b id="uiInstr">–</b></div>
+      </div>
+
+      <div id="logPanel" style="padding-top:8px">
+        <label class="sr" for="testNameInput">Testname</label>
+        <input id="testNameInput" type="text" placeholder="Testname" aria-label="Testname"
+          style="width:100%;border:2px solid #2a2a2a;background:#141414;color:#fff;border-radius:14px;padding:13px 12px;font-size:1rem;font-weight:700">
+      </div>
+      <div class="btnrow">
+        <button class="ctrl" id="logExportBtn">Log exportieren<small id="logCounter">0 Einträge</small></button>
+        <button class="ctrl danger" id="logClearBtn">Log löschen</button>
+      </div>
+    </div>
+  </details>
 
 <!-- ==================== Bibliotheken (js-aruco2), klassische Skripte, unveraendert ==================== -->
 <script src="./vendor/cv.js"></script>
