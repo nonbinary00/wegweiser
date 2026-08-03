@@ -11,12 +11,12 @@
     text-transform:uppercase}
   #stage{position:relative;flex:1;min-height:0;border-radius:18px;overflow:hidden;background:#0a0a0a;
     display:flex;align-items:center;justify-content:center}
-  /* neu (UX-Schritt 1): #view lebt jetzt in der kleineren .diagPreview statt im
-     vollflaechigen #stage -- width:100% + height:auto erhaelt automatisch das
-     tatsaechliche Seitenverhaeltnis der Canvas-Puffergroesse (canvas.width/height,
-     gesetzt in main-loop.js aus den echten Video-Massen), ohne dieses Verhaeltnis
-     hier zu erraten. object-fit greift ohne feste height nicht mehr, daher entfernt. */
-  #view{width:100%;height:auto;display:block}
+  /* neu (Layout-Fix Diagnose-Panel): feste max-height + object-fit:contain statt
+     height:auto -- so bleibt die Vorschau auf dem iPhone kompakt (~200px), OHNE
+     dass sich das Seitenverhaeltnis aendert (Letterboxing statt Beschneiden/
+     Verzerren) und OHNE canvas.width/height (main-loop.js, Verarbeitungsgroesse)
+     anzufassen -- ausschliesslich CSS-Darstellung. */
+  #view{width:100%;height:200px;max-height:200px;object-fit:contain;display:block}
   video{display:none}
   #status{position:absolute;left:0;right:0;bottom:0;padding:14px 14px calc(14px + env(safe-area-inset-bottom));
     background:linear-gradient(to top,rgba(0,0,0,.85),rgba(0,0,0,0));
@@ -66,5 +66,5 @@
   #diagnosticsPanel summary:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
   #diagnosticsPanel[open] summary{border-bottom:2px solid #2a2a2a}
   .diagBody{display:flex;flex-direction:column;gap:16px;padding:16px}
-  .diagPreview{position:relative;width:min(280px,60vw);margin:0 auto;
-    border-radius:12px;overflow:hidden;background:#0a0a0a}
+  .diagPreview{position:relative;width:100%;max-height:200px;overflow:hidden;
+    border-radius:12px;background:#0a0a0a}

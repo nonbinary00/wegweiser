@@ -61,12 +61,18 @@
   <details id="diagnosticsPanel">
     <summary>Test und Diagnose</summary>
     <div class="diagBody">
-      <div class="diagPreview" aria-hidden="true">
-        <canvas id="view"></canvas>
-        <div id="status" aria-hidden="true">
-          <div id="room" class="empty">Bereit</div>
-          <div id="meta" class="empty"></div>
-        </div>
+      <!-- neu: Log-Bedienung ZUERST (Reihenfolge-Fix) -- auf dem iPhone stand die
+           grosse Kamera-Vorschau vorher an erster Stelle und schob "Log exportieren"/
+           "Log löschen" so weit nach unten, dass sie erst nach Scrollen sichtbar
+           waren. Reine DOM-Reihenfolge-Aenderung, keine neuen Elemente. -->
+      <div id="logPanel" style="padding-top:8px">
+        <label class="sr" for="testNameInput">Testname</label>
+        <input id="testNameInput" type="text" placeholder="Testname" aria-label="Testname"
+          style="width:100%;border:2px solid #2a2a2a;background:#141414;color:#fff;border-radius:14px;padding:13px 12px;font-size:1rem;font-weight:700">
+      </div>
+      <div class="btnrow">
+        <button class="ctrl" id="logExportBtn">Log exportieren<small id="logCounter">0 Einträge</small></button>
+        <button class="ctrl danger" id="logClearBtn">Log löschen</button>
       </div>
 
       <div id="navPanel" aria-hidden="true">
@@ -79,14 +85,14 @@
         <div class="wide">Anweisung: <b id="uiInstr">–</b></div>
       </div>
 
-      <div id="logPanel" style="padding-top:8px">
-        <label class="sr" for="testNameInput">Testname</label>
-        <input id="testNameInput" type="text" placeholder="Testname" aria-label="Testname"
-          style="width:100%;border:2px solid #2a2a2a;background:#141414;color:#fff;border-radius:14px;padding:13px 12px;font-size:1rem;font-weight:700">
-      </div>
-      <div class="btnrow">
-        <button class="ctrl" id="logExportBtn">Log exportieren<small id="logCounter">0 Einträge</small></button>
-        <button class="ctrl danger" id="logClearBtn">Log löschen</button>
+      <!-- neu: Kamera-Vorschau jetzt zuletzt, kompakt (siehe .diagPreview/#view in
+           wegweiser.css) -- Verarbeitung/Erkennung unveraendert, siehe main-loop.js. -->
+      <div class="diagPreview" aria-hidden="true">
+        <canvas id="view"></canvas>
+        <div id="status" aria-hidden="true">
+          <div id="room" class="empty">Bereit</div>
+          <div id="meta" class="empty"></div>
+        </div>
       </div>
     </div>
   </details>
