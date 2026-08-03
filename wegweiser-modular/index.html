@@ -8,26 +8,38 @@
 <link rel="stylesheet" href="./css/wegweiser.css">
 </head>
 <body>
-  <h1>Wegweiser v12</h1>
+  <h1>Wegweiser</h1>
 
-  <div id="stage">
-    <video id="cam" playsinline muted autoplay></video>
+  <!-- neu (UX-Cleanup: grosse Kamera-Vorschau entfernt): der bisherige #stage-
+       Wrapper diente urspruenglich als Positionierungs-/Groessen-Kontext fuer die
+       (inzwischen laengst nach #diagnosticsPanel verschobene) Kamera-Vorschau
+       (canvas#view) sowie fuer #gate/#err (per position:absolute;inset:0 relativ
+       zu #stage). #stage selbst wird von KEINEM JS referenziert (kein
+       getElementById("stage") irgendwo, siehe dom.js) -- reine, inzwischen
+       ueberfluessige Struktur-Hülle. video#cam (weiterhin CSS display:none,
+       unveraendert) und #live (weiterhin .sr, unveraendert) benoetigen keinen
+       eigenen Positionierungs-Kontext; #gate/#err sind jetzt selbst
+       position:fixed;inset:0 (siehe wegweiser.css) und damit unabhaengig von
+       jedem Wrapper fullscreen. Entfernen dieses Wrappers aendert NICHTS an
+       Kamera-Stream, Verarbeitung, Erkennung oder am Gate-/Fehler-Verhalten
+       selbst -- nur die jetzt ueberfluessige grosse schwarze Box auf dem
+       gewoehnlichen Bildschirm verschwindet. -->
+  <video id="cam" playsinline muted autoplay></video>
 
-    <!-- Von Screenreadern gelesene Live-Meldungen -->
-    <div id="live" class="sr" role="status" aria-live="assertive"></div>
+  <!-- Von Screenreadern gelesene Live-Meldungen -->
+  <div id="live" class="sr" role="status" aria-live="assertive"></div>
 
-    <div id="gate">
-      <div style="font-size:1.6rem;font-weight:800;color:#fff">Kamera-Wegweiser</div>
-      <p>Route wählen, Kamera starten und den Markierungen Schritt für Schritt folgen.</p>
-      <button id="startBtn" class="big-btn">Kamera starten</button>
-      <p style="font-size:.85rem">Tippe irgendwo auf den Bildschirm. Erlaube den Kamera-Zugriff.</p>
-    </div>
+  <div id="gate">
+    <div style="font-size:1.6rem;font-weight:800;color:#fff">Kamera-Wegweiser</div>
+    <p>Route wählen, Kamera starten und den Markierungen Schritt für Schritt folgen.</p>
+    <button id="startBtn" class="big-btn">Kamera starten</button>
+    <p style="font-size:.85rem">Tippe irgendwo auf den Bildschirm. Erlaube den Kamera-Zugriff.</p>
+  </div>
 
-    <div id="err">
-      <h2>Kamera nicht verfügbar</h2>
-      <p id="errMsg"></p>
-      <button id="retryBtn" class="big-btn" style="min-width:180px;font-size:1.1rem;padding:16px 24px">Erneut versuchen</button>
-    </div>
+  <div id="err">
+    <h2>Kamera nicht verfügbar</h2>
+    <p id="errMsg"></p>
+    <button id="retryBtn" class="big-btn" style="min-width:180px;font-size:1.1rem;padding:16px 24px">Erneut versuchen</button>
   </div>
 
   <div id="destRow" style="padding-top:8px">

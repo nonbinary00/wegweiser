@@ -9,8 +9,6 @@
   body{display:flex;flex-direction:column;min-height:100dvh;padding:var(--pad)}
   h1{font-size:1rem;font-weight:700;letter-spacing:.02em;margin:0 0 6px;color:var(--muted);
     text-transform:uppercase}
-  #stage{position:relative;flex:1;min-height:0;border-radius:18px;overflow:hidden;background:#0a0a0a;
-    display:flex;align-items:center;justify-content:center}
   /* neu (Layout-Fix Diagnose-Panel): feste max-height + object-fit:contain statt
      height:auto -- so bleibt die Vorschau auf dem iPhone kompakt (~200px), OHNE
      dass sich das Seitenverhaeltnis aendert (Letterboxing statt Beschneiden/
@@ -33,7 +31,11 @@
   #meta{font-size:clamp(.9rem,4vw,1.2rem);font-weight:600;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,.9)}
   #room.empty{color:var(--muted);font-size:clamp(1.1rem,5vw,1.6rem);font-weight:600}
   #meta.empty{display:none}
-  #gate{position:absolute;inset:0;background:#000;display:flex;flex-direction:column;
+  /* neu (UX-Cleanup: grosse Kamera-Vorschau entfernt): position:fixed statt
+     absolute -- #gate ist jetzt aus sich selbst heraus fullscreen (Viewport-
+     relativ), unabhaengig vom entfernten #stage-Wrapper. Inhalt/Text/Button/
+     Farben unveraendert, nur der Positionierungs-Bezugspunkt aendert sich. */
+  #gate{position:fixed;inset:0;background:#000;display:flex;flex-direction:column;
     align-items:center;justify-content:center;text-align:center;gap:20px;padding:24px;z-index:5}
   #gate p{max-width:24ch;color:var(--muted);font-size:1.05rem;line-height:1.4;margin:0}
   .big-btn{appearance:none;border:none;border-radius:999px;background:var(--accent);color:#000;
@@ -69,7 +71,9 @@
   .ctrl small{display:block;font-weight:500;color:var(--muted);font-size:.68rem;margin-top:2px}
   .ctrl.primary{border-color:var(--accent);color:var(--accent)}
   .ctrl.danger{border-color:#5a2a2a}
-  #err{position:absolute;inset:0;background:#000;color:#fff;display:none;flex-direction:column;
+  /* neu (UX-Cleanup: grosse Kamera-Vorschau entfernt): siehe #gate-Kommentar --
+     gleiche Begruendung, gleiches Vorgehen. */
+  #err{position:fixed;inset:0;background:#000;color:#fff;display:none;flex-direction:column;
     align-items:center;justify-content:center;gap:14px;padding:28px;text-align:center;z-index:6}
   #err h2{color:var(--warn);margin:0;font-size:1.3rem}
   #err p{color:var(--muted);max-width:30ch;line-height:1.5;margin:0}
