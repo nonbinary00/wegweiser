@@ -7,10 +7,12 @@
 // HINWEIS: nav.js wird erst in Stufe 4 angelegt; bis dahin ist dieser Import-Pfad
 // noch nicht aufloesbar (das Modul kann erst ab Stufe 4 tatsaechlich geladen werden).
 
-import { roomEl, metaEl, uiDest, uiCur, uiNext, uiDist, uiInstr, uiSource, ctx } from './dom.js';
+import { roomEl, metaEl, uiDest, uiCur, uiNext, uiDist, uiInstr, uiSource, ctx,
+  destSel, navStartBtn, navEndBtn, whereBtn } from './dom.js';
 import { W } from './frame-state.js';
 import { markerName, pathToText } from './graph.js';
-import { destinationId, pathTagIds, currentTagId, expectedNextTagId, lastRouteInstruction, currentEdge } from './nav.js';
+import { destinationId, pathTagIds, currentTagId, expectedNextTagId, lastRouteInstruction, currentEdge,
+  navigationActive, destinationReached } from './nav.js';
 
   // ---- Anzeige ----
   function showRoom(label, sub, distM){
@@ -40,6 +42,44 @@ import { destinationId, pathTagIds, currentTagId, expectedNextTagId, lastRouteIn
     uiSource.className = e ? "auto" : "";
   }
 
+  // ---- Zustandsbasierte Sichtbarkeit der Bedienelemente (neu, UX-Schritt:
+  // State-Rendering) ----
+  // Einzige Aufgabe: die vorhandenen Steuerelemente #navStartBtn/#navEndBtn/
+  // #whereBtn/#destSel je nach den bereits bestehenden nav.js-Zustandsfeldern
+  // (navigationActive/destinationReached) ein-/ausblenden bzw. -- nur bei destSel
+  // -- (de)aktivieren, sowie den Start-Button-Text anpassen. Liest AUSSCHLIESSLICH
+  // bereits vorhandenen Navigations-Zustand, loest KEINE Routen-/Kamera-/TTS-/Log-
+  // Aufrufe aus und ist KEINE zweite Zustandsmaschine -- navigationActive/
+  // destinationReached bleiben ausschliesslich in nav.js gesetzt. Verwendet das
+  // native `hidden`-Attribut (keine neue CSS-Klasse): entfernt das Element
+  // vollstaendig aus dem Layout UND aus dem Accessibility-Baum (VoiceOver kann es
+  // dann nicht mehr fokussieren), ohne bestehende .ctrl-/.btnrow-Regeln anzufassen.
+  // navStartBtn.disabled bleibt bewusst UNBERUEHRT -- das steuert weiterhin
+  // ausschliesslich der vorhandene destSel-"change"-Handler in app.js.
+  function renderNavigationUi(){
+    if(navigationActive){
+      navStartBtn.hidden = true;
+      navEndBtn.hidden = false;
+      whereBtn.hidden = false;
+      destSel.disabled = true;
+      return;
+    }
+    if(destinationReached){
+      navStartBtn.hidden = false;
+      navEndBtn.hidden = true;
+      whereBtn.hidden = true;
+      destSel.disabled = false;
+      navStartBtn.textContent = "Neue Navigation starten";
+      return;
+    }
+    // Vor der Navigation (Anfangszustand) ODER nach manuellem Beenden.
+    navStartBtn.hidden = false;
+    navEndBtn.hidden = true;
+    whereBtn.hidden = true;
+    destSel.disabled = false;
+    navStartBtn.textContent = "Navigation starten";
+  }
+
   function drawMarker(corners, color, faint){
     ctx.lineWidth = faint ? 2 : Math.max(3, W/160);
     ctx.strokeStyle = color;
@@ -50,4 +90,4 @@ import { destinationId, pathTagIds, currentTagId, expectedNextTagId, lastRouteIn
     ctx.stroke();
   }
 
-export { showRoom, showIdle, updatePanel, drawMarker };
+export { showRoom, showIdle, updatePanel, drawMarker, renderNavigationUi };

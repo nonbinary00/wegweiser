@@ -23,6 +23,7 @@ import { startCamera, showError, running, toggleFacing } from './camera.js';
 import { say, toggleSound, soundOn, cancelSpeech } from './speech.js';
 import { setDetector } from './detector-state.js';
 import { exportJson, clear, record } from './logger.js';
+import { renderNavigationUi } from './ui.js';
 
   // ---- TTS-Observability (neu): gemeinsame Metadaten fuer app.js-Ansagen, analog zu
   // nav.js' ttsOpts() — dieses Modul hat keinen eigenen navState-Zaehler, liest den
@@ -155,3 +156,11 @@ import { exportJson, clear, record } from './logger.js';
         "Bitte laden Sie die Seite neu."
     });
   }
+
+  // ---- Initiale Bedienelement-Sichtbarkeit (neu, UX-Schritt: State-Rendering) ----
+  // Einmaliger Aufruf beim Anwendungsstart (navigationActive/destinationReached sind
+  // zu diesem Zeitpunkt beide false, siehe nav.js) -- setzt #navEndBtn/#whereBtn auf
+  // den vor dieser Aenderung bereits statisch im HTML vorhandenen sichtbaren Zustand
+  // NICHT laenger fest sichtbar, sondern korrekt eingeklappt/ausgeblendet, bevor die
+  // erste Navigation gestartet wird.
+  renderNavigationUi();

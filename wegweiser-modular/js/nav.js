@@ -12,7 +12,7 @@ import { NODES, START_TEXTS, ARRIVALS, OFF_ROUTE_HINTS } from './graph-data.js';
 import { EDGE_MAP, findPath, markerName, pathToText, isTurnAction, departureActionSpeech } from './graph.js';
 import { destSel, uiState } from './dom.js';
 import { say, speaking, buzz } from './speech.js';
-import { updatePanel } from './ui.js';
+import { updatePanel, renderNavigationUi } from './ui.js';
 import { W, H } from './frame-state.js';
 import { record, getTestName } from './logger.js';
 
@@ -467,6 +467,7 @@ import { record, getTestName } from './logger.js';
     currentScanDelayMs = SETTINGS.scanHintAfterMs;
     setNavState(NavState.SEARCHING_START_TAG);
     updatePanel(null);
+    renderNavigationUi();
     // neu: routeRunId wird weiterhin hier (vor jeglicher Ansage) erzeugt — reine
     // Instrumentierungs-Id, keine Auswirkung auf Navigationslogik.
     routeRunId = generateRouteRunId();
@@ -512,6 +513,7 @@ import { record, getTestName } from './logger.js';
     resetCorridorState("route-end");
     setNavState(NavState.IDLE);
     updatePanel(null);
+    renderNavigationUi();
     // neu (Audit-Korrektur): NACH erfolgreicher Zielankunft wurde die Ankunfts-Ansage
     // (arriveAtDestination(), "Ziel erreicht...") bereits gesprochen — "Navigation
     // beendet." wuerde diese Information nur redundant wiederholen (und koennte, falls
@@ -824,6 +826,7 @@ import { record, getTestName } from './logger.js';
     var destResult = say(t, ttsOpts({interrupt:true, source:"nav.destinationArrival",
       category:"ACTION_REQUIRED"}));
     updatePanel(null);
+    renderNavigationUi();
     // ---- Instrumentierung (neu) ----
     navLog("ROUTE_END", { destinationId: destinationId, reason: "arrived" });
     navLog("TTS_DESTINATION", { destinationId: destinationId, text: t, speechId: destResult.speechId });
