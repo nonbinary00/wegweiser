@@ -1389,9 +1389,24 @@ import { record, getTestName } from './logger.js';
       return;
     }
 
+    // neu: horizontale Ausricht-Ansagen ("Markierung links."/"Markierung rechts.")
+    // ebenfalls unterdrueckt (Anforderung) — NUR links/rechts; die vertikalen
+    // Hinweise (hoeher/tiefer) bleiben unveraendert und erreichen weiterhin say()
+    // unten. Gleiches Muster wie bei "center" oben: zone/lastAimZone/lastAimAt
+    // werden TROTZDEM aktualisiert, damit Cooldown-/Uebergangs-Logik unveraendert
+    // bleibt und dies nur EINMAL pro Uebergang protokolliert wird. say() wird fuer
+    // diese Zonen gar nicht mehr aufgerufen — kein TTS_REQUESTED fuer die
+    // unterdrueckte Phrase.
+    if(zone === "left" || zone === "right"){
+      lastAimZone = zone;
+      lastAimAt = now;
+      navLog("TTS_AIM_HORIZONTAL_SUPPRESSED", { expectedTag: expectedNextTagId,
+        direction: zone, state: navState });
+      return;
+    }
+
     if(speaking()) return;
-    var msg = { left:"Markierung links.", right:"Markierung rechts.",
-                up:"Smartphone etwas höher.", down:"Smartphone etwas tiefer." }[zone];
+    var msg = { up:"Smartphone etwas höher.", down:"Smartphone etwas tiefer." }[zone];
     var result = say(msg, ttsOpts({source:"nav.aimGuidance", category:"ACTION_REQUIRED"}));
     if(result.accepted){ lastAimZone = zone; lastAimAt = now; }
   }
