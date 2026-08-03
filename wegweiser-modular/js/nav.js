@@ -841,7 +841,14 @@ import { record, getTestName } from './logger.js';
     tryPostTurnConfirmation();
 
     var edge = currentEdge();
-    var reachedM = (edge && edge.reachedM != null) ? edge.reachedM : SETTINGS.reachedM;
+    // neu (Tag-1-Sonderbehandlung): waehrend der TRACKING_START_TAG-Phase gilt die
+    // EIGENE, engere Ankunfts-Schwelle SETTINGS.startTagReachedM statt der normalen
+    // edge/SETTINGS.reachedM-Ableitung — einzige Aenderung gegenueber gewoehnlichem
+    // Tracking; alles ANDERE unterhalb (raw/EMA, trackingConfirmed, arrivalConfirmFrames,
+    // Near-Loss-Fallback) bleibt fuer Tag 1 exakt dieselbe Berechnung wie fuer jeden
+    // anderen Tag, nur mit diesem anderen Schwellenwert verglichen.
+    var reachedM = trackingStartTagActive ? SETTINGS.startTagReachedM :
+      ((edge && edge.reachedM != null) ? edge.reachedM : SETTINGS.reachedM);
 
     // v13: Roh-Messungen protokollieren (Fenster der letzten N)
     if(rawDist != null){

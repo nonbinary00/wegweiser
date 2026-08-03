@@ -20,6 +20,12 @@
                                   // v13: 1.2 -> 1.8, weil die Erkennung genau unter ~1.5 m
                                   // (steiler Winkel, Tag am Bildrand) unzuverlässig wird.
                                   // Pro Kante weiterhin per edge.reachedM übersteuerbar.
+    startTagReachedM: 1.0,        // neu (Tag-1-Sonderbehandlung): EIGENE Ankunfts-Schwelle
+                                  // NUR fuer die TRACKING_START_TAG-Phase (siehe nav.js
+                                  // handleTracking()) — 1,8 m ist fuer den Stopp-und-
+                                  // Rechtsabbiegen-Punkt bei Tag 1 zu weit. Beruehrt
+                                  // NICHT reachedM (Tag 2 und alle spaeteren Tags bleiben
+                                  // bei 1,8 m bzw. ihrer eigenen edge.reachedM).
     nearLostM: 2.5,               // Tag zwischen reachedM und 2,5 m verloren => "sehr nah"-Hinweis
     arrivalConfirmFrames: 2,      // v13: so viele Frames in Folge mit arrival <= Schwelle
                                   // noetig (schuetzt vor einzelnem Distanz-Ausreisser nach unten)
