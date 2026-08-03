@@ -20,7 +20,7 @@ import {
   destinationId, routeRunId, navState
 } from './nav.js';
 import { startCamera, showError, running } from './camera.js';
-import { say, toggleSound, soundOn, cancelSpeech } from './speech.js';
+import { say, toggleSound, soundOn, cancelSpeech, unlockSpeech } from './speech.js';
 import { setDetector } from './detector-state.js';
 import { exportJson, clear, record } from './logger.js';
 import { renderNavigationUi } from './ui.js';
@@ -35,10 +35,21 @@ import { renderNavigationUi } from './ui.js';
   }
 
   // ---- Bedienung ----
-  gate.addEventListener("click", function(){ if(!running) startCamera(); });
+  // neu (TTS-Startup-Fix): unlockSpeech() MUSS synchron, ganz am Anfang des
+  // direkten Klick-Handlers stehen, VOR jeglicher asynchron await-ender Arbeit
+  // (startCamera() awaited getUserMedia()) — siehe Begruendung in speech.js. Reiner
+  // Selbstschutz-Aufruf (idempotent, feuert nur beim allerersten Aufruf ueberhaupt);
+  // aendert nichts an running/startCamera()-Ablauf.
+  gate.addEventListener("click", function(){ unlockSpeech(); if(!running) startCamera(); });
   retryBtn.addEventListener("click", startCamera);
 
   navStartBtn.addEventListener("click", function(){
+    // neu (TTS-Startup-Fix): zweite, gleichwertige Freischalt-Geste (siehe
+    // speech.js) — in der Praxis bereits durch den vorherigen Gate-Tap erledigt
+    // (Navigation starten ist ohne laufende Kamera nicht erreichbar), aber
+    // ausdruecklich als zusaetzliche, unabhaengige Absicherung erlaubt und
+    // wirkungslos, falls bereits entsperrt (unlockAttempted-Flag).
+    unlockSpeech();
     if(!running){
       say("Bitte zuerst die Kamera starten.",
         appTtsOpts({interrupt:true, source:"app.cameraNotRunning", category:"STATUS"}));

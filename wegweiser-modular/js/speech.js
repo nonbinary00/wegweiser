@@ -29,6 +29,48 @@ import { record } from './logger.js';
   var speechSeq = 0;
   var activeEntry = null;   // zuletzt tatsaechlich an die Browser-API uebergebene Anfrage
 
+  // ---- iOS-Sprachausgabe-Freischaltung (neu, TTS-Startup-Fix) ----
+  // Feldtest-Befund: auf iOS Safari nimmt speechSynthesis.speak() eine Anfrage OHNE
+  // Fehler an (kein Exception, kein onerror), feuert aber NIEMALS ein 'start'-Ereignis,
+  // wenn der ALLERERSTE speak()-Aufruf einer Seiten-Session nicht SYNCHRON innerhalb
+  // einer echten Nutzer-Geste (Klick/Touch) erfolgte -- ein await/eine Promise-
+  // Fortsetzung oder ein requestAnimationFrame-Callback zaehlt dafuer NICHT, selbst
+  // wenn die urspruengliche Funktion aus einem Klick-Handler heraus aufgerufen wurde
+  // (genau das betraf camera.readyFirstTime, aufgerufen NACH "await getUserMedia()"
+  // in camera.js, sowie nav.startTagEntrance, aufgerufen aus main-loop.js/tick()
+  // heraus -- beide TTS_REQUESTED ohne TTS_STARTED im Log). unlockSpeech() spricht
+  // EINMALIG eine unhoerbare (volume:0) Utterance SYNCHRON im allerersten echten
+  // Klick-Handler (Gate-Tap "Kamera starten", siehe app.js) -- das entsperrt die
+  // Engine erfahrungsgemaess fuer den Rest der Sitzung, auch fuer spaetere,
+  // asynchron ausgeloeste Ansagen. Laeuft ABSICHTLICH NICHT durch say() (keine
+  // TTS_REQUESTED/TTS_STARTED/TTS_ENDED-Ereignisse fuer eine Nicht-Ansage, sondern
+  // eigene, dediziert benannte TTS_UNLOCK_*-Ereignisse), damit das Sprach-Log
+  // ausschliesslich TATSAECHLICH gesprochene Inhalte als TTS_REQUESTED/STARTED/ENDED
+  // zeigt. Ruft bewusst KEIN speechSynthesis.cancel() auf und fasst activeEntry
+  // NICHT an -- kann daher nie eine echte Ansage stornieren oder verdraengen
+  // (Sicherheitsreview: kein genereller Wachhund/Retry mehr, siehe say() unten,
+  // das unveraendert der urspruenglichen Implementierung entspricht).
+  var unlockAttempted = false;
+
+  function unlockSpeech(){
+    if(unlockAttempted) return;
+    unlockAttempted = true;
+    if(!("speechSynthesis" in window)) return;
+    try{
+      record("TTS_UNLOCK_REQUESTED", { requestedAt: performance.now() });
+      var u = new SpeechSynthesisUtterance(" ");
+      u.volume = 0;
+      u.lang = "de-DE";
+      u.onstart = function(){ record("TTS_UNLOCK_COMPLETED", { startedAt: performance.now() }); };
+      u.onerror = function(e){
+        record("TTS_UNLOCK_FAILED", { error: (e && e.error) || "error" });
+      };
+      speechSynthesis.speak(u);
+    }catch(e){
+      record("TTS_UNLOCK_FAILED", { error: (e && e.message) || String(e) });
+    }
+  }
+
   // ---- Sprache ----
   function pickVoice(){
     if(!("speechSynthesis" in window)) return;
@@ -168,4 +210,4 @@ import { record } from './logger.js';
     return soundOn;
   }
 
-export { say, speaking, buzz, toggleSound, soundOn, cancelSpeech };
+export { say, speaking, buzz, toggleSound, soundOn, cancelSpeech, unlockSpeech };
