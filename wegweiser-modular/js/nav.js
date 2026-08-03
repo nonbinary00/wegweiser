@@ -26,6 +26,12 @@ import { record, getTestName } from './logger.js';
     SEARCHING_START_TAG: "SEARCHING_START_TAG",
     TAG_CANDIDATE: "TAG_CANDIDATE",
     SEARCHING_NEXT_TAG: "SEARCHING_NEXT_TAG",
+    // neu: Tag 1 (Eingang) ist visuell bestaetigt, aber noch nicht per Distanz
+    // erreicht -- siehe beginStartTagTracking()/reachStartTag() unten. Physisch und
+    // fuer main-loop.js absichtlich wie TRACKING behandelt (siehe dort), NUR als
+    // eigener Zustand gefuehrt, damit Vorgriffs-Logik/Scan-Hinweise fuer Tag 2 waehrend
+    // dieser Phase sicher unterbleiben (trackingStartTagActive, siehe unten).
+    TRACKING_START_TAG: "TRACKING_START_TAG",
     TRACKING: "TRACKING",
     LOST_STOPPED: "LOST_STOPPED",
     DESTINATION_REACHED: "DESTINATION_REACHED"
@@ -65,6 +71,14 @@ import { record, getTestName } from './logger.js';
   var trackDetCount = 0;          // v13: Anzahl gueltiger Messungen im aktuellen Abschnitt
   var trackingConfirmed = false;  // neu: erst nach SETTINGS.trackingConfirmDetections
                                    // gueltigen Messungen darf ueberhaupt "verloren" gemeldet werden
+  // neu (Tag-1-Sonderbehandlung): true GENAU waehrend Tag 1 physisch verfolgt wird
+  // (NavState.TRACKING_START_TAG ODER ein LOST_STOPPED, das AUS dieser Phase heraus
+  // entstanden ist) -- unabhaengig von navState, weil navState waehrend eines
+  // Verlusts zwischenzeitlich LOST_STOPPED ist (siehe handleTracking()). Einzige
+  // Aufgabe: verhindert, dass updateSkipCandidate() (main-loop.js) Vorgriffs-
+  // Kandidaten ab Tag 2 sucht, BEVOR Tag 1 tatsaechlich erreicht wurde, und steuert
+  // in handleTracking(), ob reachStartTag() statt reachPoint() aufgerufen wird.
+  var trackingStartTagActive = false;
   var arrivalBelowCount = 0;      // v13: Frames in Folge mit arrivalDistance <= Schwelle
   var lastTrackDbgAt = 0;         // v13: Drossel fuer Debug-Log
   var awayWarned = false;
@@ -557,6 +571,19 @@ import { record, getTestName } from './logger.js';
     segIndex = 0;
     currentTagId = tagId;
     console.log("[Route] " + pathToText(p));
+
+    // neu (Tag-1-Sonderbehandlung): Tag 1 (Eingang) ist ein physisch entfernter
+    // Startpunkt -- die Route ist hier bereits berechnet, aber der erste Abschnitt
+    // (1->2) darf erst BEGINNEN, wenn Tag 1 TATSAECHLICH per Distanzmessung erreicht
+    // wurde (siehe beginStartTagTracking()/reachStartTag() unten). Jeder ANDERE
+    // Startknoten verhaelt sich weiterhin EXAKT wie zuvor (sofortiger Segmentbeginn,
+    // Code unten unveraendert) -- diese Weiche ist ein reiner frueher Ausstieg.
+    if(tagId === 1){
+      navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
+      beginStartTagTracking(tagId);
+      return;
+    }
+
     var start = START_TEXTS[tagId] ||
       ("Sie sind bei " + markerName(tagId) + ". Halten Sie das Smartphone vor sich " +
        "und suchen Sie die nächste Markierung.");
@@ -566,6 +593,75 @@ import { record, getTestName } from './logger.js';
     // ---- Instrumentierung (neu) ----
     navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
     beginSegment();
+  }
+
+  // ---- Tag 1 (Eingang) als physisch verfolgter Startpunkt (neu) ----
+  // Ersetzt fuer Tag 1 NUR den unmittelbaren Uebergang in beginSegment() (siehe
+  // onStartTagConfirmed() oben) durch eine Zwischenphase: Tag 1 bleibt der verfolgte
+  // Tag (expectedNextTagId bleibt 1, NICHT 2), segIndex bleibt bei 0 (zeigt weiterhin
+  // auf die Kante 1->2 -- WICHTIG: dadurch liefert currentEdge() in handleTracking()
+  // unveraendert die Kante 1->2 fuer die reachedM-Schwelle, exakt wie bei jeder
+  // gewoehnlichen Kante, OHNE eigene Schwelle). Sobald Tag 1 die bestehende
+  // 1,8-m-Ankunftslogik erfuellt, ruft handleTracking() reachStartTag() auf (siehe
+  // dort und trackingStartTagActive oben) statt reachPoint() -- ab dann laeuft der
+  // Abschnitt 1->2 exakt wie jeder andere Abschnitt weiter (beginSegment(),
+  // unveraendert).
+  function beginStartTagTracking(tagId){
+    navLog("START_TAG_CONFIRMED", { startTag: tagId });
+
+    var entranceText = START_TEXTS[tagId] ||
+      ("Sie sind bei " + markerName(tagId) + ". Halten Sie das Smartphone gerade vor " +
+       "sich. Gehen Sie geradeaus.");
+    lastRouteInstruction = entranceText;
+    // neu: KEIN "Route berechnet."-Praefix hier (Anforderung) -- die Route wurde
+    // bereits still berechnet (siehe ROUTE_PATH oben), der Nutzer braucht JETZT nur
+    // die Orientierungs- und Handlungsinformation, bevor er zu gehen beginnt.
+    var entranceResult = say(entranceText, ttsOpts({interrupt:true,
+      source:"nav.startTagEntrance", category:"NAVIGATION_CONTEXT", expectedTag: tagId}));
+    navLog("TTS_START_ENTRANCE", { startTag: tagId, text: entranceText,
+      speechId: entranceResult.speechId });
+
+    expectedNextTagId = tagId;
+    resetSegmentState();
+    trackingStartTagActive = true;
+    setNavState(NavState.TRACKING_START_TAG);
+    updatePanel(null);
+    // ---- Instrumentierung (neu) ----
+    navLog("START_TAG_TRACKING_STARTED", { expectedTag: tagId });
+  }
+
+  // Tag 1 tatsaechlich erreicht (Distanz <= Schwelle, ueber die UNVERAENDERTEN
+  // Ankunfts-Pruefungen in handleTracking()) -- spricht die NEUE, von Tag 2s eigener
+  // Abbiege-Ansage bewusst GETRENNTE Anweisung (siehe graph-data.js: Kante 1->2 bleibt
+  // "continue-straight", das Abbiegen bei Tag 2 fuer 2->3 bleibt unberuehrt) und
+  // startet danach den Abschnitt 1->2 ganz normal ueber beginSegment().
+  function reachStartTag(reason){
+    var reachedTagId = pathTagIds[segIndex];   // = 1
+    currentTagId = reachedTagId;
+    trackingStartTagActive = false;
+
+    navLog("START_TAG_REACHED", { startTag: reachedTagId, reason: reason || "distance-threshold" });
+
+    var t = "Stopp. Biegen Sie rechts ab.";
+    lastRouteInstruction = t;
+    var turnResult = say(t, ttsOpts({interrupt:true, source:"nav.startTagTurn",
+      category:"ACTION_REQUIRED"}));
+    activeDirectionText = t;
+    navLog("TTS_DIRECTION", { reachedTag: reachedTagId, action: "turn-right", isTurn: true,
+      text: t, speechId: turnResult.speechId });
+    // neu: wie jedes echte Abbiegen beginnt danach ein neuer Korridor (siehe
+    // reachPoint()) -- corridorProgressM ist an dieser Stelle ohnehin noch 0 (vor Tag 1
+    // wurde noch keine Kante gutgeschrieben), macht diesen Aufruf zu einem No-Op, haelt
+    // aber die Invariante "jedes echte Abbiegen setzt den Korridor zurueck" exakt ein.
+    resetCorridorState("start-tag-turn");
+
+    beginSegment();
+    // neu: dieselbe Nach-Abbiege-Bestaetigungs-Infrastruktur wie bei jedem anderen
+    // echten Abbiegen (siehe reachPoint()) -- sobald Tag 2 gefunden ist, wird einmalig
+    // "Gehen Sie geradeaus." bestaetigt. Voellig unabhaengig von Tag 2s EIGENER,
+    // spaeterer Abbiege-Bestaetigung (nach dessen Kante 2->3), da an (routeRunId,
+    // turnTag=1, expectedTag=2) gebunden -- siehe setPostTurnPending().
+    setPostTurnPending(reachedTagId, expectedNextTagId);
   }
 
   // Erwarteter Tag der aktuellen Kante erstmals bestätigt -> TRACKING beginnt. KEINE
@@ -787,7 +883,11 @@ import { record, getTestName } from './logger.js';
           navLog("REACHED reason=distance-threshold", { expectedTag: expectedNextTagId,
             raw: r1(rawDist), ema: r1(emaDist), recentMin: r1(recentMin),
             arrival: r1(arrival), minSeg: r1(minTrackDist), reachedM: reachedM });
-          reachPoint("distance-threshold");
+          // neu (Tag-1-Sonderbehandlung): identische Ankunfts-Pruefung, NUR die
+          // Ziel-Funktion unterscheidet sich -- keine Duplizierung der Distanz-/EMA-/
+          // Rahmen-Logik oben.
+          if(trackingStartTagActive) reachStartTag("distance-threshold");
+          else reachPoint("distance-threshold");
           return;
         }
       } else if(rawDist != null){
@@ -843,7 +943,10 @@ import { record, getTestName } from './logger.js';
       navLog("REACHED reason=near-loss-fallback", { expectedTag: expectedNextTagId,
         lastRaw: r1(lastRawDist), recentMin: r1(recentMin), minSeg: r1(minTrackDist),
         lostForMs: Math.round(lostFor), dets: trackDetCount });
-      reachPoint("near-loss-fallback");
+      // neu (Tag-1-Sonderbehandlung): siehe Kommentar beim anderen reachPoint()-Aufruf
+      // oben -- gleiche Weiche, gleiche Begruendung.
+      if(trackingStartTagActive) reachStartTag("near-loss-fallback");
+      else reachPoint("near-loss-fallback");
       return;
     }
 
@@ -872,7 +975,13 @@ import { record, getTestName } from './logger.js';
   function handleLostStopped(now, det){
     if(det){
       // Wieder gefunden: Messung geht weiter.
-      setNavState(NavState.TRACKING);
+      // neu (Tag-1-Sonderbehandlung): war der Verlust WAEHREND der Tag-1-Verfolgung
+      // entstanden (trackingStartTagActive, siehe oben -- bleibt waehrend eines
+      // LOST_STOPPED innerhalb dieser Phase unveraendert true), muss auch die
+      // Wiederaufnahme in TRACKING_START_TAG zurueckkehren, NICHT in das normale
+      // TRACKING -- sonst wuerde main-loop.js ab dem naechsten Frame faelschlich
+      // updateSkipCandidate() fuer Tag 2 zulassen, obwohl Tag 1 noch nicht erreicht ist.
+      setNavState(trackingStartTagActive ? NavState.TRACKING_START_TAG : NavState.TRACKING);
       var d = (det.dist != null) ? det.dist : emaDist;
       if(d != null) emaDist = d;
       var wasStopSpoken = lostInstructionSpoken;
@@ -1314,6 +1423,7 @@ export {
   expectedNextTagId,
   navigationActive,
   destinationReached,
+  trackingStartTagActive,
   lastRouteInstruction,
   emaDist,
   candId,

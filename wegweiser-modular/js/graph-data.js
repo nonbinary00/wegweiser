@@ -57,9 +57,12 @@
   // und tatsaechlich zum richtigen Zeitpunkt angesagt, siehe reachPoint() in nav.js) —
   // nur noch, was der Nutzer JETZT tun muss. Reiner Text, keine Routen-/Kantendaten
   // beruehrt.
+  // neu (Tag-1-Sonderbehandlung, siehe nav.js beginStartTagTracking()): exakter
+  // Wortlaut der Eingangs-Ansage, EINMAL gesprochen, sofort nach der visuellen
+  // Bestaetigung von Tag 1 (nicht mehr erst mit dem "Route berechnet."-Praefix).
   var START_TEXTS = {
     1: "Sie befinden sich am Eingang. Links befindet sich die Küche, rechts befinden " +
-       "sich die Büros. Gehen Sie geradeaus und halten Sie das Smartphone vor sich."
+       "sich die Büros. Halten Sie das Smartphone gerade vor sich. Gehen Sie geradeaus."
   };
 
   // ==================== GRAPH: KANTEN (manuelles Ortswissen) ====================

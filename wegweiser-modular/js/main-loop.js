@@ -19,7 +19,7 @@ import { record } from './logger.js';
 import {
   navState, NavState, navigationActive, pathTagIds, destinationReached, destinationId,
   currentTagId, expectedNextTagId, segIndex, emaDist, candId, candCount, wrongCandId,
-  wrongCandCount, lastExpectedVis, candLastSeenAt,
+  wrongCandCount, lastExpectedVis, candLastSeenAt, trackingStartTagActive,
   setNavState, handleTracking, handleLostStopped, onStartTagConfirmed, onNextTagFound,
   onOtherTagConfirmed, updateSkipCandidate, scanHint, aimGuidance,
   touchExpectedSeen, touchCandidateSeen, setLastExpectedVisual, setWrongCandidate,
@@ -134,7 +134,7 @@ import { running } from './camera.js';
 
       // --- Navigationslogik ---
       if(navigationActive && !destinationReached){
-        if(navState === NavState.TRACKING){
+        if(navState === NavState.TRACKING || navState === NavState.TRACKING_START_TAG){
           if(expectedDet) touchExpectedSeen(now);
           // v13: frische Roh-Distanz dieses Frames mitgeben (Ankunftslogik)
           handleTracking(now, expectedVisual, expectedDet ? expectedDet.dist : null);
@@ -145,7 +145,11 @@ import { running } from './camera.js';
           // er GENAU DIESEN Frame selbst erkannt (expectedDet), wird die Vorgriffs-
           // Pruefung diesen Frame ausgesetzt (kein Reset, siehe candMemoryMs-Toleranz
           // in updateSkipCandidate()).
-          if(!startPhase && !expectedDet) updateSkipCandidate(detectedWithDist, now);
+          // neu (Tag-1-Sonderbehandlung): waehrend Tag 1 noch physisch verfolgt wird
+          // (trackingStartTagActive), darf HIER KEIN Vorgriffs-Kandidat ab Tag 2
+          // gesucht werden — expectedNextTagId ist in dieser Phase absichtlich 1, ein
+          // gefundener Tag 2 waere sonst faelschlich ein "Vorgriff" auf sich selbst.
+          if(!startPhase && !expectedDet && !trackingStartTagActive) updateSkipCandidate(detectedWithDist, now);
         } else if(navState === NavState.LOST_STOPPED){
           if(expectedDet) touchExpectedSeen(now);
           // neu (TTS-Aufraeumung): updateSkipCandidate() MUSS hier VOR handleLostStopped()
@@ -157,7 +161,9 @@ import { running } from './camera.js';
           // noch gesprochen werden, obwohl der Retarget sie gerade storniert hat). Der
           // navState-Check danach stellt sicher, dass handleLostStopped() nur noch
           // laeuft, wenn WIRKLICH noch LOST_STOPPED ist.
-          if(!startPhase && !expectedDet) updateSkipCandidate(detectedWithDist, now);
+          // neu (Tag-1-Sonderbehandlung): siehe Kommentar oben — dieselbe Sperre gilt
+          // auch fuer einen Verlust, der WAEHREND der Tag-1-Verfolgung entstanden ist.
+          if(!startPhase && !expectedDet && !trackingStartTagActive) updateSkipCandidate(detectedWithDist, now);
           if(navState === NavState.LOST_STOPPED){
             handleLostStopped(now, expectedDet);
           }
@@ -204,7 +210,7 @@ import { running } from './camera.js';
           // Suche/Kandidatenphase) ist nur einer von vier Aufrufpunkten. Prioritaet des
           // normal erwarteten Tags ergibt sich strukturell: im expectedDet-Zweig oben
           // wird NICHT aufgerufen, solange dessen eigene Bestaetigung laeuft.
-          if(!startPhase){
+          if(!startPhase && !trackingStartTagActive){
             updateSkipCandidate(detectedWithDist, now);
           }
           if(navState === NavState.SEARCHING_NEXT_TAG || navState === NavState.SEARCHING_START_TAG){
