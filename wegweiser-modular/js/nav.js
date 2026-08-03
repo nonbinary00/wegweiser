@@ -82,6 +82,23 @@ import { record, getTestName } from './logger.js';
   var arrivalBelowCount = 0;      // v13: Frames in Folge mit arrivalDistance <= Schwelle
   var lastTrackDbgAt = 0;         // v13: Drossel fuer Debug-Log
   var awayWarned = false;
+  // neu (Fehlalarm-Fix "Sie entfernen sich..."): dedizierte, ausschliesslich NACH
+  // TRACKING_CONFIRMED gefuehrte EMA-Baseline fuer den Entfernungs-Vergleich in
+  // handleTracking(). Grund: main-loop.js speist emaDist bereits waehrend der
+  // Kandidaten-Bestaetigungsphase (VOR trackingConfirmed), waehrend minTrackDist
+  // von onNextTagFound() aus einem EINZELNEN ROHWERT zum Bestaetigungszeitpunkt
+  // gesetzt wird — ein Vergleich von emaDist gegen minTrackDist verglich daher
+  // zwei unterschiedliche Basen und konnte in den ersten (unbestaetigten) Frames
+  // faelschlich "Entfernen" erkennen, obwohl der Nutzer sich naeherte (Roh-Distanz
+  // sank). minAwayEmaDist wird NIE aus einer Kandidaten-Phase-Messung gesetzt,
+  // NUR aus emaDist NACH Bestaetigung, und beruehrt minTrackDist (REACHED/TAG-
+  // LOST/Segment-Statistik) nicht. awayPostConfirmSamples zaehlt gueltige
+  // Messungen NACH Etablierung der Baseline (die Etablierungs-Frame selbst zaehlt
+  // nicht mit) — verhindert eine Ansage im selben Frame, in dem die Baseline
+  // gerade erst gesetzt wurde.
+  var minAwayEmaDist = null;
+  var awayPostConfirmSamples = 0;
+  var AWAY_BASELINE_MIN_SAMPLES = 3;
   var stopSaidAt = 0;
   var offRouteSaid = {};          // fremde Tags: höchstens EINMAL pro Abschnitt melden
   var lostInstructionSpoken = false; // ob in der aktuellen Verlust-Episode bereits eine
@@ -390,6 +407,8 @@ import { record, getTestName } from './logger.js';
     lastAimZone = null; lastAimAt = 0;
     minTrackDist = null;
     awayWarned = false;
+    minAwayEmaDist = null;
+    awayPostConfirmSamples = 0;
     stopSaidAt = 0;
     offRouteSaid = {};
     lostInstructionSpoken = false;
@@ -914,12 +933,44 @@ import { record, getTestName } from './logger.js';
         minTrackDist = recentMin;
         awayWarned = false;
       }
+
+      // neu (Fehlalarm-Fix): Away-Baseline-Pflege — siehe Deklaration von
+      // minAwayEmaDist oben fuer die Begruendung. Etablierung UND Zaehlung laufen
+      // ausschliesslich HIER, ausschliesslich waehrend trackingConfirmed bereits
+      // true ist; der Frame, der die Baseline zum ERSTEN MAL setzt, erhoeht
+      // awayPostConfirmSamples NICHT (kein "else"-Zweig fuer diesen Fall) —
+      // dieser Zaehler beginnt erst ab dem naechsten Frame zu laufen.
+      if(trackingConfirmed){
+        if(minAwayEmaDist == null){
+          minAwayEmaDist = emaDist;
+          awayPostConfirmSamples = 0;
+          navLog("AWAY_BASELINE_READY", { expectedTag: expectedNextTagId,
+            ema: r1(emaDist), postConfirmSamples: awayPostConfirmSamples, state: navState });
+        } else {
+          awayPostConfirmSamples++;
+          if(emaDist < minAwayEmaDist){
+            minAwayEmaDist = emaDist;
+            awayWarned = false;
+          }
+        }
+      }
+
       // Distanz steigt deutlich über das Minimum -> Nutzer entfernt sich
-      if(!awayWarned && minTrackDist != null &&
-         emaDist - minTrackDist >= SETTINGS.awayDeltaM && !speaking()){
+      // neu: nur NACH Bestaetigung, nur gegen die dedizierte Away-Baseline (NICHT
+      // mehr minTrackDist), und erst nach mindestens AWAY_BASELINE_MIN_SAMPLES
+      // weiteren gueltigen Messungen NACH deren Etablierung (siehe oben).
+      if(trackingConfirmed && !awayWarned && minAwayEmaDist != null &&
+         awayPostConfirmSamples >= AWAY_BASELINE_MIN_SAMPLES &&
+         emaDist - minAwayEmaDist >= SETTINGS.awayDeltaM && !speaking()){
         var awayResult = say("Sie entfernen sich von der Markierung. Bleiben Sie stehen.",
           ttsOpts({source:"nav.awayWarning", category:"ACTION_REQUIRED"}));
-        if(awayResult.accepted) awayWarned = true;
+        if(awayResult.accepted){
+          awayWarned = true;
+          navLog("AWAY_WARNING_TRIGGERED", { expectedTag: expectedNextTagId,
+            ema: r1(emaDist), minAwayEma: r1(minAwayEmaDist),
+            delta: r1(emaDist - minAwayEmaDist), postConfirmSamples: awayPostConfirmSamples,
+            awayDeltaM: SETTINGS.awayDeltaM });
+        }
       }
       return;
     }
