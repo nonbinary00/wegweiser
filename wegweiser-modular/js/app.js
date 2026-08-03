@@ -9,7 +9,7 @@
 // importiert).
 
 import {
-  gate, retryBtn, navStartBtn, navEndBtn, repeatBtn, whereBtn, flipBtn, muteBtn, destSel,
+  gate, retryBtn, navStartBtn, navEndBtn, whereBtn, muteBtn, destSel,
   logExportBtn, logClearBtn
 } from './dom.js';
 import { NODES } from './graph-data.js';
@@ -17,9 +17,9 @@ import { markerName, metersDE, EDGE_MAP } from './graph.js';
 import {
   startNavigation, endNavigation, lastRouteInstruction, destinationReached, currentTagId,
   navigationActive, expectedNextTagId, pathTagIds, segIndex,
-  destinationId, routeRunId, navState, setCandidate, setEmaDist
+  destinationId, routeRunId, navState
 } from './nav.js';
-import { startCamera, showError, running, toggleFacing } from './camera.js';
+import { startCamera, showError, running } from './camera.js';
 import { say, toggleSound, soundOn, cancelSpeech } from './speech.js';
 import { setDetector } from './detector-state.js';
 import { exportJson, clear, record } from './logger.js';
@@ -47,12 +47,6 @@ import { renderNavigationUi } from './ui.js';
     startNavigation();
   });
   navEndBtn.addEventListener("click", function(){ endNavigation(true); });
-
-  repeatBtn.addEventListener("click", function(){
-    var opts = appTtsOpts({interrupt:true, source:"app.repeatInstruction", category:"NAVIGATION_CONTEXT"});
-    if(lastRouteInstruction) say(lastRouteInstruction, opts);
-    else say("Noch keine Anweisung vorhanden.", opts);
-  });
 
   // neu: verbleibende Strecke ausschliesslich aus den bereits bekannten Kanten-Distanzen
   // (FLOOR_GEOMETRY, ueber EDGE_MAP) summieren — NIE aus der Kamera-zu-Tag-Distanz, die
@@ -96,11 +90,6 @@ import { renderNavigationUi } from './ui.js';
     record("TTS_WHERE_AM_I", { text: p, routeRunId: routeRunId });
   });
 
-  flipBtn.addEventListener("click", function(){
-    toggleFacing();
-    setCandidate(null, 0); setEmaDist(null);
-    if(running) startCamera();
-  });
   muteBtn.addEventListener("click", function(){
     toggleSound();
     muteBtn.firstChild.textContent = soundOn ? "Ton an" : "Ton aus";

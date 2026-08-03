@@ -13,9 +13,7 @@
   var errMsg  = document.getElementById("errMsg");
   var startBtn= document.getElementById("startBtn");
   var retryBtn= document.getElementById("retryBtn");
-  var repeatBtn = document.getElementById("repeatBtn");
   var whereBtn  = document.getElementById("whereBtn");
-  var flipBtn   = document.getElementById("flipBtn");
   var muteBtn   = document.getElementById("muteBtn");
   var navStartBtn = document.getElementById("navStartBtn");
   var navEndBtn   = document.getElementById("navEndBtn");
@@ -46,9 +44,7 @@ export {
   errMsg,
   startBtn,
   retryBtn,
-  repeatBtn,
   whereBtn,
-  flipBtn,
   muteBtn,
   navStartBtn,
   navEndBtn,

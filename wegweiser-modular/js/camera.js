@@ -7,8 +7,6 @@
 //   - facing        (Zeile 2557)
 //   - running       (Zeile 2560)
 //   - safetyGiven   (Zeile 2563)
-// toggleFacing() ist neu: mechanischer Wrapper um genau die Original-Anweisung aus dem
-// flipBtn-Handler ("facing = (facing === 'environment') ? 'user' : 'environment';").
 // scheduleNext() aus main-loop.js wird hier aufgerufen; main-loop.js liest running von
 // hier -> genehmigter Zirkelbezug camera.js <-> main-loop.js (Entscheidung 2).
 
@@ -90,8 +88,4 @@ import { scheduleNext } from './main-loop.js';
     record("CAMERA_ERROR", { message: msg, source: opts.source || "camera.error" });
   }
 
-  function toggleFacing(){
-    facing = (facing === "environment") ? "user" : "environment";
-  }
-
-export { startCamera, stopStream, errText, showError, running, toggleFacing };
+export { startCamera, stopStream, errText, showError, running };
