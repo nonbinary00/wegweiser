@@ -1,12 +1,11 @@
 // ==================== Hauptschleife ====================
-// tick()/scheduleNext() verbatim aus wegweiser-v13.html (Abschnitt "HAUPTSCHLEIFE"),
-// MIT genau 16 mechanischen Ersetzungen fuer die sechs genehmigten Cross-Modul-Mutatoren
-// (setFrameSize, setEmaDist, setLastExpectedVisual, touchExpectedSeen, touchCandidateSeen,
-// setCandidate, setWrongCandidate) sowie deren zugehoerige lesende Importe. Diese Datei ist
-// NICHT byte-identisch mit dem Original -- die einzigen Abweichungen sind exakt diese 16
-// Zeilen (jede reine 1:1-Ersetzung von "x = y;" durch "setX(y);", keine Verhaltensaenderung).
-// running (camera.js) <-> scheduleNext() (hier) ist der genehmigte Zirkelbezug
-// camera.js <-> main-loop.js (Entscheidung 2).
+// Cross-module state owned by other modules (frame size, ema distance, visual memory,
+// candidate tracking) is written here through setter functions (setFrameSize,
+// setEmaDist, setLastExpectedVisual, touchExpectedSeen, touchCandidateSeen,
+// setCandidate, setWrongCandidate) rather than direct assignment, since ES modules
+// only allow the declaring module to reassign its own exported bindings.
+// running (camera.js) <-> scheduleNext() (here) is an intentional circular dependency
+// between camera.js and main-loop.js.
 
 import { video, canvas, ctx } from './dom.js';
 import { PROC_WIDTH, PROC_MS, SETTINGS, DEBUG_SHOW_TAG_ID, CONFIRM_FRAMES, MARKER_SIZE_M } from './config.js';
@@ -27,11 +26,11 @@ import {
 } from './nav.js';
 import { running } from './camera.js';
 
-  // neu (Audit-Ziel 6): technische Detektor-Ausnahmen bleiben NUR im technischen Log
-  // (nie gesprochen — Detektor-Ausnahmen koennen pro Frame auftreten, siehe Aufrufer
-  // unten) und werden gedrosselt (hoechstens alle 5s ein Log-Eintrag), damit eine
-  // dauerhaft fehlschlagende Erkennung nicht den Log-Puffer flutet. Aendert NICHTS am
-  // bestehenden Fallback-Verhalten (`detected = []`).
+  // Technical detector exceptions stay in the technical log only (never spoken --
+  // detector exceptions can occur every frame, see the call site below) and are
+  // rate-limited to at most one log entry per 5s, so a persistently failing detector
+  // does not flood the log buffer. Does not change the existing fallback behavior
+  // (`detected = []`).
   var lastDetectorErrorLogAt = 0;
 
   // ==================== HAUPTSCHLEIFE ====================
@@ -58,9 +57,9 @@ import { running } from './camera.js';
       var now = performance.now();
       var expectedDet = null, bestKnown = null, bestKnownDist = Infinity;
       var startPhase = navigationActive && pathTagIds == null;
-      // neu: ALLE diesmal decodierten Tags mit ihrer Distanz, fuer die eigenstaendige
-      // Vorgriffs-Kandidaten-Pruefung (updateSkipCandidate() in nav.js) — unabhaengig
-      // davon, welcher Tag als expectedDet/bestKnown ausgewaehlt wird.
+      // All tags decoded this frame, with their distance, for the independent
+      // forward-candidate check (updateSkipCandidate() in nav.js) -- regardless of
+      // which tag is selected as expectedDet/bestKnown.
       var detectedWithDist = [];
 
       for(var i = 0; i < detected.length; i++){
@@ -136,33 +135,31 @@ import { running } from './camera.js';
       if(navigationActive && !destinationReached){
         if(navState === NavState.TRACKING || navState === NavState.TRACKING_START_TAG){
           if(expectedDet) touchExpectedSeen(now);
-          // v13: frische Roh-Distanz dieses Frames mitgeben (Ankunftslogik)
+          // supplies this frame's fresh raw distance (arrival logic)
           handleTracking(now, expectedVisual, expectedDet ? expectedDet.dist : null);
-          // neu (Feldtest-Fix): Vorgriffs-Kandidaten-Pruefung LAEUFT WEITER, auch
-          // waehrend der erwartete Tag bereits normal getrackt wird — ein einmal
-          // bestaetigter Tag durfte die Pruefung fuer den Rest des Abschnitts nicht
-          // mehr komplett stillegen. ABER: der erwartete Tag hat IMMER Vorrang — ist
-          // er GENAU DIESEN Frame selbst erkannt (expectedDet), wird die Vorgriffs-
-          // Pruefung diesen Frame ausgesetzt (kein Reset, siehe candMemoryMs-Toleranz
-          // in updateSkipCandidate()).
-          // neu (Tag-1-Sonderbehandlung): waehrend Tag 1 noch physisch verfolgt wird
-          // (trackingStartTagActive), darf HIER KEIN Vorgriffs-Kandidat ab Tag 2
-          // gesucht werden — expectedNextTagId ist in dieser Phase absichtlich 1, ein
-          // gefundener Tag 2 waere sonst faelschlich ein "Vorgriff" auf sich selbst.
+          // The forward-candidate check keeps running even while the expected tag is
+          // already being tracked normally, since a confirmed tag must not fully
+          // disable the check for the rest of the segment. The expected tag still
+          // takes priority: if it is detected this exact frame, the check is only
+          // paused for the frame (not reset, see the candMemoryMs tolerance in
+          // updateSkipCandidate()). While Tag 1 is still being physically tracked
+          // (trackingStartTagActive), no forward candidate beyond Tag 2 may be
+          // searched for here -- expectedNextTagId is intentionally 1 during this
+          // phase, so a detected Tag 2 would otherwise be wrongly treated as a
+          // forward candidate of itself.
           if(!startPhase && !expectedDet && !trackingStartTagActive) updateSkipCandidate(detectedWithDist, now);
         } else if(navState === NavState.LOST_STOPPED){
           if(expectedDet) touchExpectedSeen(now);
-          // neu (TTS-Aufraeumung): updateSkipCandidate() MUSS hier VOR handleLostStopped()
-          // laufen. Grund: ein Vorgriffs-Retarget kann in DIESEM Frame abschliessen und
-          // navState sofort auf TRACKING umschalten (beginTrackingForwardCandidate() ->
-          // onNextTagFound()) — laeuft handleLostStopped() danach noch fuer denselben
-          // Frame, wuerde es faelschlich eine bereits verlassene LOST_STOPPED-Episode
-          // weiterbehandeln (Race: die verzoegerte Stopp-Ansage koennte im selben Frame
-          // noch gesprochen werden, obwohl der Retarget sie gerade storniert hat). Der
-          // navState-Check danach stellt sicher, dass handleLostStopped() nur noch
-          // laeuft, wenn WIRKLICH noch LOST_STOPPED ist.
-          // neu (Tag-1-Sonderbehandlung): siehe Kommentar oben — dieselbe Sperre gilt
-          // auch fuer einen Verlust, der WAEHREND der Tag-1-Verfolgung entstanden ist.
+          // updateSkipCandidate() must run here before handleLostStopped(). A
+          // forward-candidate retarget can complete in this frame and switch navState
+          // straight to TRACKING (beginTrackingForwardCandidate() -> onNextTagFound());
+          // if handleLostStopped() still ran afterward for the same frame, it would
+          // wrongly keep processing an already-exited LOST_STOPPED episode -- a race
+          // where the delayed stop announcement could still be spoken even though the
+          // retarget just cancelled it. The navState check below ensures
+          // handleLostStopped() only runs if the state is truly still LOST_STOPPED.
+          // The same restriction applies to a loss that occurred while Tag 1 was
+          // still being tracked.
           if(!startPhase && !expectedDet && !trackingStartTagActive) updateSkipCandidate(detectedWithDist, now);
           if(navState === NavState.LOST_STOPPED){
             handleLostStopped(now, expectedDet);
@@ -202,14 +199,14 @@ import { running } from './camera.js';
           } else {
             setWrongCandidate(null, 0);
           }
-          // neu: eigenstaendige Vorgriffs-Kandidaten-Pruefung (kontrollierter Skip,
-          // generisch aus pathTagIds/EDGE_MAP abgeleitet) — komplett getrennt von der
-          // obigen wrongCand-Logik, inspiziert ALLE decodierten Tags (detectedWithDist),
-          // nicht nur bestKnown. Wird AUCH aus den TRACKING-/LOST_STOPPED-Zweigen oben
-          // aufgerufen (Feldtest-Fix) — HIER (expectedDet diesmal falsy, waehrend der
-          // Suche/Kandidatenphase) ist nur einer von vier Aufrufpunkten. Prioritaet des
-          // normal erwarteten Tags ergibt sich strukturell: im expectedDet-Zweig oben
-          // wird NICHT aufgerufen, solange dessen eigene Bestaetigung laeuft.
+          // Independent forward-candidate check (controlled skip, derived generically
+          // from pathTagIds/EDGE_MAP) -- entirely separate from the wrongCand logic
+          // above, inspects all decoded tags (detectedWithDist), not just bestKnown.
+          // Also called from the TRACKING/LOST_STOPPED branches above -- this call
+          // (expectedDet falsy this frame, during the search/candidate phase) is only
+          // one of four call sites. Priority of the normally expected tag follows
+          // structurally: the expectedDet branch above does not call this while its
+          // own confirmation is in progress.
           if(!startPhase && !trackingStartTagActive){
             updateSkipCandidate(detectedWithDist, now);
           }

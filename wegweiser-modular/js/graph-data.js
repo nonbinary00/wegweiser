@@ -1,5 +1,4 @@
 // ==================== Routen- und Markierungs-Konfiguration ====================
-// Verbatim aus wegweiser-v13.html (Abschnitte FLOOR_GEOMETRY / GRAPH: KNOTEN / GRAPH: KANTEN).
 
   // ==================== FLOOR_GEOMETRY ====================
   // 1:1-Import aus "markers (2).json" — EINZIGE Geometriequelle, NICHT von Hand ändern.
@@ -53,13 +52,11 @@
 
   // Ansage, wenn die Navigation AN diesem Knoten beginnt (erster bestätigter Tag).
   // Beschreibt den Ort und die Aktion, um den NÄCHSTEN Tag vor die Kamera zu bekommen.
-  // neu: KEINE Vorschau mehr auf das spaetere Abbiegen bei Tag 2 (das wird dort erneut
-  // und tatsaechlich zum richtigen Zeitpunkt angesagt, siehe reachPoint() in nav.js) —
-  // nur noch, was der Nutzer JETZT tun muss. Reiner Text, keine Routen-/Kantendaten
-  // beruehrt.
-  // neu (Tag-1-Sonderbehandlung, siehe nav.js beginStartTagTracking()): exakter
-  // Wortlaut der Eingangs-Ansage, EINMAL gesprochen, sofort nach der visuellen
-  // Bestaetigung von Tag 1 (nicht mehr erst mit dem "Route berechnet."-Praefix).
+  // Speaks only what the user must do now; deliberately does not preview a later turn
+  // (that is announced again, at the correct time, by reachPoint() in nav.js). Plain
+  // text only, does not affect route/edge data.
+  // For Tag 1 (special-cased in nav.js's beginStartTagTracking()): exact wording of the
+  // entrance announcement, spoken once, immediately after Tag 1 is visually confirmed.
   var START_TEXTS = {
     1: "Sie befinden sich am Eingang. Links befindet sich die Küche, rechts befinden " +
        "sich die Büros. Halten Sie das Smartphone gerade vor sich. Gehen Sie geradeaus."
@@ -70,26 +67,20 @@
   //   found      – NICHT mehr automatisch gesprochen (nur Doku/Fallback), siehe nav.js
   //   reached    – NICHT mehr automatisch bei Zwischen-Tags gesprochen (nur bei ARRIVALS
   //                am tatsaechlichen Ziel); bleibt als Doku/Fallback erhalten
-  //   departureAction – neu: EINZIGE autoritative Quelle fuer "was der Nutzer TUN MUSS, UM
-  //                DIESE Kante zu gehen". WICHTIG: departureAction von Kante X->Y beschreibt
-  //                die Handlung BEI X (Abbiegen oder Geradeaus), BEVOR in Richtung Y
-  //                losgegangen wird — NICHT etwas, das beim Erreichen von Y passiert!
-  //                Wird daher gesprochen, wenn Tag X erreicht wird (naemlich als "naechste
-  //                Kante" X->Y ab diesem Punkt) — siehe reachPoint() in nav.js, das dafuer
-  //                die AUSGEHENDE Kante ab dem GERADE erreichten Tag nachschlaegt, nicht
-  //                die soeben abgeschlossene eingehende Kante. Beispiel: 8->10 beschreibt
-  //                die Handlung BEI Tag 8 (Ecke), um weiter zu Tag 10 (Drucker) zu gehen;
-  //                das wird angesagt, sobald Tag 8 erreicht ist. Ein zukuenftiger Zweig ab
-  //                Tag 8 (z.B. 8->12) koennte eine ANDERE departureAction haben, ohne 8->10
-  //                zu aendern — die Handlung haengt vom gewaehlten NAECHSTEN Schritt ab,
-  //                nicht am Tag selbst. Einer von: "turn-left", "turn-right",
-  //                "continue-straight" (siehe DEPARTURE_ACTIONS in graph.js). Ersetzt das
-  //                alte, nicht mehr verlaessliche "direction"-Feld UND das manuell
-  //                gepflegte "continueSpeech"-Feld. graph.js leitet daraus automatisch ab:
-  //                ob ein Abbiegen vorliegt (immer ansagen), ob mehrere Kanten zum selben
-  //                Geradeaus-Lauf gehoeren (fuer Rueckmeldungen akkumuliert), und den
-  //                gesprochenen Kurztext — eine neue Kante legt die Handlung also nur HIER
-  //                einmal fest; nav.js kennt keine Tag-spezifischen Sonderfaelle.
+  //   departureAction – the single authoritative source for what the user must do to
+  //                walk this edge. Edge X->Y describes the action taken at X (turn or
+  //                go straight) before heading toward Y, not anything that happens upon
+  //                reaching Y — it is spoken once tag X is reached, as the outgoing edge
+  //                from that point on (see reachPoint() in nav.js, which looks up the
+  //                outgoing edge from the tag just reached, not the incoming edge just
+  //                completed). Example: 8->10 describes the action at Tag 8 (Ecke) to
+  //                continue toward Tag 10 (Drucker), spoken as soon as Tag 8 is reached;
+  //                the action depends on the chosen next step, not on the tag itself.
+  //                One of: "turn-left", "turn-right", "continue-straight" (see
+  //                DEPARTURE_ACTIONS in graph.js), from which graph.js derives whether a
+  //                turn is involved, whether consecutive edges belong to the same
+  //                straight run, and the spoken short text — a new edge only needs to
+  //                set this once here; nav.js has no tag-specific special cases.
   //   searchHint – manuelle Hilfe, solange Tag B noch nicht gefunden ist
   //   reachedM   – optionale eigene Schwelle (Standard SETTINGS.reachedM)
   // distanceM wird automatisch aus FLOOR_GEOMETRY berechnet.

@@ -1,14 +1,9 @@
 // ==================== Kamera ====================
-// Verbatim aus wegweiser-v13.html (Abschnitt "---- Kamera ----").
-// Relozierungen aus dem urspruenglichen "---- Laufzeit (Kamera/Erkennung) ----"-Block
-// (Zeilen 2551/2557/2560/2563), da diese vier Variablen ausschliesslich hier
-// geschrieben/gelesen werden (genehmigte Abhaengigkeitskarte, Entscheidung 3):
-//   - stream        (Zeile 2551, Teil von "var detector, positCache = {}, stream = null;")
-//   - facing        (Zeile 2557)
-//   - running       (Zeile 2560)
-//   - safetyGiven   (Zeile 2563)
-// scheduleNext() aus main-loop.js wird hier aufgerufen; main-loop.js liest running von
-// hier -> genehmigter Zirkelbezug camera.js <-> main-loop.js (Entscheidung 2).
+// Holds stream, facing, running and safetyGiven, since these four variables are only
+// read and written within this module.
+// scheduleNext() (main-loop.js) is called from here, and main-loop.js reads `running`
+// from here in turn -- an intentional circular dependency between camera.js and
+// main-loop.js.
 
 import { video, gate, errBox, errMsg } from './dom.js';
 import { SAFETY_SPEECH } from './config.js';
@@ -20,10 +15,9 @@ import { scheduleNext } from './main-loop.js';
   var facing = "environment";
   var running = false;
   var safetyGiven = false;
-  // neu (Audit-Ziel 6): verhindert, dass DIESELBE Kamera-Fehlermeldung bei
-  // wiederholten Versuchen (z.B. mehrfaches Druecken von "Erneut versuchen")
-  // erneut gesprochen wird — die visuelle Anzeige (errMsg) wird davon NICHT
-  // beeinflusst und aktualisiert sich weiterhin bei jedem Versuch.
+  // Prevents the same camera error message from being spoken again on repeated
+  // attempts (e.g. pressing "Erneut versuchen" multiple times); the visual display
+  // (errMsg) is unaffected and keeps updating on every attempt.
   var lastSpokenCameraError = null;
 
   // ---- Kamera ----
@@ -49,7 +43,7 @@ import { scheduleNext } from './main-loop.js';
     try{ await video.play(); }catch(e){}
     gate.style.display = "none";
     running = true;
-    lastSpokenCameraError = null;   // neu: erfolgreicher Start -> naechster Fehler darf wieder gesprochen werden
+    lastSpokenCameraError = null;   // successful start -> the next error may be spoken again
     if(!safetyGiven){
       say("Wegweiser bereit. " + SAFETY_SPEECH,
         { interrupt:true, source:"camera.readyFirstTime", category:"STATUS" });
@@ -66,10 +60,10 @@ import { scheduleNext } from './main-loop.js';
     return "Kamera konnte nicht gestartet werden (" + (n || "Fehler") + ").";
   }
 
-  // neu (Audit-Ziel 6): opts.source identifiziert die Fehlerart fuer die Log-
-  // Auswertung; opts.spokenText erlaubt eine kurze, unverfaengliche gesprochene
-  // Alternative, falls `msg` selbst rohen technischen Text enthaelt (siehe app.js,
-  // Detektor-Ladefehler) — msg (das visuelle Fehlerfeld) bleibt IMMER unveraendert.
+  // opts.source identifies the error kind for log analysis; opts.spokenText allows a
+  // short, non-technical spoken alternative when `msg` itself contains raw technical
+  // text (see app.js's detector-load-error case) -- msg (the visual error field)
+  // always keeps the original text.
   function showError(msg, opts){
     opts = opts || {};
     running = false;
@@ -78,10 +72,10 @@ import { scheduleNext } from './main-loop.js';
     var spokenText = opts.spokenText || msg;
     if(spokenText !== lastSpokenCameraError){
       lastSpokenCameraError = spokenText;
-      // neu (VoiceOver-Fix): dies ist eine Barrierefreiheits-Fehlermeldung (Kamera
-      // nicht verfuegbar/Zugriff verweigert) — genau die Kategorie, die laut Audit
-      // weiterhin ueber VoiceOver ANGEKUENDIGT werden soll, daher hier ausdruecklich
-      // angefordert (siehe say() in speech.js).
+      // This is an accessibility-critical error message (camera unavailable/access
+      // denied) that must reach VoiceOver users even though navigation speech is
+      // normally not mirrored to the live region -- announceToVoiceOver is requested
+      // explicitly here for that reason (see say() in speech.js).
       say(spokenText, { interrupt: true, source: opts.source || "camera.error",
         category: "SAFETY_CRITICAL", announceToVoiceOver: true });
     }

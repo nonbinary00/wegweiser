@@ -1,11 +1,8 @@
 // ==================== Navigations-Zustandsmaschine ====================
-// Verbatim aus wegweiser-v13.html (Abschnitte "ZUSTANDSMODELL" und "NAVIGATION").
-// Zwei Relozierungen, wie in der genehmigten Abhaengigkeitskarte vermerkt:
-//  - emaDist war urspruenglich bei den Laufzeit-Variablen deklariert (Zeile 2562),
-//    wird aber ausschliesslich von der Zustandsmaschine gelesen/geschrieben/zurueckgesetzt
-//    (resetSegmentState, handleLostStopped) -> hierher verschoben, direkt neben minTrackDist.
-//  - NAV_DEBUG wird aus config.js importiert statt hier neu deklariert (Stufe 2).
-// Zirkelbezug nav.js <-> ui.js (updatePanel) ist genehmigt (Entscheidung 2).
+// emaDist lives here, next to minTrackDist, because it is read/written/reset
+// exclusively by this state machine (resetSegmentState, handleLostStopped), even
+// though it conceptually describes tracking distance rather than navigation state.
+// The circular dependency between nav.js and ui.js (updatePanel) is intentional.
 
 import { SETTINGS, NAV_DEBUG } from './config.js';
 import { NODES, START_TEXTS, ARRIVALS, OFF_ROUTE_HINTS } from './graph-data.js';
@@ -26,11 +23,11 @@ import { record, getTestName } from './logger.js';
     SEARCHING_START_TAG: "SEARCHING_START_TAG",
     TAG_CANDIDATE: "TAG_CANDIDATE",
     SEARCHING_NEXT_TAG: "SEARCHING_NEXT_TAG",
-    // neu: Tag 1 (Eingang) ist visuell bestaetigt, aber noch nicht per Distanz
-    // erreicht -- siehe beginStartTagTracking()/reachStartTag() unten. Physisch und
-    // fuer main-loop.js absichtlich wie TRACKING behandelt (siehe dort), NUR als
-    // eigener Zustand gefuehrt, damit Vorgriffs-Logik/Scan-Hinweise fuer Tag 2 waehrend
-    // dieser Phase sicher unterbleiben (trackingStartTagActive, siehe unten).
+    // Tag 1 (Eingang) is visually confirmed but not yet reached by distance -- see
+    // beginStartTagTracking()/reachStartTag() below. Deliberately treated like
+    // TRACKING by main-loop.js, but kept as its own state so that forward-candidate
+    // logic and scan hints for Tag 2 are reliably suppressed during this phase
+    // (trackingStartTagActive, see below).
     TRACKING_START_TAG: "TRACKING_START_TAG",
     TRACKING: "TRACKING",
     LOST_STOPPED: "LOST_STOPPED",
@@ -61,41 +58,38 @@ import { record, getTestName } from './logger.js';
 
   // Tracking-Zustand
 
-  // v13: emaDist war urspruenglich Zeile 2562 (Abschnitt "Laufzeit"), hierher verschoben,
-  // da es Teil des Tracking-Zustands ist (siehe Kommentar oben).
   var emaDist = null;
-  var minTrackDist = null;        // kleinste gemessene Distanz (Fortschrittsreferenz)
-  var rawRecent = [];             // v13: letzte N Roh-Distanzen (Fenster fuer "juengstes Minimum")
-  var lastRawDist = null;         // v13: letzte gueltige Roh-Distanz
-  var lastRawAt = 0;              // v13: Zeitpunkt der letzten gueltigen Messung
-  var trackDetCount = 0;          // v13: Anzahl gueltiger Messungen im aktuellen Abschnitt
-  var trackingConfirmed = false;  // neu: erst nach SETTINGS.trackingConfirmDetections
-                                   // gueltigen Messungen darf ueberhaupt "verloren" gemeldet werden
-  // neu (Tag-1-Sonderbehandlung): true GENAU waehrend Tag 1 physisch verfolgt wird
-  // (NavState.TRACKING_START_TAG ODER ein LOST_STOPPED, das AUS dieser Phase heraus
-  // entstanden ist) -- unabhaengig von navState, weil navState waehrend eines
-  // Verlusts zwischenzeitlich LOST_STOPPED ist (siehe handleTracking()). Einzige
-  // Aufgabe: verhindert, dass updateSkipCandidate() (main-loop.js) Vorgriffs-
-  // Kandidaten ab Tag 2 sucht, BEVOR Tag 1 tatsaechlich erreicht wurde, und steuert
-  // in handleTracking(), ob reachStartTag() statt reachPoint() aufgerufen wird.
+  var minTrackDist = null;        // smallest measured distance (progress reference)
+  var rawRecent = [];             // last N raw distances (window for "most recent minimum")
+  var lastRawDist = null;         // last valid raw distance
+  var lastRawAt = 0;              // timestamp of the last valid measurement
+  var trackDetCount = 0;          // number of valid measurements in the current segment
+  var trackingConfirmed = false;  // "lost" may only be reported once at least
+                                   // SETTINGS.trackingConfirmDetections valid measurements exist
+  // True exactly while Tag 1 is being physically tracked (NavState.TRACKING_START_TAG,
+  // or a LOST_STOPPED that arose from this phase) -- independent of navState, because
+  // navState temporarily becomes LOST_STOPPED during a loss (see handleTracking()).
+  // Sole purpose: prevents updateSkipCandidate() (main-loop.js) from searching for a
+  // forward candidate beyond Tag 2 before Tag 1 has actually been reached, and
+  // controls, in handleTracking(), whether reachStartTag() is called instead of
+  // reachPoint().
   var trackingStartTagActive = false;
-  var arrivalBelowCount = 0;      // v13: Frames in Folge mit arrivalDistance <= Schwelle
-  var lastTrackDbgAt = 0;         // v13: Drossel fuer Debug-Log
+  var arrivalBelowCount = 0;      // consecutive frames with arrivalDistance <= threshold
+  var lastTrackDbgAt = 0;         // throttle for the debug log
   var awayWarned = false;
-  // neu (Fehlalarm-Fix "Sie entfernen sich..."): dedizierte, ausschliesslich NACH
-  // TRACKING_CONFIRMED gefuehrte EMA-Baseline fuer den Entfernungs-Vergleich in
-  // handleTracking(). Grund: main-loop.js speist emaDist bereits waehrend der
-  // Kandidaten-Bestaetigungsphase (VOR trackingConfirmed), waehrend minTrackDist
-  // von onNextTagFound() aus einem EINZELNEN ROHWERT zum Bestaetigungszeitpunkt
-  // gesetzt wird — ein Vergleich von emaDist gegen minTrackDist verglich daher
-  // zwei unterschiedliche Basen und konnte in den ersten (unbestaetigten) Frames
-  // faelschlich "Entfernen" erkennen, obwohl der Nutzer sich naeherte (Roh-Distanz
-  // sank). minAwayEmaDist wird NIE aus einer Kandidaten-Phase-Messung gesetzt,
-  // NUR aus emaDist NACH Bestaetigung, und beruehrt minTrackDist (REACHED/TAG-
-  // LOST/Segment-Statistik) nicht. awayPostConfirmSamples zaehlt gueltige
-  // Messungen NACH Etablierung der Baseline (die Etablierungs-Frame selbst zaehlt
-  // nicht mit) — verhindert eine Ansage im selben Frame, in dem die Baseline
-  // gerade erst gesetzt wurde.
+  // Dedicated EMA baseline, maintained only after trackingConfirmed, used for the
+  // distance comparison in handleTracking() that decides the "you are moving away"
+  // warning. main-loop.js already feeds emaDist during the candidate-confirmation
+  // phase (before trackingConfirmed), while minTrackDist is set by onNextTagFound()
+  // from a single raw value at confirmation time -- comparing emaDist against
+  // minTrackDist therefore compared two different baselines and could wrongly
+  // detect "moving away" in the first, unconfirmed frames even though the user was
+  // approaching (raw distance was decreasing). minAwayEmaDist is never set from a
+  // candidate-phase measurement, only from emaDist after confirmation, and does not
+  // affect minTrackDist (REACHED/TAG-LOST/segment statistics). awayPostConfirmSamples
+  // counts valid measurements after the baseline is established (the establishing
+  // frame itself does not count), so a warning cannot fire in the same frame the
+  // baseline was just set.
   var minAwayEmaDist = null;
   var awayPostConfirmSamples = 0;
   var AWAY_BASELINE_MIN_SAMPLES = 3;
@@ -104,46 +98,46 @@ import { record, getTestName } from './logger.js';
   var lostInstructionSpoken = false; // ob in der aktuellen Verlust-Episode bereits eine
                                       // TATSAECHLICH GESPROCHENE Stopp-Ansage erfolgt ist
                                       // (steuert, ob die Wiederfindung etwas ansagt)
-  var lostSpeechPending = false;     // neu (TTS-Aufraeumung): LOST_STOPPED wurde erreicht,
-                                      // aber die Stopp-ANSAGE ist noch zurueckgehalten
-                                      // (siehe SETTINGS.lostSpeechDelayMs) — der interne
-                                      // Zustandsuebergang (trackLostStopMs) bleibt unveraendert,
-                                      // NUR die Sprachausgabe wird zusaetzlich verzoegert.
+  var lostSpeechPending = false;     // LOST_STOPPED has been reached, but the spoken
+                                      // stop announcement is still being held back
+                                      // (see SETTINGS.lostSpeechDelayMs) -- the internal
+                                      // state transition (trackLostStopMs) is unchanged,
+                                      // only the speech output is additionally delayed.
   var lostSpeechPendingSince = 0;    // performance.now() bei Eintritt in LOST_STOPPED
 
-  // ---- Gemeinsamer Dedup-Zustand fuer die "aktive Richtungsansage" (neu, TTS-Aufraeumung) ----
-  // EIN einziger geteilter Zustand fuer ALLE Stellen, die "Gehen Sie weiter geradeaus."
-  // oder eine Abbiege-Ansage sprechen koennten (reachPoint(), Wiederaufnahme nach Stopp,
-  // Vorgriffs-Retarget) — verhindert, dass mehrere unabhaengige Mechanismen dieselbe
-  // Formulierung wiederholt aussprechen. activeDirectionText haelt die zuletzt TATSAECHLICH
-  // gesprochene Richtungs-Formulierung; ein erneuter Versuch mit demselben Text wird
-  // unterdrueckt, bis sich die aktive Richtung aendert (Abbiegen setzt sie direkt neu) oder
-  // der Zustand gezielt zurueckgesetzt wird (Routenstart/-ende, Zielankunft, tatsaechlich
-  // gesprochenes Stopp, Vorgriffs-Retarget waehrend eines anstehenden Verlusts).
+  // ---- Shared dedup state for the "active direction announcement" ----
+  // One shared state for every place that might speak "Gehen Sie weiter geradeaus."
+  // or a turn announcement (reachPoint(), resumption after a stop, forward-candidate
+  // retarget) -- prevents multiple independent mechanisms from repeating the same
+  // phrase. activeDirectionText holds the last direction phrase that was actually
+  // spoken; a repeated attempt with the same text is suppressed until the active
+  // direction changes (a turn sets it directly) or the state is deliberately reset
+  // (route start/end, destination arrival, an actually spoken stop, or a
+  // forward-candidate retarget during a pending loss).
   var activeDirectionText = null;
 
   function resetActiveDirectionState(){
     activeDirectionText = null;
   }
 
-  // ---- Bestaetigung "geradeaus" NACH einem echten Abbiegen (neu) ----
-  // Rein additiver Zustand: merkt sich, dass ein ECHTES Abbiegen soeben angesagt wurde
-  // (isTurn===true in reachPoint(), siehe dort) und die anschliessende Bestaetigung
-  // "Gehen Sie geradeaus." noch aussteht, bis der NAECHSTE erwartete Tag zum ERSTEN MAL
-  // ueber den bestehenden onNextTagFound()-Pfad bestaetigt wird (normale Suche ODER
-  // Vorgriffs-Retarget — bei Vorgriffs-Retarget wird dieser Zustand jedoch VORHER explizit
-  // storniert, siehe beginTrackingForwardCandidate(), weil dort bereits eine eigene
-  // "Gehen Sie weiter geradeaus."-Bestaetigung erfolgt). An (routeRunId, expectedTag)
-  // gebunden, damit ein spaeter/anderswo eintreffender Tag NIE faelschlich als
-  // Abschluss dieses konkreten Abbiegens gewertet wird. Beeinflusst KEINE
-  // Erkennungs-, Routen- oder Abbiege-Logik — nur, OB zusaetzlich "Gehen Sie
-  // geradeaus." gesprochen wird.
-  // neu (Bugfix): begrenzte, gedrosselte Wiederholung, falls der TTS-Kanal genau im
-  // Moment des ersten Versuchs belegt ist ("busy") — OHNE bei jedem Frame erneut zu
-  // versuchen. postTurnAttempts zaehlt JEDEN Sprechversuch (der erste eingeschlossen);
-  // postTurnNextRetryAt drosselt, wann der NAECHSTE Versuch fruehestens stattfinden darf.
-  var POST_TURN_RETRY_INTERVAL_MS = 400;   // 300-500ms Fenster laut Vorgabe
-  var POST_TURN_MAX_ATTEMPTS = 3;          // insgesamt, ersten Versuch eingeschlossen
+  // ---- "Straight ahead" confirmation after a real turn ----
+  // Purely additive state: remembers that a real turn was just announced
+  // (isTurn===true in reachPoint(), see there) and that the follow-up confirmation
+  // "Gehen Sie geradeaus." is still pending, until the next expected tag is
+  // confirmed for the first time via the existing onNextTagFound() path (normal
+  // search or forward-candidate retarget -- for a forward-candidate retarget this
+  // state is explicitly cancelled beforehand, see beginTrackingForwardCandidate(),
+  // because that path already speaks its own "Gehen Sie weiter geradeaus."
+  // confirmation). Bound to (routeRunId, expectedTag), so a tag arriving later or
+  // elsewhere can never be wrongly treated as completing this specific turn. Affects
+  // no detection, route, or turn logic -- only whether "Gehen Sie geradeaus." is
+  // additionally spoken.
+  // Limited, throttled retry if the TTS channel happens to be busy exactly at the
+  // moment of the first attempt, without retrying on every single frame.
+  // postTurnAttempts counts every speech attempt (including the first);
+  // postTurnNextRetryAt throttles the earliest time the next attempt may occur.
+  var POST_TURN_RETRY_INTERVAL_MS = 400;   // 300-500ms window
+  var POST_TURN_MAX_ATTEMPTS = 3;          // total, including the first attempt
 
   var postTurnPending = false;
   var postTurnRouteRunId = null;
@@ -240,7 +234,7 @@ import { record, getTestName } from './logger.js';
     clearPostTurnPending("suppressed-" + (confirmResult.suppressionReason || "failed"));
   }
 
-  // ---- Rueckversicherung auf langen geraden Korridoren (neu) ----
+  // ---- Rueckversicherung auf langen geraden Korridoren ----
   // Rein additiv, rein distanzbasiert aus bereits vorhandenen Kantendistanzen
   // (EDGE_MAP[...].distanceM, dieselbe Quelle wie bypassedDistanceM im Vorgriffs-Skip
   // und remainingRouteMeters() in app.js) — KEINE neue Distanzmessung, KEIN neuer
@@ -326,11 +320,9 @@ import { record, getTestName } from './logger.js';
       return { speechId: null, accepted: false, spoken: false, failed: false,
                suppressionReason: "duplicate-direction", error: null };
     }
-    // neu (Audit-Korrektur F-1/Ziel 4): activeDirectionText darf NUR aktualisiert
-    // werden, wenn say() die Anfrage TATSAECHLICH angenommen hat (result.accepted) —
-    // vorher wurde jeder Wahrheitswert von say() (auch "stumm/beschaeftigt/fehlgeschlagen"
-    // faelschlich als "true" behandelt bei stumm) als Erfolg gewertet, was den Dedup-
-    // Zustand verfaelschen konnte.
+    // activeDirectionText may only be updated when say() has actually accepted the
+    // request (result.accepted) -- treating any other outcome (muted/busy/failed) as
+    // success would corrupt the dedup state.
     var result = say(text, opts);
     if(result.accepted){
       activeDirectionText = text;
@@ -341,9 +333,9 @@ import { record, getTestName } from './logger.js';
     return result;
   }
 
-  // Gemeinsame Log-Nutzlast fuer alle Stopp-Entscheidungen (Anforderung: expectedTag,
-  // aktive Route, Navigationszustand, Verlustdauer, aktiver Vorgriffs-Kandidat,
-  // Vorgriffs-Bestaetigungszaehler, ob Stopp bereits gesprochen wurde, Abbruchgrund).
+  // Gemeinsame Log-Nutzlast fuer alle Stopp-Entscheidungen: expectedTag, aktive Route,
+  // Navigationszustand, Verlustdauer, aktiver Vorgriffs-Kandidat, Vorgriffs-
+  // Bestaetigungszaehler, ob Stopp bereits gesprochen wurde, Abbruchgrund.
   function buildLostDecisionLogData(now, cancellationReason){
     return {
       expectedTag: expectedNextTagId,
@@ -357,7 +349,7 @@ import { record, getTestName } from './logger.js';
     };
   }
 
-  // ---- Instrumentierung (neu, nur fuer Feldtest-Logging) ----
+  // ---- Instrumentierung (nur fuer Feldtest-Logging) ----
   // Diese Variablen beeinflussen KEINE Navigationsentscheidung; sie werden ausschliesslich
   // gelesen, um SEGMENT_SUMMARY/ROUTE_*-Ereignisse mit Zahlen zu fuellen.
   var routeRunId = null;          // eine Id pro Routenlauf, gesetzt in startNavigation()
@@ -380,13 +372,13 @@ import { record, getTestName } from './logger.js';
     return EDGE_MAP[pathTagIds[segIndex] + "->" + pathTagIds[segIndex + 1]];
   }
 
-  // ---- Cross-Modul-Mutatoren (neu, mechanisch; siehe genehmigte Abhaengigkeitskarte) ----
-  // main-loop.js (tick) und app.js (flipBtn) muessen expectedLastSeenAt, candLastSeenAt,
-  // lastExpectedVis, wrongCandId/wrongCandCount, candId/candCount bzw. emaDist von
-  // ausserhalb dieses Moduls schreiben. ES-Module erlauben nur dem deklarierenden Modul
-  // das Neuzuweisen exportierter Bindungen; jede Funktion hier ist ein reiner 1:1-Wrapper
-  // um genau die Original-Zuweisung (kein geaendertes Verhalten). Lesend greifen andere
-  // Module weiterhin ueber die (live gebundenen) Exports der Variablen selbst zu.
+  // ---- Cross-module mutators ----
+  // main-loop.js (tick) needs to write expectedLastSeenAt, candLastSeenAt,
+  // lastExpectedVis, wrongCandId/wrongCandCount, candId/candCount, and emaDist from
+  // outside this module. ES modules only allow the declaring module to reassign its
+  // own exported bindings; each function here is a plain 1:1 wrapper around the
+  // corresponding assignment (no behavior change). Other modules continue to read
+  // these variables directly through their (live-bound) exports.
   function touchExpectedSeen(now){ expectedLastSeenAt = now; }
   function touchCandidateSeen(now){ candLastSeenAt = now; }
   function setLastExpectedVisual(v){ lastExpectedVis = v; }
@@ -412,16 +404,16 @@ import { record, getTestName } from './logger.js';
     stopSaidAt = 0;
     offRouteSaid = {};
     lostInstructionSpoken = false;
-    lostSpeechPending = false;       // neu: defensiv, falls ein Segment mitten in einer
-    lostSpeechPendingSince = 0;      // anstehenden Stopp-Ansage endet (siehe handleLostStopped())
+    lostSpeechPending = false;       // defensive: in case a segment ends in the middle
+    lostSpeechPendingSince = 0;      // of a pending stop announcement (see handleLostStopped())
     emaDist = null;
-    rawRecent = [];                  // v13
+    rawRecent = [];
     lastRawDist = null; lastRawAt = 0;
     trackDetCount = 0;
     trackingConfirmed = false;
     arrivalBelowCount = 0;
     lastTrackDbgAt = 0;
-    // ---- Instrumentierung (neu): pro Abschnitt zuruecksetzen ----
+    // ---- Instrumentierung: pro Abschnitt zuruecksetzen ----
     segLostCount = 0;
     segReacquireCount = 0;
     segLostMs = 0;
@@ -431,8 +423,8 @@ import { record, getTestName } from './logger.js';
   }
 
 
-  // ---- Instrumentierung (neu): reine ES5-Kopie von `data` + routeRunId angehaengt,
-  // ohne die existierenden Aufrufstellen von navLog() anzufassen. ----
+  // ---- Instrumentierung: plain ES5 copy of `data` with routeRunId appended, without
+  // touching the existing call sites of navLog(). ----
   function mergeRouteRunId(data){
     var merged = {};
     if(data){
@@ -452,7 +444,7 @@ import { record, getTestName } from './logger.js';
   }
   function r1(v){ return v == null ? null : Math.round(v * 100) / 100; }
 
-  // ---- TTS-Observability (neu) ----
+  // ---- TTS-Observability ----
   // Baut die gemeinsamen say()-Metadaten (state/expectedTag/routeRunId) aus dem
   // AKTUELLEN Modul-Zustand zum Zeitpunkt des Aufrufs; `extra` kann jedes Feld gezielt
   // ueberschreiben (z.B. expectedTag, falls die naechste erwartete Markierung an dieser
@@ -487,35 +479,31 @@ import { record, getTestName } from './logger.js';
     setNavState(NavState.SEARCHING_START_TAG);
     updatePanel(null);
     renderNavigationUi();
-    // neu: routeRunId wird weiterhin hier (vor jeglicher Ansage) erzeugt — reine
-    // Instrumentierungs-Id, keine Auswirkung auf Navigationslogik.
+    // routeRunId is generated here (before any announcement) -- a pure
+    // instrumentation id with no effect on navigation logic.
     routeRunId = generateRouteRunId();
-    // neu (VoiceOver-Fix): die bisherige sofortige "Ziel gewählt..."-Ansage direkt bei
-    // Tastendruck ist ENTFERNT worden — sie lief synchron im selben Klick-Handler wie
-    // die VoiceOver-Doppeltipp-Aktivierung von "Navigation starten" und ueberlagerte
-    // dadurch garantiert VoiceOvers eigene Ansage der aktivierten Schaltflaeche
-    // (bestaetigtes Verhalten auf echtem Geraet). Es handelt sich um eine reine
-    // Tastendruck-Bestaetigung, die die spaeter ohnehin folgende, bereits bestehende
-    // Sprachfuehrung nur vorwegnahm: scanHint() (nav.js) meldet sich automatisch nach
-    // SETTINGS.scanHintAfterMs, falls noch kein Tag gefunden wurde, und
-    // onStartTagConfirmed() spricht die eigentliche erste Anweisung, sobald der erste
-    // Tag TATSAECHLICH bestaetigt ist — beide bereits vorhandene, zustandsgetriebene
-    // Ausloeser, kein neuer Timer noetig. lastRouteInstruction bleibt bewusst "" (siehe
-    // oben), bis onStartTagConfirmed() sie setzt; repeatBtn faengt den Zwischenzustand
-    // bereits ab ("Noch keine Anweisung vorhanden.", app.js).
-    // ---- Instrumentierung (neu) ----
+    // No "Ziel gewählt..." announcement is spoken here: it would run in the same
+    // click handler as VoiceOver's own double-tap activation announcement for
+    // "Navigation starten" and talk over it. Guidance already follows automatically
+    // without it: scanHint() (nav.js) speaks up on its own after
+    // SETTINGS.scanHintAfterMs if no tag has been found yet, and onStartTagConfirmed()
+    // speaks the actual first instruction as soon as the first tag is confirmed --
+    // both already-existing, state-driven triggers, so no new timer is needed here.
+    // lastRouteInstruction deliberately stays "" (see above) until
+    // onStartTagConfirmed() sets it; repeatBtn already handles that intermediate
+    // state ("Noch keine Anweisung vorhanden.", app.js).
+    // ---- Instrumentierung ----
     navLog("ROUTE_START", { destinationId: destId, destination: markerName(destId),
       testName: getTestName() });
   }
 
   function endNavigation(announce, reason){
-    // ---- Instrumentierung (neu, Audit-Korrektur Ziel 5): vor dem Zuruecksetzen
-    // erfassen, WELCHER der drei unterscheidbaren Faelle vorliegt — manueller Abbruch
-    // (Route lief noch, Ziel nicht erreicht), Beenden NACH Zielankunft (kein Abbruch),
-    // oder ein zukuenftiger Fehler-Reset (reason==="error", heute von keiner
-    // Aufrufstelle ausgeloest, aber die Unterscheidung ist ab jetzt moeglich, ohne das
-    // Fehler-System neu zu entwerfen). wasActive/wasReached MUESSEN vor jedem Reset
-    // gelesen werden. ----
+    // ---- Instrumentierung: capture, before any reset, which of three distinguishable
+    // cases applies -- manual abort (route was still running, destination not
+    // reached), ending after destination arrival (not an abort), or a future error
+    // reset (reason==="error", not triggered by any call site today, but the
+    // distinction is available from here on without redesigning error handling).
+    // wasActive/wasReached must be read before any reset. ----
     var wasActive = navigationActive;
     var wasReached = destinationReached;
     var effectiveReason = reason || (wasReached ? "after-arrival" : "manual");
@@ -533,24 +521,23 @@ import { record, getTestName } from './logger.js';
     setNavState(NavState.IDLE);
     updatePanel(null);
     renderNavigationUi();
-    // neu (Audit-Korrektur): NACH erfolgreicher Zielankunft wurde die Ankunfts-Ansage
-    // (arriveAtDestination(), "Ziel erreicht...") bereits gesprochen — "Navigation
-    // beendet." wuerde diese Information nur redundant wiederholen (und koennte, falls
-    // die Ankunfts-Ansage noch liefe, sie unnoetig unterbrechen). wasReached wurde HIER
-    // OBEN, VOR dem Zuruecksetzen von destinationReached, gelesen und beschreibt exakt
-    // "kam diese Beendigung NACH einer bereits erfolgten Zielankunft" — bei echtem
-    // manuellem Abbruch VOR Ankunft (wasReached===false) bleibt "Navigation beendet."
-    // unveraendert erhalten.
+    // After a successful destination arrival, the arrival announcement
+    // (arriveAtDestination(), "Ziel erreicht...") has already been spoken --
+    // "Navigation beendet." would only redundantly repeat that information (and
+    // could unnecessarily interrupt the arrival announcement if it were still
+    // playing). wasReached was read above, before resetting destinationReached, and
+    // describes exactly "did this end happen after an arrival that already
+    // occurred" -- for a genuine manual abort before arrival (wasReached===false),
+    // "Navigation beendet." is still spoken as before.
     if(announce && !wasReached){
       say("Navigation beendet.",
         ttsOpts({interrupt:true, source:"nav.navigationEnded", category:"STATUS"}));
     }
-    // ---- Instrumentierung (neu): EIN Ereignis feuert immer (unabhaengig von
-    // `announce`), damit die Sprach- und die Protokoll-Bedingung nicht mehr
-    // auseinanderlaufen koennen (Audit-Befund F-6). Die eigentliche Ankunfts-
-    // Bestaetigung (ROUTE_END) wird weiterhin ausschliesslich in
-    // arriveAtDestination() geloggt — hier geht es nur um das Beenden/Abbrechen
-    // selbst, NIE um eine normal abgeschlossene Route als "abgebrochen" zu werten. ----
+    // ---- Instrumentierung: one event always fires (independent of `announce`), so
+    // the speech condition and the logging condition never diverge. The
+    // actual arrival confirmation (ROUTE_END) continues to be logged exclusively in
+    // arriveAtDestination() -- this is only about the ending/aborting itself, never
+    // about treating a normally completed route as "aborted". ----
     navLog("NAVIGATION_END_REQUESTED", { announce: !!announce, wasActive: wasActive,
       wasReached: wasReached, reason: effectiveReason });
     if(wasActive && !wasReached && effectiveReason !== "error"){
@@ -569,7 +556,7 @@ import { record, getTestName } from './logger.js';
     resetSegmentState();
     setNavState(NavState.SEARCHING_NEXT_TAG);
     updatePanel(null);
-    // ---- Instrumentierung (neu) ----
+    // ---- Instrumentierung ----
     navLog("SEGMENT_START", { segIndex: segIndex, fromTag: fromTag, toTag: expectedNextTagId });
   }
 
@@ -593,12 +580,12 @@ import { record, getTestName } from './logger.js';
     currentTagId = tagId;
     console.log("[Route] " + pathToText(p));
 
-    // neu (Tag-1-Sonderbehandlung): Tag 1 (Eingang) ist ein physisch entfernter
-    // Startpunkt -- die Route ist hier bereits berechnet, aber der erste Abschnitt
-    // (1->2) darf erst BEGINNEN, wenn Tag 1 TATSAECHLICH per Distanzmessung erreicht
-    // wurde (siehe beginStartTagTracking()/reachStartTag() unten). Jeder ANDERE
-    // Startknoten verhaelt sich weiterhin EXAKT wie zuvor (sofortiger Segmentbeginn,
-    // Code unten unveraendert) -- diese Weiche ist ein reiner frueher Ausstieg.
+    // Tag 1 (Eingang) is special-cased: it is a physically remote start point -- the
+    // route is already computed at this point, but the first segment (1->2) may
+    // only begin once Tag 1 has actually been reached by distance measurement (see
+    // beginStartTagTracking()/reachStartTag() below). Every other start node
+    // continues to behave the same way (immediate segment start, code below
+    // unchanged) -- this branch is a plain early exit.
     if(tagId === 1){
       navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
       beginStartTagTracking(tagId);
@@ -611,22 +598,22 @@ import { record, getTestName } from './logger.js';
     lastRouteInstruction = start;
     say("Route berechnet. " + start, ttsOpts({interrupt:true, source:"nav.routeCalculated",
       category:"NAVIGATION_CONTEXT", expectedTag: p[1]}));
-    // ---- Instrumentierung (neu) ----
+    // ---- Instrumentierung ----
     navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
     beginSegment();
   }
 
-  // ---- Tag 1 (Eingang) als physisch verfolgter Startpunkt (neu) ----
-  // Ersetzt fuer Tag 1 NUR den unmittelbaren Uebergang in beginSegment() (siehe
-  // onStartTagConfirmed() oben) durch eine Zwischenphase: Tag 1 bleibt der verfolgte
-  // Tag (expectedNextTagId bleibt 1, NICHT 2), segIndex bleibt bei 0 (zeigt weiterhin
-  // auf die Kante 1->2 -- WICHTIG: dadurch liefert currentEdge() in handleTracking()
-  // unveraendert die Kante 1->2 fuer die reachedM-Schwelle, exakt wie bei jeder
-  // gewoehnlichen Kante, OHNE eigene Schwelle). Sobald Tag 1 die bestehende
-  // 1,8-m-Ankunftslogik erfuellt, ruft handleTracking() reachStartTag() auf (siehe
-  // dort und trackingStartTagActive oben) statt reachPoint() -- ab dann laeuft der
-  // Abschnitt 1->2 exakt wie jeder andere Abschnitt weiter (beginSegment(),
-  // unveraendert).
+  // ---- Tag 1 (Eingang) as a physically tracked start point ----
+  // For Tag 1 only, this replaces the immediate transition into beginSegment() (see
+  // onStartTagConfirmed() above) with an intermediate phase: Tag 1 remains the
+  // tracked tag (expectedNextTagId stays 1, not 2), segIndex stays at 0 (still
+  // pointing at edge 1->2 -- this means currentEdge() in handleTracking()
+  // continues to return edge 1->2 for the reachedM threshold, exactly as for any
+  // ordinary edge, without its own threshold). Once Tag 1 satisfies the existing
+  // 1.8m arrival logic, handleTracking() calls reachStartTag() (see there and
+  // trackingStartTagActive above) instead of reachPoint() -- from that point on,
+  // segment 1->2 continues exactly like any other segment (beginSegment(),
+  // unchanged).
   function beginStartTagTracking(tagId){
     navLog("START_TAG_CONFIRMED", { startTag: tagId });
 
@@ -634,9 +621,9 @@ import { record, getTestName } from './logger.js';
       ("Sie sind bei " + markerName(tagId) + ". Halten Sie das Smartphone gerade vor " +
        "sich. Gehen Sie geradeaus.");
     lastRouteInstruction = entranceText;
-    // neu: KEIN "Route berechnet."-Praefix hier (Anforderung) -- die Route wurde
-    // bereits still berechnet (siehe ROUTE_PATH oben), der Nutzer braucht JETZT nur
-    // die Orientierungs- und Handlungsinformation, bevor er zu gehen beginnt.
+    // No "Route berechnet." prefix here -- the route was already computed silently
+    // (see ROUTE_PATH above); the user only needs the orientation and action
+    // information right now, before starting to walk.
     var entranceResult = say(entranceText, ttsOpts({interrupt:true,
       source:"nav.startTagEntrance", category:"NAVIGATION_CONTEXT", expectedTag: tagId}));
     navLog("TTS_START_ENTRANCE", { startTag: tagId, text: entranceText,
@@ -647,7 +634,7 @@ import { record, getTestName } from './logger.js';
     trackingStartTagActive = true;
     setNavState(NavState.TRACKING_START_TAG);
     updatePanel(null);
-    // ---- Instrumentierung (neu) ----
+    // ---- Instrumentierung ----
     navLog("START_TAG_TRACKING_STARTED", { expectedTag: tagId });
   }
 
@@ -670,18 +657,18 @@ import { record, getTestName } from './logger.js';
     activeDirectionText = t;
     navLog("TTS_DIRECTION", { reachedTag: reachedTagId, action: "turn-right", isTurn: true,
       text: t, speechId: turnResult.speechId });
-    // neu: wie jedes echte Abbiegen beginnt danach ein neuer Korridor (siehe
-    // reachPoint()) -- corridorProgressM ist an dieser Stelle ohnehin noch 0 (vor Tag 1
-    // wurde noch keine Kante gutgeschrieben), macht diesen Aufruf zu einem No-Op, haelt
-    // aber die Invariante "jedes echte Abbiegen setzt den Korridor zurueck" exakt ein.
+    // As with any real turn, a new corridor begins afterward (see reachPoint()) --
+    // corridorProgressM is still 0 at this point anyway (no edge has been credited
+    // before Tag 1), making this call a no-op, but it keeps the invariant "every real
+    // turn resets the corridor" exactly intact.
     resetCorridorState("start-tag-turn");
 
     beginSegment();
-    // neu: dieselbe Nach-Abbiege-Bestaetigungs-Infrastruktur wie bei jedem anderen
-    // echten Abbiegen (siehe reachPoint()) -- sobald Tag 2 gefunden ist, wird einmalig
-    // "Gehen Sie geradeaus." bestaetigt. Voellig unabhaengig von Tag 2s EIGENER,
-    // spaeterer Abbiege-Bestaetigung (nach dessen Kante 2->3), da an (routeRunId,
-    // turnTag=1, expectedTag=2) gebunden -- siehe setPostTurnPending().
+    // Same post-turn confirmation infrastructure as for any other real turn (see
+    // reachPoint()) -- once Tag 2 is found, "Gehen Sie geradeaus." is confirmed once.
+    // Entirely independent of Tag 2's own, later turn confirmation (after its edge
+    // 2->3), since this is bound to (routeRunId, turnTag=1, expectedTag=2) -- see
+    // setPostTurnPending().
     setPostTurnPending(reachedTagId, expectedNextTagId);
   }
 
@@ -700,16 +687,16 @@ import { record, getTestName } from './logger.js';
     awayWarned = false;
     if(expectedNextTagId !== destinationId) buzz(50);
     updatePanel(dist);
-    // ---- Instrumentierung (neu) ----
+    // ---- Instrumentierung ----
     segTrackingStartedAt = performance.now();
     navLog("TTS_SUPPRESSED_MARKER_FOUND", { expectedTag: expectedNextTagId,
       isDestination: expectedNextTagId === destinationId,
       buzzed: expectedNextTagId !== destinationId });
 
-    // neu: sofortiger erste Versuch der anstehenden Nach-Abbiege-Bestaetigung (falls
-    // eine ansteht) — Wiederholung bei "busy" uebernimmt tryPostTurnConfirmation()
-    // selbst (siehe dort); wird ab dem naechsten Tick zusaetzlich aus handleTracking()
-    // heraus erneut geprueft (gedrosselt, siehe dort), NICHT hier erneut aufgerufen.
+    // Immediate first attempt at the pending post-turn confirmation (if one is
+    // pending) -- retrying while "busy" is handled by tryPostTurnConfirmation()
+    // itself (see there); from the next tick onward it is also re-checked from
+    // handleTracking() (throttled, see there), not called again here.
     tryPostTurnConfirmation();
   }
 
@@ -719,13 +706,12 @@ import { record, getTestName } from './logger.js';
     var reachedTagId = pathTagIds[segIndex + 1];
     currentTagId = reachedTagId;
 
-    // ---- Instrumentierung (neu): Zusammenfassung des GERADE abgeschlossenen Abschnitts,
-    // ausschliesslich aus bereits vorhandenen nav.js-Variablen, keine Duplizierung.
-    // reachPoint() wird jetzt IMMER ganz normal aufgerufen (auch nach einem zuvor
-    // bestaetigten Vorgriffs-Kandidaten, siehe beginTrackingForwardCandidate() — dort
-    // wird NICHT reachPoint() aufgerufen, sondern nur der verfolgte Tag umgeschaltet).
-    // Es gibt daher keinen Sonderfall mehr, der diese SEGMENT_SUMMARY unterdruecken
-    // muesste. ----
+    // ---- Instrumentierung: summary of the segment just completed, built entirely
+    // from already-existing nav.js variables, no duplication. reachPoint() is now
+    // always called normally (even after a previously confirmed forward candidate,
+    // see beginTrackingForwardCandidate() -- there, reachPoint() is not called; only
+    // the tracked tag is switched). There is therefore no special case left that
+    // would need to suppress this SEGMENT_SUMMARY. ----
     navLog("SEGMENT_SUMMARY", {
       segIndex: segIndex,
       fromTag: pathTagIds[segIndex],
@@ -749,31 +735,29 @@ import { record, getTestName } from './logger.js';
       arriveAtDestination();
       return;
     }
-    // neu: Zwischen-Tag (nicht das Ziel) — NUR die kurze Handlungsanweisung sprechen,
-    // KEINE Orts-/Tuerbeschreibung mehr automatisch (edge.reached bleibt als Doku/
-    // Fallback im Datensatz erhalten, wird hier aber bewusst nicht mehr verwendet).
-    // WICHTIG: die Handlung gehoert zur AUSGEHENDEN Kante ab reachedTagId (naechster
-    // Schritt der GEWAEHLTEN Route), NICHT zur soeben abgeschlossenen eingehenden Kante
-    // "edge" (= currentEdge(), pathTagIds[segIndex]->reachedTagId). Siehe departureAction-
-    // Kommentar in graph-data.js: eine Kante X->Y beschreibt die Handlung BEI X, um nach
-    // Y zu gehen — reachedTagId ist hier das neue X, pathTagIds[segIndex+2] das neue Y.
-    // reachedTagId ist an dieser Stelle garantiert NICHT das Ziel (siehe Check oben),
-    // also existiert in der berechneten Route immer ein naechster Tag danach.
-    // neu: die soeben abgeschlossene Kante ("edge") ist bereits zurueckgelegte,
-    // garantiert gerade Strecke (ihr eigenes Abbiegen-Erfordernis, falls vorhanden,
-    // wurde bereits BEIM VORHERIGEN reachPoint()-Aufruf entschieden und angesagt) —
-    // wird dem Korridor-Fortschritt IMMER gutgeschrieben, unabhaengig davon, ob JETZT
-    // (fuer die naechste Kante) ein Abbiegen ansteht.
+    // Intermediate tag (not the destination) — speak only the short action
+    // instruction, no more automatic place/door description (edge.reached is kept in
+    // the dataset for documentation/fallback purposes, not read here). The action
+    // belongs to the outgoing edge from reachedTagId (the next step of the chosen
+    // route), not to the incoming edge "edge" just completed (= currentEdge(),
+    // pathTagIds[segIndex]->reachedTagId). See the departureAction comment in
+    // graph-data.js: an edge X->Y describes the action taken at X to continue toward
+    // Y — here reachedTagId is the new X, pathTagIds[segIndex+2] is the new Y.
+    // reachedTagId is guaranteed not to be the destination at this point (see the
+    // check above), so the computed route always has a next tag after it.
+    // The edge just completed ("edge") is already-covered, guaranteed-straight
+    // distance (its own turn requirement, if any, was already decided and announced
+    // at the previous reachPoint() call) — it is always credited to corridor
+    // progress, regardless of whether a turn is now pending (for the next edge).
     creditCorridorProgress(edge ? edge.distanceM : null);
 
     var nextEdge = EDGE_MAP[reachedTagId + "->" + pathTagIds[segIndex + 2]];
     var isTurn = isTurnAction(nextEdge);
-    // neu: bei einem ECHTEN Abbiegen wird der Text generisch aus der vorhandenen
-    // departureAction abgeleitet und mit "Stopp. " vorangestellt — GENAU EIN Ort im
-    // Code, der das tut, unabhaengig davon, welcher Tag/welche Kante betroffen ist
-    // (keine Tag-2-spezifische Sonderbehandlung). Kein neuer Stopp-Abstand, keine neue
-    // Schwelle: der Ausloeser bleibt exakt der bestehende REACHED-Zeitpunkt
-    // (arrival <= SETTINGS.reachedM, siehe handleTracking()).
+    // For a real turn, the text is derived generically from the existing
+    // departureAction and prefixed with "Stopp. " — exactly one place in the code
+    // does this, regardless of which tag/edge is involved (no Tag-2-specific special
+    // case). No new stop distance, no new threshold: the trigger remains exactly the
+    // existing reached point (arrival <= SETTINGS.reachedM, see handleTracking()).
     var baseText = departureActionSpeech(nextEdge);
     var t = isTurn ? ("Stopp. " + baseText) : baseText;
     lastRouteInstruction = t;
@@ -793,10 +777,9 @@ import { record, getTestName } from './logger.js';
       activeDirectionText = t;
       navLog("TTS_DIRECTION", { reachedTag: reachedTagId, action: nextEdge.departureAction,
         isTurn: true, text: t, speechId: turnResult.speechId });
-      // neu: nach einem echten Abbiegen beginnt ein NEUER Korridor — bisheriger
-      // Fortschritt wird verworfen (die naechste Kante wurde ja gerade erst als
-      // Abbiegen angesagt, ihre Distanz wird erst gutgeschrieben, wenn sie tatsaechlich
-      // durchlaufen wurde, siehe oben beim naechsten reachPoint()-Aufruf).
+      // After a real turn, a new corridor begins — prior progress is discarded (the
+      // next edge was just announced as a turn; its distance is only credited once
+      // it is actually walked, see above at the next reachPoint() call).
       resetCorridorState("turn");
     } else {
       // Kein Abbiegen: ueber die gemeinsame Dedup-Logik ansagen — auf einem langen
@@ -810,11 +793,11 @@ import { record, getTestName } from './logger.js';
       if(straightResult.accepted){
         corridorLastReassuranceAtM = corridorProgressM;
       }
-      // neu: falls die obige Ansage (korrekt) als Duplikat unterdrueckt wurde, ABER
-      // inzwischen genug Korridor-Distanz aufgelaufen ist, sorgt dies fuer die
-      // gelegentliche Rueckversicherung auf langen, sonst stillen Geradeausstrecken —
-      // no-op, falls straightResult.accepted true war (sinceLast dann 0) oder die
-      // 15-Meter-Schwelle noch nicht erreicht ist.
+      // If the announcement above was (correctly) suppressed as a duplicate, but
+      // enough corridor distance has accumulated in the meantime, this provides the
+      // occasional reassurance on long, otherwise silent straight stretches — a
+      // no-op if straightResult.accepted was true (sinceLast is then 0) or the
+      // 15-meter threshold has not yet been reached.
       maybeTriggerCorridorReassurance();
     }
     segIndex++;
@@ -846,41 +829,41 @@ import { record, getTestName } from './logger.js';
       category:"ACTION_REQUIRED"}));
     updatePanel(null);
     renderNavigationUi();
-    // ---- Instrumentierung (neu) ----
+    // ---- Instrumentierung ----
     navLog("ROUTE_END", { destinationId: destinationId, reason: "arrived" });
     navLog("TTS_DESTINATION", { destinationId: destinationId, text: t, speechId: destResult.speechId });
   }
 
   // ---- TRACKING: laufende Distanzmessung zum Tag voraus ----
-  // v13: rawDist = frische Roh-Messung dieses Frames (oder null).
+  // rawDist = fresh raw measurement for this frame (or null).
   function handleTracking(now, visible, rawDist){
-    // neu (Bugfix): einziger "spaeterer, kontrollierter" Aufrufpunkt fuer die
-    // Nach-Abbiege-Bestaetigungs-Wiederholung — handleTracking() laeuft bereits jeden
-    // Tick waehrend TRACKING (main-loop.js, unveraendert), tryPostTurnConfirmation()
-    // selbst drosselt auf hoechstens einen Versuch pro POST_TURN_RETRY_INTERVAL_MS und
-    // ist ein sofortiger No-Op, sobald kein Zustand mehr aussteht — beruehrt keine der
-    // folgenden Distanz-/EMA-/REACHED-/Verlust-Berechnungen.
+    // The controlled retry point for the post-turn confirmation: handleTracking()
+    // already runs every tick during TRACKING (main-loop.js, unchanged), and
+    // tryPostTurnConfirmation() itself throttles to at most one attempt per
+    // POST_TURN_RETRY_INTERVAL_MS and is an immediate no-op once no confirmation is
+    // pending — it does not touch any of the distance/EMA/REACHED/loss calculations
+    // below.
     tryPostTurnConfirmation();
 
     var edge = currentEdge();
-    // neu (Tag-1-Sonderbehandlung): waehrend der TRACKING_START_TAG-Phase gilt die
-    // EIGENE, engere Ankunfts-Schwelle SETTINGS.startTagReachedM statt der normalen
-    // edge/SETTINGS.reachedM-Ableitung — einzige Aenderung gegenueber gewoehnlichem
-    // Tracking; alles ANDERE unterhalb (raw/EMA, trackingConfirmed, arrivalConfirmFrames,
-    // Near-Loss-Fallback) bleibt fuer Tag 1 exakt dieselbe Berechnung wie fuer jeden
-    // anderen Tag, nur mit diesem anderen Schwellenwert verglichen.
+    // While in the TRACKING_START_TAG phase, its own, tighter arrival threshold
+    // SETTINGS.startTagReachedM applies instead of the normal edge/SETTINGS.reachedM
+    // derivation — the only change compared to ordinary tracking; everything else
+    // below (raw/EMA, trackingConfirmed, arrivalConfirmFrames, near-loss fallback)
+    // remains exactly the same calculation for Tag 1 as for any other tag, only
+    // compared against this different threshold value.
     var reachedM = trackingStartTagActive ? SETTINGS.startTagReachedM :
       ((edge && edge.reachedM != null) ? edge.reachedM : SETTINGS.reachedM);
 
-    // v13: Roh-Messungen protokollieren (Fenster der letzten N)
+    // Log raw measurements (window of the last N)
     if(rawDist != null){
       lastRawDist = rawDist; lastRawAt = now;
       trackDetCount++;
       rawRecent.push(rawDist);
       if(rawRecent.length > SETTINGS.rawWindowN) rawRecent.shift();
-      // neu: Tracking gilt erst als bestaetigt, wenn der erwartete Tag mindestens
-      // trackingConfirmDetections mal gueltig gemessen wurde. Vorher darf kein
-      // Verlust ("TAG LOST"/LOST_STOPPED/Stopp-Ansage/REACQUIRED) ausgeloest werden.
+      // Tracking counts as confirmed only once the expected tag has been validly
+      // measured at least trackingConfirmDetections times. Before that, no loss
+      // ("TAG LOST"/LOST_STOPPED/stop announcement/REACQUIRED) may be triggered.
       if(!trackingConfirmed && trackDetCount >= SETTINGS.trackingConfirmDetections){
         trackingConfirmed = true;
         navLog("TRACKING_CONFIRMED", { expectedTag: expectedNextTagId,
@@ -890,10 +873,10 @@ import { record, getTestName } from './logger.js';
     var recentMin = rawRecent.length ? Math.min.apply(null, rawRecent) : null;
 
     if(visible && emaDist != null){
-      // v13: Ankunftsdistanz = min(Roh, EMA). Die EMA hinkt beim schnellen
-      // Annaehern hinterher; die Roh-Messung allein kann ausreissen.
-      // Schutz vor Ausreissern: Schwelle muss in arrivalConfirmFrames
-      // aufeinanderfolgenden Frames MIT frischer Messung unterschritten sein.
+      // Arrival distance = min(raw, EMA). The EMA lags behind on fast approach; the
+      // raw measurement alone can be an outlier. Outlier protection: the threshold
+      // must be undershot in arrivalConfirmFrames consecutive frames with a fresh
+      // measurement.
       var arrival = emaDist;
       if(rawDist != null && rawDist < arrival) arrival = rawDist;
 
@@ -912,9 +895,8 @@ import { record, getTestName } from './logger.js';
           navLog("REACHED reason=distance-threshold", { expectedTag: expectedNextTagId,
             raw: r1(rawDist), ema: r1(emaDist), recentMin: r1(recentMin),
             arrival: r1(arrival), minSeg: r1(minTrackDist), reachedM: reachedM });
-          // neu (Tag-1-Sonderbehandlung): identische Ankunfts-Pruefung, NUR die
-          // Ziel-Funktion unterscheidet sich -- keine Duplizierung der Distanz-/EMA-/
-          // Rahmen-Logik oben.
+          // Identical arrival check; only the target function differs -- no
+          // duplication of the distance/EMA/frame logic above.
           if(trackingStartTagActive) reachStartTag("distance-threshold");
           else reachPoint("distance-threshold");
           return;
@@ -922,8 +904,8 @@ import { record, getTestName } from './logger.js';
       } else if(rawDist != null){
         arrivalBelowCount = 0;
       }
-      // Fortschritt (Distanz sinkt): Referenzminimum pflegen
-      // v13: auch mit Roh-Minimum, nicht nur EMA
+      // Progress (distance decreasing): maintain the reference minimum, using the
+      // raw minimum too, not only the EMA
       if(minTrackDist == null || emaDist < minTrackDist){
         minTrackDist = emaDist;
         awayWarned = false;
@@ -934,12 +916,11 @@ import { record, getTestName } from './logger.js';
         awayWarned = false;
       }
 
-      // neu (Fehlalarm-Fix): Away-Baseline-Pflege — siehe Deklaration von
-      // minAwayEmaDist oben fuer die Begruendung. Etablierung UND Zaehlung laufen
-      // ausschliesslich HIER, ausschliesslich waehrend trackingConfirmed bereits
-      // true ist; der Frame, der die Baseline zum ERSTEN MAL setzt, erhoeht
-      // awayPostConfirmSamples NICHT (kein "else"-Zweig fuer diesen Fall) —
-      // dieser Zaehler beginnt erst ab dem naechsten Frame zu laufen.
+      // Away-baseline maintenance — see the minAwayEmaDist declaration above for the
+      // rationale. Establishment and counting happen exclusively here, only while
+      // trackingConfirmed is already true; the frame that sets the baseline for the
+      // first time does not increment awayPostConfirmSamples (no "else" branch for
+      // that case) — this counter only starts running from the next frame on.
       if(trackingConfirmed){
         if(minAwayEmaDist == null){
           minAwayEmaDist = emaDist;
@@ -955,10 +936,10 @@ import { record, getTestName } from './logger.js';
         }
       }
 
-      // Distanz steigt deutlich über das Minimum -> Nutzer entfernt sich
-      // neu: nur NACH Bestaetigung, nur gegen die dedizierte Away-Baseline (NICHT
-      // mehr minTrackDist), und erst nach mindestens AWAY_BASELINE_MIN_SAMPLES
-      // weiteren gueltigen Messungen NACH deren Etablierung (siehe oben).
+      // Distance rises significantly above the minimum -> user is moving away.
+      // Only after confirmation, only against the dedicated away baseline (no
+      // longer minTrackDist), and only after at least AWAY_BASELINE_MIN_SAMPLES
+      // further valid measurements after it was established (see above).
       if(trackingConfirmed && !awayWarned && minAwayEmaDist != null &&
          awayPostConfirmSamples >= AWAY_BASELINE_MIN_SAMPLES &&
          emaDist - minAwayEmaDist >= SETTINGS.awayDeltaM && !speaking()){
@@ -976,8 +957,8 @@ import { record, getTestName } from './logger.js';
     }
 
     // Tag nicht (mehr) im Bild
-    // neu: Tracking noch nicht bestaetigt (< trackingConfirmDetections gueltige
-    // Messungen) -> keine Verlust-Erkennung, Anwendung bleibt effektiv im Suchzustand.
+    // Tracking not yet confirmed (< trackingConfirmDetections valid measurements) ->
+    // no loss detection; the app effectively remains in the search state.
     if(!trackingConfirmed) return;
     var lostFor = now - expectedLastSeenAt;
     if(lostFor <= SETTINGS.trackLostStopMs) return;  // kurzes Flackern ignorieren
@@ -987,10 +968,10 @@ import { record, getTestName } from './logger.js';
       recentMin: r1(recentMin), minSeg: r1(minTrackDist), ema: r1(emaDist),
       dets: trackDetCount, awayWarned: awayWarned });
 
-    // v13: Near-Loss-Fallback. Verlust allein gilt weiterhin NIE als "erreicht" —
-    // ABER: wurde der Tag unmittelbar zuvor STABIL und NAH angenaehert und ging
-    // dann verloren (typisch: steiler Winkel / Bildrand direkt vor dem Ziel),
-    // zaehlt das als Ankunfts-Bestaetigung. Alle Bedingungen zusammen:
+    // Near-loss fallback. A loss alone still never counts as "reached" — but if the
+    // tag was stably and closely approached immediately before and then lost
+    // (typical: steep angle / screen edge right before the target), this counts as
+    // arrival confirmation. All conditions combined:
     //   - genug Messungen im Abschnitt (kein kurzes Aufblitzen)
     //   - juengstes Roh-Minimum nah an der Schwelle (<= nearLossFallbackM)
     //   - LETZTE Messung nahe am Minimum => Nutzer naeherte sich beim Verlust,
@@ -1004,8 +985,8 @@ import { record, getTestName } from './logger.js';
       navLog("REACHED reason=near-loss-fallback", { expectedTag: expectedNextTagId,
         lastRaw: r1(lastRawDist), recentMin: r1(recentMin), minSeg: r1(minTrackDist),
         lostForMs: Math.round(lostFor), dets: trackDetCount });
-      // neu (Tag-1-Sonderbehandlung): siehe Kommentar beim anderen reachPoint()-Aufruf
-      // oben -- gleiche Weiche, gleiche Begruendung.
+      // See the comment at the other reachPoint() call above -- same branch, same
+      // rationale.
       if(trackingStartTagActive) reachStartTag("near-loss-fallback");
       else reachPoint("near-loss-fallback");
       return;
@@ -1013,14 +994,13 @@ import { record, getTestName } from './logger.js';
 
     // Sonst: Verlust gilt NICHT als "erreicht". Der Nutzer könnte das Telefon
     // weggedreht, die Kamera verdeckt oder zu früh abgebogen haben.
-    // WICHTIG (TTS-Aufraeumung): der interne Zustandsuebergang zu LOST_STOPPED bleibt
-    // HIER unveraendert (weiterhin nach trackLostStopMs, unveraendert) — NUR die
-    // gesprochene Stopp-Ansage wird jetzt zusaetzlich um SETTINGS.lostSpeechDelayMs
-    // verzoegert (siehe handleLostStopped()), damit der erwartete Tag oder ein
-    // gueltiger Vorgriffs-Kandidat noch Zeit hat, sich zu bestaetigen, bevor "Stopp"
-    // tatsaechlich gesprochen wird.
+    // The internal state transition to LOST_STOPPED remains unchanged here (still
+    // after trackLostStopMs, unchanged) — only the spoken stop announcement is now
+    // additionally delayed by SETTINGS.lostSpeechDelayMs (see
+    // handleLostStopped()), so the expected tag or a valid forward candidate still
+    // has time to be confirmed before "Stopp" is actually spoken.
     setNavState(NavState.LOST_STOPPED);
-    // ---- Instrumentierung (neu) ----
+    // ---- Instrumentierung ----
     segLostCount++;
     segLostSince = now;
     navLog("LOST_STOPPED", { expectedTag: expectedNextTagId, lastEma: r1(emaDist),
@@ -1036,12 +1016,11 @@ import { record, getTestName } from './logger.js';
   function handleLostStopped(now, det){
     if(det){
       // Wieder gefunden: Messung geht weiter.
-      // neu (Tag-1-Sonderbehandlung): war der Verlust WAEHREND der Tag-1-Verfolgung
-      // entstanden (trackingStartTagActive, siehe oben -- bleibt waehrend eines
-      // LOST_STOPPED innerhalb dieser Phase unveraendert true), muss auch die
-      // Wiederaufnahme in TRACKING_START_TAG zurueckkehren, NICHT in das normale
-      // TRACKING -- sonst wuerde main-loop.js ab dem naechsten Frame faelschlich
-      // updateSkipCandidate() fuer Tag 2 zulassen, obwohl Tag 1 noch nicht erreicht ist.
+      // If the loss occurred while Tag 1 was being tracked (trackingStartTagActive,
+      // see above -- stays unchanged true during a LOST_STOPPED within this phase),
+      // resumption must also return to TRACKING_START_TAG, not to normal TRACKING --
+      // otherwise main-loop.js would wrongly allow updateSkipCandidate() for Tag 2
+      // from the next frame on, even though Tag 1 has not yet been reached.
       setNavState(trackingStartTagActive ? NavState.TRACKING_START_TAG : NavState.TRACKING);
       var d = (det.dist != null) ? det.dist : emaDist;
       if(d != null) emaDist = d;
@@ -1050,18 +1029,17 @@ import { record, getTestName } from './logger.js';
         lostSpeechPending = false;
         navLog("TTS_LOST_CANCELLED_EXPECTED_FOUND", buildLostDecisionLogData(now, "expected-tag-found"));
       }
-      // ---- Instrumentierung (neu) ----
+      // ---- Instrumentierung ----
       segReacquireCount++;
       if(segLostSince != null){ segLostMs += (now - segLostSince); segLostSince = null; }
       navLog("REACQUIRED", { expectedTag: expectedNextTagId, dist: r1(emaDist) });
       navLog("TTS_REACQUIRED_CONTINUE", { expectedTag: expectedNextTagId,
         dist: r1(emaDist), wasLostInstructionSpoken: wasStopSpoken });
       lostInstructionSpoken = false;
-      // neu: KEINE technische "Markierung wieder gefunden"-Ansage. Nur wenn zuvor
-      // TATSAECHLICH ein Stopp gesprochen wurde, wird die Wiederaufnahme einmal
-      // ueber die gemeinsame Dedup-Logik bestaetigt — war zuvor kein Stopp
-      // gesprochen, bleibt die Wiederaufnahme bewusst STUMM (der Nutzer wusste ja
-      // nicht, dass die Kamera den Tag kurz verloren hatte).
+      // No technical "marker refound" announcement. Only if a stop was actually
+      // spoken before is the resumption confirmed once, via the shared dedup logic
+      // -- if no stop was spoken before, the resumption deliberately stays silent
+      // (the user never knew the camera had briefly lost the tag).
       if(wasStopSpoken){
         var edge = currentEdge();
         var isTurnNext = !!(edge && isTurnAction(edge));
@@ -1081,9 +1059,9 @@ import { record, getTestName } from './logger.js';
         return;   // weiter abwarten, keine Ansage, keine Erinnerung
       }
       if(forwardCandidateProgressing){
-        // Anforderung 4: solange ein gueltiger Vorgriffs-Kandidat gerade
-        // Bestaetigung sammelt, wird die Stopp-Ansage weiter zurueckgehalten (nicht
-        // endgueltig storniert — nur diese Pruef-Gelegenheit).
+        // While a valid forward candidate is currently gathering confirmation, the
+        // stop announcement continues to be held back (not permanently cancelled —
+        // only for this check).
         navLog("TTS_LOST_CANCELLED_FORWARD_CANDIDATE",
           buildLostDecisionLogData(now, "forward-candidate-progressing"));
         return;
@@ -1121,19 +1099,18 @@ import { record, getTestName } from './logger.js';
     }
   }
 
-  // ==================== Kontrollierter Routen-Skip (generisch, neu) ====================
-  // KEIN genereller Graph-Shortcut: nur bereits im BERECHNETEN Pfad (pathTagIds) liegende
-  // Tags kommen ueberhaupt infrage, und nur, wenn JEDE Kante zwischen dem erwarteten Tag
-  // und dem Kandidaten (einschliesslich) "continue-straight" ist — also KEIN noch nicht
-  // angesagtes Abbiegen uebersprungen wuerde. Automatisch gueltig fuer JEDEN zukuenftigen
-  // Pfad, keine tag-spezifische Regel-Tabelle mehr (ersetzt die alten ROUTE_SKIP_RULES/
-  // canSkipExpectedTag()/skipExpectedTag()). Graph/EDGE_MAP/findPath() bleiben unveraendert.
+  // ==================== Kontrollierter Routen-Skip (generisch) ====================
+  // Not a general graph shortcut: only tags that already lie on the computed path
+  // (pathTagIds) are considered at all, and only if every edge between the expected
+  // tag and the candidate (inclusive) is "continue-straight" — i.e. no not-yet-
+  // announced turn would be skipped over. Automatically valid for any future path,
+  // with no tag-specific rule table. Graph/EDGE_MAP/findPath() remain unchanged.
   //
-  // WICHTIG (Architektur-Korrektur): eine bestaetigte Kandidatur bedeutet NUR "ab jetzt
-  // wird DIESER Tag verfolgt" (wie ein normales onNextTagFound()) — KEINE synthetische
-  // Ankunft. Die eigentliche Ankunfts-Ansage (Abbiegen oder "Gehen Sie weiter geradeaus.")
-  // erfolgt weiterhin ausschliesslich ueber die unveraenderte, distanzbasierte
-  // reachPoint()/handleTracking()-Kette, sobald der Tag TATSAECHLICH erreicht wird.
+  // A confirmed candidacy means only "this tag is now the one being tracked" (like
+  // a normal onNextTagFound()) — not a synthetic arrival. The actual arrival
+  // announcement (a turn, or "Gehen Sie weiter geradeaus.") continues to happen
+  // exclusively through the unchanged, distance-based reachPoint()/handleTracking()
+  // chain, once the tag is actually reached.
   var skipCandTagId = null;
   var skipCandTargetIdx = -1;
   var skipCandDist = null;
@@ -1148,16 +1125,14 @@ import { record, getTestName } from './logger.js';
     skipCandLastSeenAt = 0;
   }
 
-  // Generischer Helfer (siehe Anforderung): sind ALLE Kanten zwischen fromIdx und
-  // toIdx auf dem gegebenen aktiven Pfad ohne ein noch nicht angesagtes Abbiegen
-  // passierbar? Einzige heute im Graphen vorhandene "Manöver"-Kategorie ist
-  // turn-left/turn-right (siehe DEPARTURE_ACTIONS in graph.js); es gibt in den
-  // aktuellen Routendaten KEINE separate Kodierung fuer Tuer-/Treppen-/Aufzug-
-  // Uebergaenge oder Pflicht-Stopps (recherchiert, nicht geraten) — sollten solche
-  // Kanten spaeter ergaenzt werden, muessen sie als neuer departureAction-Wert mit
-  // isTurn:true (oder einer verallgemeinerten "blocksForwardSkip"-Markierung) im
-  // Graphen erscheinen; dieser Helfer wuerde sie dann automatisch beruecksichtigen,
-  // ohne Code-Aenderung hier.
+  // Generic helper: are all edges between fromIdx and toIdx on the given active path
+  // passable without an as-yet-unannounced turn? The only "maneuver" category
+  // currently present in the graph is turn-left/turn-right (see DEPARTURE_ACTIONS in
+  // graph.js); the current route data has no separate encoding for door/stair/
+  // elevator transitions or mandatory stops. Should such edges be added later, they
+  // must appear in the graph as a new departureAction value with isTurn:true (or a
+  // generalized "blocksForwardSkip" marker); this helper would then automatically
+  // take them into account, with no code change needed here.
   function isForwardTagReachableWithoutManeuver(activePath, fromIdx, toIdx){
     if(!activePath || fromIdx < 0 || toIdx <= fromIdx || toIdx >= activePath.length) return false;
     for(var i = fromIdx; i < toIdx; i++){
@@ -1167,16 +1142,16 @@ import { record, getTestName } from './logger.js';
     return true;
   }
 
-  // Durchsucht ALLE diesmal decodierten Tags (nicht nur bestKnown) nach dem BESTEN
-  // gueltigen Vorgriffs-Kandidaten auf dem aktiven Pfad: muss (1) ueberhaupt auf
-  // pathTagIds liegen, (2) echt VOR dem erwarteten Tag liegen (weiter vorne, nicht
-  // dahinter/schon passiert), (3) ohne ein noch nicht angesagtes Abbiegen erreichbar
-  // sein (isForwardTagReachableWithoutManeuver()). "Bester" = der FRUEHESTE gueltige
-  // sichtbare Tag (staerkster zuverlaessiger Beleg fuer Fortschritt: ein gleichzeitig
-  // sichtbarer WEITERER entfernter Tag koennte durch eine andere Tuer/einen anderen
-  // Korridor/Glaswand sichtbar sein, siehe Sicherheitsanforderung) — niemals der
-  // geometrisch naechste. Gibt auch alle abgelehnten Sichtungen mit Grund zurueck,
-  // fuer die FORWARD_CANDIDATE_REJECTED-Protokollierung.
+  // Searches all tags decoded this time (not just bestKnown) for the best valid
+  // forward candidate on the active path: it must (1) lie on pathTagIds at all,
+  // (2) lie genuinely ahead of the expected tag (further along, not behind/already
+  // passed), (3) be reachable without an as-yet-unannounced turn
+  // (isForwardTagReachableWithoutManeuver()). "Best" means the earliest valid
+  // visible tag (the most reliable evidence of progress: a simultaneously visible, more
+  // distant tag could be visible through a different door/corridor/glass wall,
+  // which would make it an unsafe signal) — never the geometrically nearest one.
+  // Also returns all rejected sightings with a reason, for FORWARD_CANDIDATE_REJECTED
+  // logging.
   function findVisibleForwardCandidate(detectedList){
     var result = { candidate: null, rejections: [] };
     if(!pathTagIds || expectedNextTagId == null) return result;
@@ -1299,32 +1274,31 @@ import { record, getTestName } from './logger.js';
     }
   }
 
-  // Bestaetigte Kandidatur -> NUR Umschalten des verfolgten Tags (wie ein normales
-  // "gefunden", siehe onNextTagFound()) — KEINE Ankunft, KEIN reachPoint(), KEIN
-  // REACHED (Anforderung 8: unveraendert). Alle uebersprungenen Zwischen-Tags werden
-  // aus der aktiven Verfolgung entfernt, OHNE als "erreicht" gezaehlt zu werden
-  // (currentTagId bleibt unveraendert); currentEdge() zeigt danach auf die Kante ZUM
-  // Kandidaten, deren Distanz spaeter — bei TATSAECHLICHER Ankunft — ganz normal von
-  // reachPoint() addiert wird, wie im nicht uebersprungenen Fall (auch wenn der
-  // Kandidat das gewaehlte Ziel ist — Anforderung 7: keine Ankunfts-Ansage hier,
-  // ausschliesslich "Gehen Sie weiter geradeaus."). Einzige Sprachausgabe hier laeuft
-  // ueber die gemeinsame Dedup-Logik (speakDirectionIfNew()) — bei gewoehnlichem
-  // Retarget waehrend fluessigen Gehens fast immer ein Duplikat der bereits aktiven
-  // Ansage und bleibt daher stumm (Anforderung 2: "nicht bei jedem Vorgriffs-
-  // Retarget"); war der Retarget waehrend eines anstehenden Verlusts, wird die
-  // Stopp-Ansage storniert und die aktive Richtung zurueckgesetzt, sodass HIER
-  // frisch bestaetigt wird (Anforderung 3).
+  // Confirmed candidacy only switches which tag is being tracked (like a normal
+  // "found", see onNextTagFound()) — no arrival, no reachPoint(), no REACHED.
+  // Skipped intermediate tags are removed from active tracking without being
+  // counted as "reached" (currentTagId stays unchanged); currentEdge() afterward
+  // points at the edge to the candidate, whose distance is later credited normally
+  // by reachPoint() upon actual arrival, even if the candidate is the chosen
+  // destination (no arrival announcement happens here, only "Gehen Sie weiter
+  // geradeaus."). Speech goes through the shared dedup logic
+  // (speakDirectionIfNew()) — during a normal retarget while walking smoothly, this
+  // is almost always a duplicate of the already-active announcement and stays
+  // silent; if the retarget happened during a pending loss, the stop announcement
+  // is cancelled and the active direction is reset, so a fresh confirmation is
+  // spoken here.
   function beginTrackingForwardCandidate(targetIdx, confirmedTagId, dist, now){
     var routeIndexBefore = segIndex;
     var wasLostPending = lostSpeechPending;
     var bypassedTags = pathTagIds.slice(routeIndexBefore + 1, targetIdx);
 
-    // neu: ein Vorgriffs-Retarget ueberspringt IMMER den Tag, auf den eine eventuell
-    // anstehende Nach-Abbiege-Bestaetigung wartet (findVisibleForwardCandidate() liefert
-    // nur Kandidaten ECHT VOR dem erwarteten Tag, siehe dort) — die eigene "Gehen Sie
-    // weiter geradeaus."-Bestaetigung weiter unten in dieser Funktion uebernimmt bereits
-    // die Rolle "Bestaetigung, dass es geradeaus weitergeht", daher wird hier storniert
-    // statt eine zweite, nie erreichbare Bestaetigung offen zu lassen.
+    // A forward-candidate retarget always skips past the tag that any pending
+    // post-turn confirmation is waiting for (findVisibleForwardCandidate() only
+    // returns candidates genuinely ahead of the expected tag, see there) — the
+    // retarget's own "Gehen Sie weiter geradeaus." confirmation further below in
+    // this function already fills the role of "confirming that it continues
+    // straight ahead", so the pending confirmation is cancelled here rather than
+    // left open and never reachable.
     clearPostTurnPending("forward-skip-retarget");
 
     var bypassedDistanceM = 0;
@@ -1332,14 +1306,15 @@ import { record, getTestName } from './logger.js';
       var e = EDGE_MAP[pathTagIds[i] + "->" + pathTagIds[i + 1]];
       bypassedDistanceM += (e && e.distanceM != null) ? e.distanceM : 0;
     }
-    // neu: die uebersprungenen Kanten sind bereits zurueckgelegte Strecke, und
-    // isForwardTagReachableWithoutManeuver() (siehe updateSkipCandidate()) garantiert,
-    // dass JEDE Kante zwischen dem erwarteten Tag und dem Kandidaten "continue-straight"
-    // ist — ein Vorgriffs-Ziel mit einem Abbiegen dazwischen waere gar nicht erst als
-    // Kandidat zugelassen worden. Daher hier IMMER gutschreiben, ohne erneute Abbiege-
-    // Pruefung. Die letzte Kante INS Ziel (targetIdx-1 -> targetIdx) ist bewusst NICHT
-    // enthalten (wie bei bypassedDistanceM oben) — sie wird erst bei TATSAECHLICHER
-    // Ankunft ueber den normalen reachPoint()-Pfad gutgeschrieben.
+    // The skipped edges are already-covered distance, and
+    // isForwardTagReachableWithoutManeuver() (see updateSkipCandidate()) guarantees
+    // that every edge between the expected tag and the candidate is
+    // "continue-straight" — a forward target with a turn in between would never
+    // have been accepted as a candidate in the first place. It is therefore always
+    // credited here, with no repeated turn check. The last edge into the target
+    // (targetIdx-1 -> targetIdx) is deliberately not included (as with
+    // bypassedDistanceM above) — it is only credited upon actual arrival, via the
+    // normal reachPoint() path.
     creditCorridorProgress(bypassedDistanceM);
 
     if(wasLostPending){
@@ -1361,17 +1336,13 @@ import { record, getTestName } from './logger.js';
                               // beginnt, optionale Vibration, KEINE Ankunftsansage hier
 
     if(wasLostPending) resetActiveDirectionState();
-    // Audit-Korrektur (F-1/Ziel 4): dies war der EINZIGE Richtungs-Bestaetigungs-Aufruf
-    // ohne interrupt:true — konnte dadurch bei belegtem TTS-Kanal spurlos verworfen
-    // werden UND den Dedup-Zustand fuer die naechste Ansage verfaelschen. Jetzt wie
-    // alle anderen Richtungs-Bestaetigungen konsistent interrupt:true; der gesprochene
-    // Text ("Gehen Sie weiter geradeaus.") bleibt UNVERAENDERT.
-    // neu: Ergebnis erfassen — bei tatsaechlicher Ansage uebernimmt diese Bestaetigung
-    // die Rolle der Korridor-Rueckversicherung fuer diese Strecke (Anforderung: "die
-    // Skip-Ansage soll denselben 'letzte Geradeaus-Anweisung'-Zustand aktualisieren") —
-    // verhindert, dass kurz nach einem hoerbaren Vorgriffs-Retarget zusaetzlich noch
-    // die 15-Meter-Rueckversicherung ausgeloest wird, obwohl der Nutzer gerade erst
-    // eine gleichwertige Bestaetigung gehoert hat.
+    // Always passes interrupt:true, like every other direction confirmation --
+    // otherwise a busy TTS channel could silently drop the request and corrupt the
+    // dedup state for the next announcement. When actually spoken, this
+    // confirmation also takes over the role of the corridor reassurance for this
+    // stretch, updating the same "last straight-ahead instruction" state -- this
+    // prevents the 15-meter reassurance from also firing shortly after an audible
+    // forward retarget, even though the user just heard an equivalent confirmation.
     var skipResult = speakDirectionIfNew("Gehen Sie weiter geradeaus.",
       ttsOpts({interrupt:true, source:"nav.forwardSkipConfirmation", category:"NAVIGATION_CONTEXT"}),
       "TTS_STRAIGHT",
@@ -1425,14 +1396,14 @@ import { record, getTestName } from './logger.js';
     if(zone === lastAimZone) return;
     if(now - lastAimAt < SETTINGS.aimCooldownMs) return;
 
-    // neu: "Markierung mittig." entfernt — Zentrierung ist keine Handlungsanweisung
-    // (der Nutzer muss nichts mehr tun, im Gegensatz zu links/rechts/hoeher/tiefer).
-    // zone/lastAimZone/lastAimAt werden TROTZDEM aktualisiert (wie zuvor bei
-    // erfolgreicher Ansage), damit die bestehende Cooldown-/Uebergangs-Logik fuer die
-    // verbleibenden, echten Korrektur-Hinweise unveraendert weiterlaeuft — kein zweiter
-    // Log-Eintrag pro Frame: die obige zone===lastAimZone-Pruefung sorgt dafuer, dass
-    // dies nur EINMAL beim UEBERGANG in die Mitte protokolliert wird, nicht bei jedem
-    // weiteren Frame, in dem der Tag mittig bleibt.
+    // "Markierung mittig." is not spoken — centering is not an action instruction
+    // (the user has nothing left to do, unlike left/right/higher/lower).
+    // zone/lastAimZone/lastAimAt are still updated (as they were for a successful
+    // announcement), so the existing cooldown/transition logic for the remaining,
+    // genuine correction hints keeps working unchanged — no duplicate log entry per
+    // frame: the zone===lastAimZone check above ensures this is logged only once on
+    // the transition into center, not on every further frame where the tag stays
+    // centered.
     if(zone === "center"){
       lastAimZone = zone;
       lastAimAt = now;
@@ -1440,14 +1411,12 @@ import { record, getTestName } from './logger.js';
       return;
     }
 
-    // neu: horizontale Ausricht-Ansagen ("Markierung links."/"Markierung rechts.")
-    // ebenfalls unterdrueckt (Anforderung) — NUR links/rechts; die vertikalen
-    // Hinweise (hoeher/tiefer) bleiben unveraendert und erreichen weiterhin say()
-    // unten. Gleiches Muster wie bei "center" oben: zone/lastAimZone/lastAimAt
-    // werden TROTZDEM aktualisiert, damit Cooldown-/Uebergangs-Logik unveraendert
-    // bleibt und dies nur EINMAL pro Uebergang protokolliert wird. say() wird fuer
-    // diese Zonen gar nicht mehr aufgerufen — kein TTS_REQUESTED fuer die
-    // unterdrueckte Phrase.
+    // Horizontal aim announcements ("Markierung links."/"Markierung rechts.") are
+    // also not spoken — only left/right; the vertical hints (higher/lower) remain
+    // unchanged and still reach say() below. Same pattern as "center" above:
+    // zone/lastAimZone/lastAimAt are still updated, so the cooldown/transition
+    // logic stays unchanged and this is logged only once per transition. say() is
+    // not called at all for these zones — no TTS_REQUESTED for the unspoken phrase.
     if(zone === "left" || zone === "right"){
       lastAimZone = zone;
       lastAimAt = now;

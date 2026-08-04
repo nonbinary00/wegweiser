@@ -1,4 +1,4 @@
-// ==================== Logger (neu, unabhaengiges Instrumentierungs-Modul) ====================
+// ==================== Logger (unabhaengiges Instrumentierungs-Modul) ====================
 // Reine Feldtest-Instrumentierung. Enthaelt KEINE Navigationslogik: nav.js entscheidet
 // WANN und WAS geloggt wird (ueber navLog), dieses Modul entscheidet nur WIE Ereignisse
 // gespeichert/exportiert werden (Puffer, localStorage, JSON-Export, Zaehler-Anzeige).
@@ -80,7 +80,7 @@ function clear(){
 
 function pad2(n){ return (n < 10 ? "0" : "") + n; }
 
-// Fallback fuer Browser ohne Web-Share-Files-Unterstuetzung (unveraendert ggue. vorher).
+// Fallback for browsers without Web Share API file support.
 function downloadJsonBlob(blob, filename){
   var url = URL.createObjectURL(blob);
   var a = document.createElement("a");

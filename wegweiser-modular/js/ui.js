@@ -1,11 +1,7 @@
 // ==================== Anzeige (UI-Rendering) ====================
-// Verbatim aus wegweiser-v13.html (Abschnitte "---- Anzeige ----" und drawMarker
-// aus "---- Entfernung über POSIT ----").
-// updatePanel() liest Navigations-Zustand aus nav.js (nur lesend) und ruft
-// currentEdge() auf; nav.js wiederum ruft updatePanel() auf -> genehmigter
-// Zirkelbezug nav.js <-> ui.js (siehe Abhaengigkeitskarte, Entscheidung 2).
-// HINWEIS: nav.js wird erst in Stufe 4 angelegt; bis dahin ist dieser Import-Pfad
-// noch nicht aufloesbar (das Modul kann erst ab Stufe 4 tatsaechlich geladen werden).
+// updatePanel() reads navigation state from nav.js (read-only) and calls
+// currentEdge(); nav.js in turn calls updatePanel() -- an intentional circular
+// dependency between nav.js and ui.js.
 
 import { roomEl, metaEl, uiDest, uiCur, uiNext, uiDist, uiInstr, uiSource, ctx,
   destSel, navStartBtn, navEndBtn, whereBtn } from './dom.js';
@@ -42,20 +38,18 @@ import { destinationId, pathTagIds, currentTagId, expectedNextTagId, lastRouteIn
     uiSource.className = e ? "auto" : "";
   }
 
-  // ---- Zustandsbasierte Sichtbarkeit der Bedienelemente (neu, UX-Schritt:
-  // State-Rendering) ----
-  // Einzige Aufgabe: die vorhandenen Steuerelemente #navStartBtn/#navEndBtn/
-  // #whereBtn/#destSel je nach den bereits bestehenden nav.js-Zustandsfeldern
-  // (navigationActive/destinationReached) ein-/ausblenden bzw. -- nur bei destSel
-  // -- (de)aktivieren, sowie den Start-Button-Text anpassen. Liest AUSSCHLIESSLICH
-  // bereits vorhandenen Navigations-Zustand, loest KEINE Routen-/Kamera-/TTS-/Log-
-  // Aufrufe aus und ist KEINE zweite Zustandsmaschine -- navigationActive/
-  // destinationReached bleiben ausschliesslich in nav.js gesetzt. Verwendet das
-  // native `hidden`-Attribut (keine neue CSS-Klasse): entfernt das Element
-  // vollstaendig aus dem Layout UND aus dem Accessibility-Baum (VoiceOver kann es
-  // dann nicht mehr fokussieren), ohne bestehende .ctrl-/.btnrow-Regeln anzufassen.
-  // navStartBtn.disabled bleibt bewusst UNBERUEHRT -- das steuert weiterhin
-  // ausschliesslich der vorhandene destSel-"change"-Handler in app.js.
+  // ---- Zustandsbasierte Sichtbarkeit der Bedienelemente ----
+  // Sole purpose: show/hide #navStartBtn/#navEndBtn/#whereBtn (and, for destSel,
+  // enable/disable) according to the existing nav.js state fields
+  // (navigationActive/destinationReached), and adjust the start-button text. Reads
+  // only already-existing navigation state, triggers no route/camera/TTS/log calls,
+  // and is not a second state machine -- navigationActive/destinationReached
+  // continue to be set exclusively in nav.js. Uses the native `hidden` attribute
+  // (no new CSS class): this removes the element from both the layout and the
+  // accessibility tree (VoiceOver can no longer focus it), without touching the
+  // existing .ctrl-/.btnrow rules. navStartBtn.disabled is deliberately left
+  // untouched here -- that remains controlled solely by the existing destSel
+  // "change" handler in app.js.
   function renderNavigationUi(){
     if(navigationActive){
       navStartBtn.hidden = true;

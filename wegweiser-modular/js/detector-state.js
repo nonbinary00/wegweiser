@@ -1,11 +1,7 @@
-// ==================== Detector-Instanz (neu, kein Original-Aequivalent) ====================
-// Im Original (wegweiser-v13.html, Zeile 2551) war dies Teil von
-// "var detector, positCache = {}, stream = null;" im selben Closure-Scope.
-// detector wird EINMALIG am Ende des IIFE erzeugt (versuchsweise, mit try/catch) und
-// in tick() gelesen. Ausgelagert in ein eigenes kleines Modul, damit app.js (Erzeuger)
-// und main-loop.js (Leser) keinen Import-Kreis bilden muessen (siehe genehmigte
-// Abhaengigkeitskarte, Entscheidung 4). positCache und stream bleiben, wo sie im Original
-// tatsaechlich benutzt werden (distance.js bzw. camera.js), nicht hier.
+// ==================== Detector-Instanz ====================
+// Holds the single detector instance, created once by app.js (with try/catch, since
+// construction can fail) and read every frame by main-loop.js. Kept in its own small
+// module so app.js (writer) and main-loop.js (reader) do not need to import each other.
 var detector;
 
 function setDetector(d){

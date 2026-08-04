@@ -1,7 +1,6 @@
 // ==================== Konfiguration ====================
-// Verbatim aus wegweiser-v13.html (IIFE-Kommentarblock "---- Konfiguration ----").
-// NAV_DEBUG war dort im Abschnitt "HAUPTSCHLEIFE"/navLog deklariert (Zeile 2673) und wurde
-// hierher verschoben, da es ein Konfigurations-Flag ist, keine Laufzeit-Logik.
+// NAV_DEBUG is grouped with the other settings here because it is a configuration flag,
+// not runtime logic, even though it is only read from the main loop's logging call.
 
   var MARKER_SIZE_M = 0.12;
   var PROC_WIDTH    = 640;
@@ -16,54 +15,52 @@
     visualMemoryMs: 700,
     wrongTagCooldownMs: 10000,
     aimCooldownMs: 1500,
-    reachedM: 1.8,                // Punkt erreicht bei GEMESSENER Distanz <= Schwelle.
-                                  // v13: 1.2 -> 1.8, weil die Erkennung genau unter ~1.5 m
-                                  // (steiler Winkel, Tag am Bildrand) unzuverlässig wird.
-                                  // Pro Kante weiterhin per edge.reachedM übersteuerbar.
-    startTagReachedM: 1.0,        // neu (Tag-1-Sonderbehandlung): EIGENE Ankunfts-Schwelle
-                                  // NUR fuer die TRACKING_START_TAG-Phase (siehe nav.js
-                                  // handleTracking()) — 1,8 m ist fuer den Stopp-und-
-                                  // Rechtsabbiegen-Punkt bei Tag 1 zu weit. Beruehrt
-                                  // NICHT reachedM (Tag 2 und alle spaeteren Tags bleiben
-                                  // bei 1,8 m bzw. ihrer eigenen edge.reachedM).
-    nearLostM: 2.5,               // Tag zwischen reachedM und 2,5 m verloren => "sehr nah"-Hinweis
-    arrivalConfirmFrames: 2,      // v13: so viele Frames in Folge mit arrival <= Schwelle
-                                  // noetig (schuetzt vor einzelnem Distanz-Ausreisser nach unten)
-    nearLossFallbackM: 2.2,       // v13: Verlust zaehlt als Ankunft NUR, wenn kurz zuvor
-                                  // stabil bis <= diese Distanz angenaehert wurde
-    nearLossMinDets: 6,           // v13: ... und mindestens so viele Messungen im Abschnitt vorlagen
-    rawWindowN: 5,                // v13: Fenster der letzten Roh-Distanzen (juengstes Minimum)
-    trackingConfirmDetections: 3, // neu: so viele gueltige Messungen des erwarteten Tags
-                                  // noetig, bevor "verloren" ueberhaupt gemeldet werden darf
-    trackLostStopMs: 1800,        // Tag so lange weg (>= 1,8 s) => internes LOST_STOPPED
-                                  // (Zustandsuebergang, UNVERAENDERT) — bestimmt NICHT mehr
-                                  // direkt die gesprochene Stopp-Ansage, siehe lostSpeechDelayMs
-    awayDeltaM: 1.2,              // Distanz steigt um so viel über Minimum => Warnung
-    otherTagFrames: 6,            // fremder Tag: erst nach ~0,8 s stabiler Sicht melden
-    backTagFrames: 9,             // "zurück"-Warnung erst bei sehr stabiler Sicht (~1,3 s)
-    lostSpeechDelayMs: 4500,      // neu (TTS-Aufraeumung): zusaetzliche Verzoegerung NACH dem
-                                  // Eintritt in LOST_STOPPED, bevor die gesprochene Stopp-
-                                  // Ansage tatsaechlich erfolgt — gibt dem erwarteten Tag oder
-                                  // einem gueltigen Vorgriffs-Tag Zeit, sich zu bestaetigen,
-                                  // OHNE den bestehenden trackLostStopMs-Zustandsuebergang zu
-                                  // veraendern oder umzudeuten (siehe handleLostStopped())
-    lostReminderRepeatMs: 18000,   // neu: Abstand zwischen kurzen "Suchen Sie weiter."-
-                                  // Erinnerungen waehrend LOST_STOPPED (deutlich seltener
-                                  // als vorher; ersetzt die lange Wiederholung ueber
-                                  // scanHintRepeatMs)
-    longCorridorReassuranceM: 15   // neu: nach so vielen aufsummierten Metern OHNE
-                                  // Abbiegen (siehe Korridor-Fortschritt in nav.js) darf
-                                  // "Gehen Sie weiter geradeaus." erneut gesprochen
-                                  // werden, auch wenn dieselbe Formulierung fuer diesen
-                                  // Korridor bereits einmal aktiv war — rein
-                                  // distanzbasiert, kein neuer Zeit-Timer
+    reachedM: 1.8,                // Point reached at measured distance <= threshold; kept
+                                  // loose rather than tight, since detection becomes
+                                  // unreliable just under ~1.5 m (steep angle, tag near
+                                  // the screen edge). Still overridable per edge via
+                                  // edge.reachedM.
+    startTagReachedM: 1.0,        // Tag 1 is special-cased: its own arrival threshold,
+                                  // used only during the TRACKING_START_TAG phase (see
+                                  // nav.js handleTracking()) — 1.8 m is too far for the
+                                  // stop-and-turn-right point at Tag 1. Does not affect
+                                  // reachedM (Tag 2 and all later tags stay at 1.8 m or
+                                  // their own edge.reachedM).
+    nearLostM: 2.5,               // Tag lost between reachedM and 2.5 m => "very close" hint
+    arrivalConfirmFrames: 2,      // consecutive frames with arrival <= threshold required
+                                  // (protects against a single downward distance outlier)
+    nearLossFallbackM: 2.2,       // a loss counts as arrival only if the tag was stably
+                                  // approached to <= this distance shortly before
+    nearLossMinDets: 6,           // ...and at least this many measurements existed in the segment
+    rawWindowN: 5,                // window of the last raw distances (most recent minimum)
+    trackingConfirmDetections: 3, // this many valid measurements of the expected tag are
+                                  // required before "lost" may be reported at all
+    trackLostStopMs: 1800,        // tag gone this long (>= 1.8s) => internal LOST_STOPPED
+                                  // state transition; the spoken stop announcement is
+                                  // governed separately, see lostSpeechDelayMs
+    awayDeltaM: 1.2,              // distance rises this much above the minimum => warning
+    otherTagFrames: 6,            // foreign tag: only reported after ~0.8s of stable sight
+    backTagFrames: 9,             // "going back" warning only at very stable sight (~1.3s)
+    lostSpeechDelayMs: 4500,      // additional delay after entering LOST_STOPPED, before
+                                  // the spoken stop announcement actually happens -- gives
+                                  // the expected tag or a valid forward candidate time to
+                                  // be confirmed, without changing or reinterpreting the
+                                  // existing trackLostStopMs state transition (see handleLostStopped())
+    lostReminderRepeatMs: 18000,   // interval between short "Suchen Sie weiter." reminders
+                                  // during LOST_STOPPED -- deliberately far less frequent
+                                  // than the scan-hint repeat interval, so it doesn't nag
+    longCorridorReassuranceM: 15   // after this many accumulated meters without a turn
+                                  // (see corridor progress in nav.js), "Gehen Sie weiter
+                                  // geradeaus." may be spoken again, even if the same
+                                  // phrase was already active once for this corridor --
+                                  // purely distance-based, no new time-based timer
   };
 
   var SAFETY_SPEECH = "Der Wegweiser unterstützt die Orientierung anhand von Markierungen, " +
     "erkennt aber keine Hindernisse. Bitte verwenden Sie weiterhin Ihren Langstock " +
     "oder Ihre gewohnte Mobilitätshilfe.";
 
-// v13: Debug-Logging fuer Feldtests (Konsole).
+// Debug logging for field tests (console).
 var NAV_DEBUG = true;
 
 export {
