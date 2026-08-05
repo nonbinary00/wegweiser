@@ -198,6 +198,70 @@
         "Wenden Sie sich in Richtung Küche und bewegen Sie das Smartphone langsam " +
         "nach links und rechts, bis die Markierung bei Tischtennis erkannt wird.",
       // Tag 5 hat ebenfalls keine Nachfolge-Kante -> immer Ziel; siehe Kommentar oben.
+      departureAction: "continue-straight" },
+
+    // ---- Rueckwaerts-Experiment 11->10->8->7->4->6->3 (neu) ----
+    // Bestaetigt: die gesamte Strecke von Tag 11 bis Tag 3 verlaeuft geradeaus,
+    // keine Abbiegung noetig -- departureAction daher fuer alle sechs Kanten
+    // "continue-straight" (bei 8->7 zusaetzlich ausdruecklich vor Ort bestaetigt;
+    // die Lage von Tag 8 an einer Ecke des Grundrisses ist dabei KEIN Hinweis auf
+    // ein Abbiegen). found/reached/searchHint bleiben bewusst knapp und ohne
+    // Orientierungspunkt-Namen -- Ziel dieses Experiments ist, den Graph-Ablauf
+    // auf einer durchgehend geraden Strecke zu beobachten, nicht jede
+    // Zwischenmarkierung anzusagen. Betrifft ausschliesslich dieses Experiment;
+    // Tag 1, Tag 2 und die Kante 4->5 sind bewusst NICHT gespiegelt.
+    { from:11, to:10,
+      found: "Gehen Sie weiter geradeaus.",
+      reached: "Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "continue-straight" },
+
+    { from:10, to:8,
+      found: "Gehen Sie weiter geradeaus.",
+      reached: "Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "continue-straight" },
+
+    { from:8, to:7,
+      found: "Gehen Sie weiter geradeaus.",
+      reached: "Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "continue-straight" },
+
+    { from:7, to:4,
+      found: "Gehen Sie weiter geradeaus.",
+      reached: "Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "continue-straight" },
+
+    { from:4, to:6,
+      found: "Gehen Sie weiter geradeaus.",
+      reached: "Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "continue-straight" },
+
+    // Tag 3 ist in diesem Experiment das Ziel: reachPoint() prueft
+    // reachedTagId === destinationId VOR jedem Zugriff auf edge.reached (siehe
+    // nav.js) -- das "reached" hier wird beim tatsaechlichen Erreichen von Tag 3
+    // NIE gesprochen, stattdessen ARRIVALS[3]. Bleibt trotzdem non-leer (von
+    // validateGraph() verlangt) und absichtlich neutral, damit es niemals einer
+    // Ankunfts-Ansage widerspricht, falls es je als Fallback gelesen wird.
+    { from:6, to:3,
+      found: "Gehen Sie weiter geradeaus.",
+      reached: "Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
       departureAction: "continue-straight" }
   ];
 
