@@ -151,14 +151,30 @@ import { record, getTestName } from './logger.js';
   var postTurnExpectedTag = null;   // Tag, dessen Bestaetigung die Ansage abschliesst
   var postTurnAttempts = 0;
   var postTurnNextRetryAt = 0;
+  // neu (Rueckwaerts-Route-Start bei Tag 11): der Mechanismus sprach bisher
+  // IMMER den fest verdrahteten Text "Gehen Sie geradeaus.". Fuer den
+  // Tag-11-Rueckwaerts-Start wird genau derselbe Mechanismus mit einem
+  // ANDEREN Bestaetigungstext ("Die Richtung stimmt. Gehen Sie geradeaus.")
+  // wiederverwendet, statt einen zweiten, parallelen Sprachmechanismus zu
+  // erfinden -- ohne den optionalen dritten/vierten Parameter bleibt das
+  // Verhalten fuer jedes echte Abbiegen exakt wie zuvor. postTurnConfirmedLogEvent
+  // erlaubt zusaetzlich, bei erfolgreicher Bestaetigung EIN aufrufspezifisches
+  // Log-Ereignis zu feuern (z.B. START_TAG_11_DIRECTION_CONFIRMED) -- der
+  // Aufrufer entscheidet ueber Text/Log-Namen, der Mechanismus selbst bleibt
+  // generisch und kennt keine Tag- oder routenspezifischen Sonderfaelle.
+  var DEFAULT_POST_TURN_CONFIRMATION_TEXT = "Gehen Sie geradeaus.";
+  var postTurnConfirmationText = DEFAULT_POST_TURN_CONFIRMATION_TEXT;
+  var postTurnConfirmedLogEvent = null;
 
-  function setPostTurnPending(turnTag, expectedTag){
+  function setPostTurnPending(turnTag, expectedTag, confirmationText, confirmedLogEvent){
     postTurnPending = true;
     postTurnRouteRunId = routeRunId;
     postTurnTurnTag = turnTag;
     postTurnExpectedTag = expectedTag;
     postTurnAttempts = 0;
     postTurnNextRetryAt = 0;
+    postTurnConfirmationText = confirmationText || DEFAULT_POST_TURN_CONFIRMATION_TEXT;
+    postTurnConfirmedLogEvent = confirmedLogEvent || null;
     navLog("POST_TURN_CONFIRMATION_PENDING", { routeRunId: routeRunId, turnTag: turnTag,
       expectedTag: expectedTag, reason: "turn-instruction-accepted" });
   }
@@ -174,6 +190,8 @@ import { record, getTestName } from './logger.js';
     postTurnExpectedTag = null;
     postTurnAttempts = 0;
     postTurnNextRetryAt = 0;
+    postTurnConfirmationText = DEFAULT_POST_TURN_CONFIRMATION_TEXT;
+    postTurnConfirmedLogEvent = null;
   }
 
   // Einziger Ort, der tatsaechlich versucht, die anstehende Nach-Abbiege-Bestaetigung
@@ -204,7 +222,7 @@ import { record, getTestName } from './logger.js';
         turnTag: turnTagForLog, expectedTag: expectedTagForLog, attempt: postTurnAttempts });
     }
 
-    var confirmResult = speakDirectionIfNew("Gehen Sie geradeaus.",
+    var confirmResult = speakDirectionIfNew(postTurnConfirmationText,
       ttsOpts({interrupt:true, source:"nav.postTurnConfirmation", category:"NAVIGATION_CONTEXT"}),
       "POST_TURN_CONFIRMATION_SPOKEN",
       { turnTag: turnTagForLog, expectedTag: expectedTagForLog, attempt: postTurnAttempts });
@@ -213,6 +231,11 @@ import { record, getTestName } from './logger.js';
       if(isRetry){
         navLog("POST_TURN_CONFIRMATION_RETRY_ACCEPTED", { routeRunId: routeRunId,
           turnTag: turnTagForLog, expectedTag: expectedTagForLog, attempt: postTurnAttempts,
+          speechId: confirmResult.speechId });
+      }
+      if(postTurnConfirmedLogEvent){
+        navLog(postTurnConfirmedLogEvent, { routeRunId: routeRunId, turnTag: turnTagForLog,
+          expectedTag: expectedTagForLog, text: postTurnConfirmationText,
           speechId: confirmResult.speechId });
       }
       clearPostTurnPending("confirmed");
@@ -602,6 +625,36 @@ import { record, getTestName } from './logger.js';
     if(tagId === 1){
       navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
       beginStartTagTracking(tagId);
+      return;
+    }
+
+    // neu (Rueckwaerts-Route-Start bei Tag 11): Tag 11 ist wie Tag 1 ein
+    // physisch entfernter Startpunkt, aber mit UNBEKANNTER Ausgangsorientierung
+    // (siehe START_TEXTS[11] in graph-data.js) -- anders als bei Tag 1 wird
+    // hier bewusst NICHT sofort "Gehen Sie geradeaus." gesagt. Der bestehende
+    // Nach-Abbiege-Bestaetigungsmechanismus (setPostTurnPending()/
+    // tryPostTurnConfirmation(), siehe oben) wird wiederverwendet, OBWOHL kein
+    // echtes Abbiegen angesagt wurde: genau derselbe Mechanismus sorgt dafuer,
+    // dass "Die Richtung stimmt. Gehen Sie geradeaus." erst gesprochen wird,
+    // sobald Tag 10 TATSAECHLICH ueber die normale onNextTagFound()-Kette
+    // bestaetigt wird -- KEINE synthetische Ankunft, KEINE Aenderung an der
+    // distanzbasierten Ankunftslogik fuer Tag 10 (handleTracking()/
+    // reachPoint() bleiben unveraendert). Betrifft ausschliesslich diese Route
+    // (Start bei Tag 11 in Richtung Tag 10); jeder andere Startknoten faellt
+    // weiterhin auf den generischen Zweig unten.
+    if(tagId === 11 && p[1] === 10){
+      var startTextTag11 = START_TEXTS[11] ||
+        ("Sie sind bei " + markerName(tagId) + ". Halten Sie das Smartphone vor sich " +
+         "und suchen Sie die nächste Markierung.");
+      lastRouteInstruction = startTextTag11;
+      var startResultTag11 = say(startTextTag11, ttsOpts({interrupt:true,
+        source:"nav.startTag11Turn", category:"NAVIGATION_CONTEXT", expectedTag: p[1]}));
+      navLog("START_TAG_11_TURN_INSTRUCTION", { startTag: tagId, expectedTag: p[1],
+        text: startTextTag11, speechId: startResultTag11.speechId });
+      navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
+      beginSegment();
+      setPostTurnPending(tagId, expectedNextTagId,
+        "Die Richtung stimmt. Gehen Sie geradeaus.", "START_TAG_11_DIRECTION_CONFIRMED");
       return;
     }
 
@@ -1489,6 +1542,70 @@ import { record, getTestName } from './logger.js';
     }
   }
 
+  // ==================== "Wo bin ich?" (neu) ====================
+  // Liefert eine reine Textantwort fuer den Wo-bin-ich-Knopf (app.js ruft
+  // ausschliesslich diese Funktion auf und spricht das Ergebnis selbst weiter,
+  // wie bisher) -- OHNE jemals eine AprilTag-Nummer im gesprochenen Text zu
+  // verwenden. edge.locationDescription (graph-data.js) ist die einzige
+  // Textquelle fuer den Standort; AprilTag-Nummern bleiben ausschliesslich in
+  // navLog() (Rohwerte in Logs sind ausdruecklich erlaubt). Liest NUR bereits
+  // vorhandenen Zustand (aktive Route, aktuelles Segment, lastExpectedVis,
+  // skipCandTagId/-LastSeenAt, postTurnPending) -- ruft NIEMALS reachPoint()
+  // auf, aendert NIEMALS segIndex/expectedNextTagId/die aktive Route/pathTagIds.
+  // "Die Richtung stimmt. Gehen Sie weiter geradeaus." wird nur ergaenzt, wenn
+  // (a) der erwartete Tag ODER ein bereits ueber isForwardTagReachableWithout-
+  // Maneuver() gepruefter Vorgriffs-Kandidat (skipCandTagId) gerade sichtbar
+  // oder im kurzen visuellen Gedaechtnis ist, UND (b) kein noch unbestaetigtes
+  // Abbiegen (postTurnPending, siehe oben -- deckt sowohl echte Abbiegungen als
+  // auch den Tag-11-Rueckwaerts-Start ab) aussteht. Reine Auswertung
+  // bestehender Zustaende, keine neue Erkennungs- oder Abbiege-Logik.
+  function whereAmIResponse(){
+    if(!(navigationActive && !destinationReached && currentTagId != null)) return null;
+
+    var edge = currentEdge();
+    var locationText = (edge && edge.locationDescription) ||
+      ("Sie befinden sich bei " + markerName(currentTagId) + ".");
+
+    navLog("WHERE_AM_I_LOCATION", { routeRunId: routeRunId, currentTagId: currentTagId,
+      expectedTag: expectedNextTagId,
+      segment: edge ? (currentTagId + "->" + expectedNextTagId) : null,
+      description: locationText });
+
+    if(!edge){
+      return { text: locationText, directionAdded: false, reason: "no-active-segment" };
+    }
+
+    var now = performance.now();
+    var expectedVisible = lastExpectedVis != null &&
+      (now - lastExpectedVis.at) <= SETTINGS.visualMemoryMs;
+    var candidateVisible = skipCandTagId != null &&
+      (now - skipCandLastSeenAt) <= SETTINGS.candMemoryMs;
+    var validTagVisible = expectedVisible || candidateVisible;
+
+    if(validTagVisible && !postTurnPending){
+      navLog("WHERE_AM_I_DIRECTION_CONFIRMED", { routeRunId: routeRunId,
+        expectedTag: expectedNextTagId, viaExpectedVisible: expectedVisible,
+        viaCandidate: candidateVisible,
+        candidateTag: candidateVisible ? skipCandTagId : null });
+      return { text: locationText + " Die Richtung stimmt. Gehen Sie weiter geradeaus.",
+        directionAdded: true, reason: "valid-tag-visible-no-pending-turn" };
+    }
+
+    if(validTagVisible && postTurnPending){
+      navLog("WHERE_AM_I_STRAIGHT_SUPPRESSED", { routeRunId: routeRunId,
+        expectedTag: expectedNextTagId, reason: "turn-pending",
+        viaExpectedVisible: expectedVisible, viaCandidate: candidateVisible });
+      return { text: locationText, directionAdded: false, reason: "turn-pending" };
+    }
+
+    var scanText = edge.searchHint ||
+      "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie eine Markierung in Ihrer Nähe.";
+    navLog("WHERE_AM_I_SCAN_REQUIRED", { routeRunId: routeRunId,
+      expectedTag: expectedNextTagId, reason: "no-valid-tag-visible" });
+    return { text: locationText + " " + scanText, directionAdded: false,
+      reason: "no-valid-tag-visible" };
+  }
+
 export {
   NavState,
   navState,
@@ -1521,6 +1638,7 @@ export {
   updateSkipCandidate,
   aimGuidance,
   scanHint,
+  whereAmIResponse,
   touchExpectedSeen,
   touchCandidateSeen,
   setLastExpectedVisual,

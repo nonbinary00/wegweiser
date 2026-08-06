@@ -73,9 +73,19 @@
   // neu (Tag-1-Sonderbehandlung, siehe nav.js beginStartTagTracking()): exakter
   // Wortlaut der Eingangs-Ansage, EINMAL gesprochen, sofort nach der visuellen
   // Bestaetigung von Tag 1 (nicht mehr erst mit dem "Route berechnet."-Praefix).
+  // neu (Rueckwaerts-Route-Start bei Tag 11): bewusst OHNE "Gehen Sie geradeaus."
+  // -- anders als bei Tag 1 ist die Ausgangsorientierung am Ende des Korridors
+  // nicht bekannt (siehe Bericht: der Nutzer koennte dort stehen, gerade aus
+  // einem Raum kommen, oder bereits teilweise Richtung Tag 10 blicken). Der
+  // Nutzer muss sich zunaechst umdrehen und die Kamera neu ausrichten; die
+  // Bestaetigung "Die Richtung stimmt. Gehen Sie geradeaus." folgt erst, sobald
+  // Tag 10 tatsaechlich ueber die normale Erkennung bestaetigt wird (siehe
+  // onStartTagConfirmed()/setPostTurnPending() in nav.js).
   var START_TEXTS = {
     1: "Sie befinden sich am Eingang. Links befindet sich die Küche, rechts befinden " +
-       "sich die Büros. Halten Sie das Smartphone gerade vor sich. Gehen Sie geradeaus."
+       "sich die Büros. Halten Sie das Smartphone gerade vor sich. Gehen Sie geradeaus.",
+    11: "Sie befinden sich am Ende des Korridors. Drehen Sie sich um und halten Sie " +
+        "das Smartphone gerade vor sich."
   };
 
   // ==================== GRAPH: KANTEN (manuelles Ortswissen) ====================
@@ -110,6 +120,14 @@
   //                (der Normalfall), ist die Kante wie bisher von JEDEM Vorgaenger aus
   //                begehbar. findPath() in graph.js wertet dies gegen den tatsaechlichen
   //                Vorgaenger im jeweiligen Suchlauf aus.
+  //   locationDescription – neu: MENSCHENLESBARE Standortbeschreibung fuer GENAU
+  //                dieses Wegstueck (Kante.from -> Kante.to), OHNE AprilTag-Nummern
+  //                -- einzige Quelle fuer "Wo bin ich?" (siehe whereAmIResponse() in
+  //                nav.js), damit dort niemals "Markierung X" gesprochen wird. Pro
+  //                Kante eigenstaendig formuliert, nicht automatisch aus found/
+  //                reached/NODES-Namen abgeleitet, da dieselbe Wegstrecke je nach
+  //                Richtung unterschiedlich beschrieben werden kann (z.B. 3->6 vs.
+  //                6->3 -- gleicher Korridor, andere Beschreibung erlaubt).
   // distanceM wird automatisch aus FLOOR_GEOMETRY berechnet.
   var EDGES = [
     { from:1, to:2,
@@ -124,7 +142,9 @@
         "bewegen Sie es langsam nach links und rechts, bis die nächste Markierung erkannt wird.",
       // Das Abbiegen passiert BEI Tag 2 (Patrik), nicht beim Gehen dieser Kante selbst —
       // departureAction gehoert daher zu 2->3 (siehe dort), nicht hierher.
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Eingangsbereich, auf dem Weg zum Büro von Patrik." },
 
     { from:2, to:3,
       found:
@@ -137,7 +157,9 @@
         "Markierung bei Flex, geradeaus im Korridor.",
       // Hierher gehoert das Rechtsabbiegen bei Patrik: es wird angesagt, sobald Tag 2
       // erreicht ist, weil DIESE Kante (2->3) die naechste ausgehende Kante ab Tag 2 ist.
-      departureAction: "turn-right" },
+      departureAction: "turn-right",
+      locationDescription:
+        "Sie befinden sich zwischen dem Büro von Patrik und dem Flexbüro." },
 
     { from:3, to:6,
       found:
@@ -148,7 +170,10 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
         "Markierung geradeaus im Korridor.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im langen Korridor zwischen dem Flexbüro und der Mitte " +
+        "des Korridors." },
 
     { from:6, to:4,
       found:
@@ -159,7 +184,10 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
         "Markierung bei Martin, geradeaus im Korridor.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen der Mitte des Korridors und dem " +
+        "Büro von Martin." },
 
     { from:4, to:7,
       found:
@@ -170,7 +198,10 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
         "Markierung bei Leonie.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen dem Büro von Martin und dem " +
+        "Büro von Leonie." },
 
     { from:7, to:8,
       found:
@@ -181,7 +212,9 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
         "Markierung an der Ecke, geradeaus voraus.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen dem Büro von Leonie und der Ecke." },
 
     { from:8, to:10,
       found:
@@ -191,7 +224,9 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
         "Markierung beim Drucker, geradeaus im Korridor.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen der Ecke und dem Drucker." },
 
     { from:10, to:11,
       found:
@@ -204,7 +239,10 @@
         "Markierung am Ende des Korridors, geradeaus voraus.",
       // Tag 11 hat keine Nachfolge-Kante -> ist auf jeder Route, die ihn enthaelt,
       // automatisch das Ziel; departureAction hier nur der Vollstaendigkeit halber.
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen dem Drucker und dem Ende des " +
+        "Korridors." },
 
     { from:4, to:5,
       found:
@@ -216,7 +254,10 @@
         "Wenden Sie sich in Richtung Küche und bewegen Sie das Smartphone langsam " +
         "nach links und rechts, bis die Markierung bei Tischtennis erkannt wird.",
       // Tag 5 hat ebenfalls keine Nachfolge-Kante -> immer Ziel; siehe Kommentar oben.
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich auf dem Weg vom Büro von Martin in Richtung Küche, " +
+        "zu Tischtennis." },
 
     // ---- Rueckwaerts-Experiment 11->10->8->7->4->6->3 (neu) ----
     // Bestaetigt: die gesamte Strecke von Tag 11 bis Tag 3 verlaeuft geradeaus,
@@ -234,7 +275,10 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen dem Ende des Korridors und dem " +
+        "Drucker." },
 
     { from:10, to:8,
       found: "Gehen Sie weiter geradeaus.",
@@ -242,7 +286,9 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen dem Drucker und der Ecke." },
 
     { from:8, to:7,
       found: "Gehen Sie weiter geradeaus.",
@@ -250,7 +296,9 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen der Ecke und dem Büro von Leonie." },
 
     { from:7, to:4,
       found: "Gehen Sie weiter geradeaus.",
@@ -258,7 +306,10 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen dem Büro von Leonie und dem " +
+        "Büro von Martin." },
 
     { from:4, to:6,
       found: "Gehen Sie weiter geradeaus.",
@@ -266,7 +317,10 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im Korridor zwischen dem Büro von Martin und der " +
+        "Mitte des Korridors." },
 
     // Tag 3 ist das Ziel, WENN die Route dort endet (findPath(11,3)):
     // reachPoint() prueft reachedTagId === destinationId VOR jedem Zugriff auf
@@ -281,7 +335,10 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
-      departureAction: "continue-straight" },
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich im langen Korridor zwischen dem Flexbüro und dem " +
+        "Eingangsbereich." },
 
     // ---- Rueckwaerts-Route-Erweiterung 3->15->16 (neu) ----
     // Tag 15 ist ein reiner Wendepunkt: die Kante 3->15 selbst ist geradeaus
@@ -306,7 +363,10 @@
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
       departureAction: "continue-straight",
-      allowedPredecessors: [6] },
+      allowedPredecessors: [6],
+      locationDescription:
+        "Sie befinden sich im Eingangsbereich in der Nähe von Flex, auf dem " +
+        "Rückweg zum Ausgang." },
 
     { from:15, to:16,
       found: "Nächster Punkt gefunden.",
@@ -314,7 +374,8 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
-      departureAction: "turn-left" }
+      departureAction: "turn-left",
+      locationDescription: "Sie befinden sich kurz vor dem Ausgang." }
   ];
 
   // Ankunftsansage am ZIEL (ersetzt das reached der letzten Kante).

@@ -13,11 +13,11 @@ import {
   logExportBtn, logClearBtn
 } from './dom.js';
 import { NODES } from './graph-data.js';
-import { markerName, metersDE, EDGE_MAP } from './graph.js';
+import { markerName } from './graph.js';
 import {
-  startNavigation, endNavigation, lastRouteInstruction, destinationReached, currentTagId,
-  navigationActive, expectedNextTagId, pathTagIds, segIndex,
-  destinationId, routeRunId, navState
+  startNavigation, endNavigation, destinationReached, currentTagId,
+  navigationActive, expectedNextTagId,
+  destinationId, routeRunId, navState, whereAmIResponse
 } from './nav.js';
 import { startCamera, showError, running } from './camera.js';
 import { say, toggleSound, soundOn, cancelSpeech, unlockSpeech } from './speech.js';
@@ -59,37 +59,20 @@ import { renderNavigationUi } from './ui.js';
   });
   navEndBtn.addEventListener("click", function(){ endNavigation(true); });
 
-  // neu: verbleibende Strecke ausschliesslich aus den bereits bekannten Kanten-Distanzen
-  // (FLOOR_GEOMETRY, ueber EDGE_MAP) summieren — NIE aus der Kamera-zu-Tag-Distanz, die
-  // nur die aktuelle Naeherung an den NAECHSTEN Tag beschreibt, nicht die Restroute.
-  function remainingRouteMeters(){
-    if(!pathTagIds || destinationId == null || segIndex < 0) return null;
-    var total = 0, any = false;
-    for(var i = segIndex; i < pathTagIds.length - 1; i++){
-      var e = EDGE_MAP[pathTagIds[i] + "->" + pathTagIds[i + 1]];
-      if(e && e.distanceM != null){ total += e.distanceM; any = true; }
-    }
-    return any ? total : null;
-  }
-
   whereBtn.addEventListener("click", function(){
     var p;
     if(destinationReached){
       p = "Sie sind am Ziel: " + markerName(destinationId || currentTagId) + ".";
     } else if(currentTagId != null && navigationActive){
-      // "Zwischen A und B", solange schon ein naechster Tag verfolgt wird — sonst nur
-      // "bei A" (letzte ZUVERLAESSIG bestaetigte Position, keine Behauptung genauer
-      // Zwischenposition ohne Grundlage).
-      if(expectedNextTagId != null){
-        p = "Sie befinden sich zwischen Markierung " + currentTagId + " (" + markerName(currentTagId) +
-            ") und Markierung " + expectedNextTagId + " (" + markerName(expectedNextTagId) + ").";
-      } else {
-        p = "Sie befinden sich bei Markierung " + currentTagId + " (" + markerName(currentTagId) + ").";
-      }
-      var remM = remainingRouteMeters();
-      if(remM != null) p += " Bis zu Ihrem Ziel " + markerName(destinationId) +
-        " sind es noch ungefähr " + metersDE(remM) + ".";
-      if(lastRouteInstruction) p += " " + lastRouteInstruction;
+      // neu: die frueher hier gebaute "zwischen Markierung X und Y"-Formulierung
+      // sprach AprilTag-Nummern direkt aus. Ersetzt durch whereAmIResponse()
+      // (nav.js), die ausschliesslich die menschenlesbare locationDescription
+      // je Kante verwendet (siehe graph-data.js) und zusaetzlich entscheidet,
+      // ob "Die Richtung stimmt. Gehen Sie weiter geradeaus." sicher ergaenzt
+      // werden darf, statt hier eine zweite Entscheidungslogik zu duplizieren.
+      // app.js spricht das Ergebnis weiterhin selbst, wie bisher.
+      var whereAmI = whereAmIResponse();
+      p = whereAmI ? whereAmI.text : ("Sie befinden sich bei " + markerName(currentTagId) + ".");
     } else if(navigationActive){
       p = "Noch keine Markierung bestätigt. Richten Sie das Smartphone auf die nächste " +
           "Markierung in Ihrer Nähe. Von dort wird die Route zum Ziel " +
