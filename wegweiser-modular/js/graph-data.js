@@ -144,7 +144,7 @@
       // departureAction gehoert daher zu 2->3 (siehe dort), nicht hierher.
       departureAction: "continue-straight",
       locationDescription:
-        "Sie befinden sich im Eingangsbereich, auf dem Weg zum Büro von Patrik." },
+        "Sie befinden sich zwischen dem Eingang und dem Büro von Patrik." },
 
     { from:2, to:3,
       found:
@@ -172,8 +172,7 @@
         "Markierung geradeaus im Korridor.",
       departureAction: "continue-straight",
       locationDescription:
-        "Sie befinden sich im langen Korridor zwischen dem Flexbüro und der Mitte " +
-        "des Korridors." },
+        "Sie befinden sich zwischen dem Flexbüro und dem Korridor." },
 
     { from:6, to:4,
       found:
@@ -186,8 +185,7 @@
         "Markierung bei Martin, geradeaus im Korridor.",
       departureAction: "continue-straight",
       locationDescription:
-        "Sie befinden sich im Korridor zwischen der Mitte des Korridors und dem " +
-        "Büro von Martin." },
+        "Sie befinden sich zwischen dem Korridor und dem Büro von Martin." },
 
     { from:4, to:7,
       found:
@@ -256,8 +254,7 @@
       // Tag 5 hat ebenfalls keine Nachfolge-Kante -> immer Ziel; siehe Kommentar oben.
       departureAction: "continue-straight",
       locationDescription:
-        "Sie befinden sich auf dem Weg vom Büro von Martin in Richtung Küche, " +
-        "zu Tischtennis." },
+        "Sie befinden sich zwischen dem Büro von Martin und Tischtennis." },
 
     // ---- Rueckwaerts-Experiment 11->10->8->7->4->6->3 (neu) ----
     // Bestaetigt: die gesamte Strecke von Tag 11 bis Tag 3 verlaeuft geradeaus,
@@ -319,8 +316,7 @@
         "die nächste Markierung.",
       departureAction: "continue-straight",
       locationDescription:
-        "Sie befinden sich im Korridor zwischen dem Büro von Martin und der " +
-        "Mitte des Korridors." },
+        "Sie befinden sich zwischen dem Büro von Martin und dem Korridor." },
 
     // Tag 3 ist das Ziel, WENN die Route dort endet (findPath(11,3)):
     // reachPoint() prueft reachedTagId === destinationId VOR jedem Zugriff auf
@@ -337,8 +333,7 @@
         "die nächste Markierung.",
       departureAction: "continue-straight",
       locationDescription:
-        "Sie befinden sich im langen Korridor zwischen dem Flexbüro und dem " +
-        "Eingangsbereich." },
+        "Sie befinden sich zwischen dem Korridor und dem Flexbüro." },
 
     // ---- Rueckwaerts-Route-Erweiterung 3->15->16 (neu) ----
     // Tag 15 ist ein reiner Wendepunkt: die Kante 3->15 selbst ist geradeaus
@@ -365,8 +360,8 @@
       departureAction: "continue-straight",
       allowedPredecessors: [6],
       locationDescription:
-        "Sie befinden sich im Eingangsbereich in der Nähe von Flex, auf dem " +
-        "Rückweg zum Ausgang." },
+        "Sie befinden sich zwischen dem Flexbüro und dem Büro von Patrik. Die Tür " +
+        "zum Büro von Patrik befindet sich etwas rechts." },
 
     { from:15, to:16,
       found: "Nächster Punkt gefunden.",
@@ -375,7 +370,8 @@
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
       departureAction: "turn-left",
-      locationDescription: "Sie befinden sich kurz vor dem Ausgang." }
+      locationDescription: "Sie befinden sich kurz vor dem Ausgang. Die Ausgangstür " +
+        "befindet sich links." }
   ];
 
   // Ankunftsansage am ZIEL (ersetzt das reached der letzten Kante).
