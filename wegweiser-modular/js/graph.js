@@ -54,24 +54,65 @@ import { FLOOR_GEOMETRY, NODES, EDGES } from './graph-data.js';
   }
 
   // ==================== AUTOMATIK: ROUTENWAHL (BFS) ====================
+  // Zustand ist ein Paar (from, node) -- von welchem Tag aus node erreicht
+  // wurde, nicht nur node selbst. Noetig, weil eine Kante ueber
+  // allowedPredecessors optional einschraenken kann, von welchem Vorgaenger aus
+  // sie begehbar ist (siehe 3->15 in graph-data.js: nur nach Ankunft ueber
+  // Tag 6, nicht ueber Tag 2) -- ein reiner knotenbasierter BFS besucht jeden
+  // Knoten pro Lauf nur einmal, unabhaengig vom Vorgaenger, und koennte das
+  // nicht abbilden. Terminierung ist bereits durch den paarweisen seen-Zustand
+  // allein garantiert (Zustandsraum ist durch die Anzahl der Kanten begrenzt).
+  // nodeAlreadyOnPath() sichert zusaetzlich die KORREKTHEIT des Ergebnisses:
+  // ohne diese Pruefung koennte der Suchlauf ueber Tag 6 zurueck zu Tag 3
+  // laufen, um dort unter einem ANDEREN Vorgaenger-Zustand erneut anzukommen
+  // und so 3->15 freizuschalten -- ein Pfad, der Tag 3 zweimal enthaelt und
+  // physisch keine sinnvolle Anweisung waere. parent-Zeiger haengen direkt am
+  // Zustand (statt an einer separaten Map). Oeffentliche Signatur und
+  // Rueckgabewert (flaches Array von Tag-IDs oder null) bleiben unveraendert;
+  // jede Kante ohne allowedPredecessors verhaelt sich exakt wie zuvor.
   function findPath(startId, destId){
     if(startId === destId) return [startId];
-    var queue = [startId], prev = {}, seen = {};
-    seen[startId] = true;
+
+    function stateKey(from, node){ return from + "|" + node; }
+    function nodeAlreadyOnPath(state, nodeId){
+      var walk = state;
+      while(walk){
+        if(walk.node === nodeId) return true;
+        walk = walk.parent;
+      }
+      return false;
+    }
+
+    var startState = { from: null, node: startId, parent: null };
+    var queue = [startState];
+    var seen = {};
+    seen[stateKey(null, startId)] = true;
+
     while(queue.length){
       var cur = queue.shift();
-      var next = ADJ[cur] || [];
+      var next = ADJ[cur.node] || [];
       for(var i = 0; i < next.length; i++){
         var n = next[i];
-        if(seen[n]) continue;
-        seen[n] = true;
-        prev[n] = cur;
+        var edge = EDGE_MAP[cur.node + "->" + n];
+        if(edge && edge.allowedPredecessors && cur.from !== null &&
+           edge.allowedPredecessors.indexOf(cur.from) === -1){
+          continue;
+        }
+        if(nodeAlreadyOnPath(cur, n)) continue;
+        var key = stateKey(cur.node, n);
+        if(seen[key]) continue;
+        seen[key] = true;
+        var nextState = { from: cur.node, node: n, parent: cur };
         if(n === destId){
-          var path = [n];
-          while(path[0] !== startId) path.unshift(prev[path[0]]);
+          var path = [];
+          var walkBack = nextState;
+          while(walkBack){
+            path.unshift(walkBack.node);
+            walkBack = walkBack.parent;
+          }
           return path;
         }
-        queue.push(n);
+        queue.push(nextState);
       }
     }
     return null;

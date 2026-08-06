@@ -19,7 +19,14 @@
       { tag_id:7,  label:"Leonie",      type:"office",   x_m:74.273,  y_m:40.961, dir_deg:2.9   },
       { tag_id:9,  label:"Essbereich",  type:"office",   x_m:78.211,  y_m:37.795, dir_deg:91.4  },
       { tag_id:10, label:"Drucker",     type:"office",   x_m:64.824,  y_m:41.103, dir_deg:10.8  },
-      { tag_id:11, label:"end",         type:"office",   x_m:55.470,  y_m:43.375, dir_deg:334   }
+      { tag_id:11, label:"end",         type:"office",   x_m:55.470,  y_m:43.375, dir_deg:334   },
+      // Rueckwaerts-Route-Erweiterung 3->15->16 (neu). Label wie im
+      // Original-Marker-Export ("back tag1"/"back tag 2") uebernommen -- rein
+      // informelle Planungsbezeichnung, siehe NODES-Eintrag fuer den
+      // tatsaechlichen Anzeigenamen (analog Tag 11: Marker-Label "end" vs.
+      // NODES-Name "Ende des Korridors").
+      { tag_id:15, label:"back tag1",   type:"office",   x_m:103.721, y_m:41.415, dir_deg:176.5 },
+      { tag_id:16, label:"back tag 2",  type:"office",   x_m:102.083, y_m:47.481, dir_deg:280.4 }
     ],
     doors: [
       { label:"Eingang Patrik", type:"door", x_m:103.823, y_m:41.799, width_m:0.710, opening_deg:270.5, dir_deg:0.5   },
@@ -48,7 +55,13 @@
     8:  { name:"Ecke",                destination:false },
     9:  { name:"Essbereich",          destination:false },
     10: { name:"Drucker",             destination:true  },
-    11: { name:"Ende des Korridors",  destination:true  }
+    11: { name:"Ende des Korridors",  destination:true  },
+    // Rueckwaerts-Route-Erweiterung 3->15->16 (neu). Tag 15 ist ein reiner
+    // Wendepunkt (kein eigenes Ziel); Tag 16 ist das tatsaechliche Ende der
+    // Rueckwaerts-Route (Ausgang), unabhaengig von Tag 1/Tag 2 -- KEINE Kante
+    // zurueck zu Tag 1/2, keine Kopie von deren Daten.
+    15: { name:"Wendepunkt",          destination:false },
+    16: { name:"Ausgang",             destination:true  }
   };
 
   // Ansage, wenn die Navigation AN diesem Knoten beginnt (erster bestätigter Tag).
@@ -92,6 +105,11 @@
   //                einmal fest; nav.js kennt keine Tag-spezifischen Sonderfaelle.
   //   searchHint – manuelle Hilfe, solange Tag B noch nicht gefunden ist
   //   reachedM   – optionale eigene Schwelle (Standard SETTINGS.reachedM)
+  //   allowedPredecessors – neu, OPTIONAL: schraenkt ein, von welchem Vorgaenger-Tag
+  //                aus diese Kante begehbar ist (siehe 3->15 unten). Fehlt dieses Feld
+  //                (der Normalfall), ist die Kante wie bisher von JEDEM Vorgaenger aus
+  //                begehbar. findPath() in graph.js wertet dies gegen den tatsaechlichen
+  //                Vorgaenger im jeweiligen Suchlauf aus.
   // distanceM wird automatisch aus FLOOR_GEOMETRY berechnet.
   var EDGES = [
     { from:1, to:2,
@@ -250,19 +268,53 @@
         "die nächste Markierung.",
       departureAction: "continue-straight" },
 
-    // Tag 3 ist in diesem Experiment das Ziel: reachPoint() prueft
-    // reachedTagId === destinationId VOR jedem Zugriff auf edge.reached (siehe
-    // nav.js) -- das "reached" hier wird beim tatsaechlichen Erreichen von Tag 3
-    // NIE gesprochen, stattdessen ARRIVALS[3]. Bleibt trotzdem non-leer (von
-    // validateGraph() verlangt) und absichtlich neutral, damit es niemals einer
-    // Ankunfts-Ansage widerspricht, falls es je als Fallback gelesen wird.
+    // Tag 3 ist das Ziel, WENN die Route dort endet (findPath(11,3)):
+    // reachPoint() prueft reachedTagId === destinationId VOR jedem Zugriff auf
+    // edge.reached (siehe nav.js) -- das "reached" hier wird in diesem Fall NIE
+    // gesprochen, stattdessen ARRIVALS[3]. Fuehrt die Route weiter (findPath(11,16),
+    // neu), ist Tag 3 nur ein Zwischen-Tag und die naechste ausgehende Kante
+    // (3->15) entscheidet ueber die Ansage. "reached" bleibt in beiden Faellen
+    // non-leer (von validateGraph() verlangt) und absichtlich neutral.
     { from:6, to:3,
       found: "Gehen Sie weiter geradeaus.",
       reached: "Gehen Sie weiter geradeaus.",
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
-      departureAction: "continue-straight" }
+      departureAction: "continue-straight" },
+
+    // ---- Rueckwaerts-Route-Erweiterung 3->15->16 (neu) ----
+    // Tag 15 ist ein reiner Wendepunkt: die Kante 3->15 selbst ist geradeaus
+    // (Handlung BEI Tag 3), das Abbiegen passiert BEI Tag 15 -- daher gehoert
+    // departureAction:"turn-left" zu 15->16, NICHT zu 3->15 (exakt dasselbe
+    // Muster wie 1->2/2->3 oben: das Abbiegen bei Patrik gehoert zu 2->3, nicht
+    // zu 1->2). Tag 16 ist das Ende dieser Rueckwaerts-Route (Ausgang) -- KEINE
+    // Kante zurueck zu Tag 1 oder Tag 2, keine Verbindung/Kopie zu deren Daten.
+    //
+    // allowedPredecessors (neu, EINZIGE Kante mit diesem Feld): 3->15 ist
+    // RICHTUNGSABHAENGIG -- nur begehbar, wenn Tag 3 gerade ueber Tag 6 erreicht
+    // wurde (Rueckweg), NICHT ueber Tag 2 (Hinweg in die Bueros). findPath() in
+    // graph.js wertet dieses Feld anhand des tatsaechlichen Vorgaenger-Tags im
+    // jeweiligen Suchlauf aus (siehe dort); ein frischer Navigationsstart direkt
+    // bei Tag 3 hat keinen widersprechenden Vorgaenger und bleibt daher erlaubt
+    // (findPath(3,16) liefert weiterhin [3,15,16]). Kanten ohne dieses Feld
+    // verhalten sich unveraendert wie zuvor.
+    { from:3, to:15,
+      found: "Gehen Sie weiter geradeaus.",
+      reached: "Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "continue-straight",
+      allowedPredecessors: [6] },
+
+    { from:15, to:16,
+      found: "Nächster Punkt gefunden.",
+      reached: "Biegen Sie links ab.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "turn-left" }
   ];
 
   // Ankunftsansage am ZIEL (ersetzt das reached der letzten Kante).
@@ -273,7 +325,12 @@
     5:  "Ziel erreicht. Sie sind bei Tischtennis. Die Küchentür befindet sich links.",
     7:  "Ziel erreicht. Sie sind bei Leonie. Die Tür befindet sich links.",
     10: "Ziel erreicht. Sie sind beim Drucker.",
-    11: "Ziel erreicht. Sie haben das Ende des Korridors erreicht. Die Tür befindet sich links."
+    11: "Ziel erreicht. Sie haben das Ende des Korridors erreicht. Die Tür befindet sich links.",
+    // Rueckwaerts-Route-Erweiterung (neu): arriveAtDestination() stellt bei der
+    // Ankunfts-Ansage KEIN "Stopp." voran (anders als reachPoint() bei einem
+    // echten Zwischen-Abbiegen) -- der geforderte Wortlaut enthaelt es daher
+    // hier direkt als Teil des Textes.
+    16: "Stopp. Ziel erreicht. Sie befinden sich am Ausgang. Die Tür befindet sich links."
   };
 
   // Ortsansagen für erkannte Tags, die NICHT auf dem Weg liegen.
