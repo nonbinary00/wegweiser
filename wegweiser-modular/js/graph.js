@@ -1,6 +1,4 @@
 // ==================== Abgeleitete Graph-Strukturen ====================
-// Verbatim aus wegweiser-v13.html (Abschnitte "Abgeleitete Strukturen",
-// AUTOMATIK: ROUTENWAHL (BFS), VALIDIERUNG).
 
 import { FLOOR_GEOMETRY, NODES, EDGES } from './graph-data.js';
 
@@ -27,7 +25,7 @@ import { FLOOR_GEOMETRY, NODES, EDGES } from './graph-data.js';
     return (words[m] || m) + " Meter";
   }
 
-  // ==================== DEPARTURE_ACTIONS (neu) ====================
+  // ==================== DEPARTURE_ACTIONS ====================
   // Einzige Quelle der Wahrheit fuer "was der Nutzer BEI Kante.from tun muss, um in
   // Richtung Kante.to weiterzugehen" (Abbiegen oder Geradeaus) — NICHT etwas, das beim
   // Erreichen von Kante.to passiert. Gesprochen wird sie, sobald Tag "from" erreicht ist

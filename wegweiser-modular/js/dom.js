@@ -1,5 +1,4 @@
 // ==================== DOM-Elemente ====================
-// Verbatim aus wegweiser-v13.html (Abschnitt "---- Elemente ----").
 
   // ---- Elemente ----
   var video   = document.getElementById("cam");
@@ -26,7 +25,7 @@
   var uiInstr = document.getElementById("uiInstr");
   var uiSource= document.getElementById("stepSource");
 
-  // ---- Logging-Panel (neu, Feldtest-Instrumentierung) ----
+  // ---- Logging-Panel (Feldtest-Instrumentierung) ----
   var testNameInput = document.getElementById("testNameInput");
   var logCounter    = document.getElementById("logCounter");
   var logExportBtn  = document.getElementById("logExportBtn");

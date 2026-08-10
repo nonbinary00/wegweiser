@@ -1,9 +1,7 @@
 // ==================== Entfernung ueber POSIT ====================
-// Verbatim aus wegweiser-v13.html (Abschnitte "---- Laufzeit (Kamera/Erkennung) ----"
-// [nur positCache/positFor] und "---- Entfernung über POSIT ----").
-// detector und stream aus derselben Original-Deklarationszeile (2551) leben in
-// detector-state.js bzw. camera.js, nicht hier (genehmigte Abhaengigkeitskarte).
-// POS ist die globale js-aruco2-Bibliothek (vendor/posit.js, klassisches <script>).
+// detector and stream live in detector-state.js and camera.js respectively, not here.
+// POS is the global js-aruco2 library (vendor/posit.js, loaded as a classic <script>,
+// not imported as a module).
 
 import { MARKER_SIZE_M, PROC_WIDTH } from './config.js';
 import { W, H } from './frame-state.js';

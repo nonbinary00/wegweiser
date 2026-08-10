@@ -1,13 +1,8 @@
 // GitHub Pages redeploy trigger — no functional changes.
 // ==================== App-Einstiegspunkt (Bedienung, Bootstrap) ====================
-// Verbatim aus wegweiser-v13.html (Abschnitte "---- Bedienung ----",
-// "---- Zielauswahl aus NODES ----" und die Detector-Instanziierung am Ende des IIFE),
-// MIT genau 4 mechanischen Ersetzungen (facing/soundOn/candId+candCount+emaDist/detector
-// -Zuweisungen -> die genehmigten Setter/toggle-Funktionen). Die abschliessende IIFE-
-// Klammer "})();" entfaellt, da ES-Module bereits ein eigenes Modul-Scope besitzen.
-// Dieses Modul importiert nichts, das main-loop.js oder camera.js zurueck importiert,
-// bildet also keinen weiteren Zirkelbezug (app.js ist Einstiegspunkt, wird von nichts
-// importiert).
+// This module imports nothing that imports main-loop.js or camera.js back, so it
+// forms no additional circular dependency -- app.js is the entry point and is
+// imported by nothing else.
 
 import {
   gate, retryBtn, navStartBtn, navEndBtn, whereBtn, muteBtn, destSel,
@@ -26,9 +21,9 @@ import { setDetector } from './detector-state.js';
 import { exportJson, clear, record } from './logger.js';
 import { renderNavigationUi } from './ui.js';
 
-  // ---- TTS-Observability (neu): gemeinsame Metadaten fuer app.js-Ansagen, analog zu
-  // nav.js' ttsOpts() — dieses Modul hat keinen eigenen navState-Zaehler, liest den
-  // aktuellen Wert aber live aus dem (bereits importierten) nav.js-Export.
+  // ---- TTS-Observability ----: shared metadata for app.js's own announcements,
+  // mirroring nav.js's ttsOpts() -- this module holds no navState of its own, but
+  // reads the current value live from the already-imported nav.js export.
   function appTtsOpts(extra){
     var o = { state: navState, expectedTag: expectedNextTagId, routeRunId: routeRunId };
     if(extra) for(var k in extra) o[k] = extra[k];
@@ -36,20 +31,19 @@ import { renderNavigationUi } from './ui.js';
   }
 
   // ---- Bedienung ----
-  // neu (TTS-Startup-Fix): unlockSpeech() MUSS synchron, ganz am Anfang des
-  // direkten Klick-Handlers stehen, VOR jeglicher asynchron await-ender Arbeit
-  // (startCamera() awaited getUserMedia()) — siehe Begruendung in speech.js. Reiner
-  // Selbstschutz-Aufruf (idempotent, feuert nur beim allerersten Aufruf ueberhaupt);
-  // aendert nichts an running/startCamera()-Ablauf.
+  // unlockSpeech() must be called synchronously, right at the start of the direct
+  // click handler, before any asynchronously awaited work (startCamera() awaits
+  // getUserMedia()) — see the rationale in speech.js. This is a self-contained,
+  // idempotent call that only has an effect on the very first invocation; it does
+  // not change the running/startCamera() flow.
   gate.addEventListener("click", function(){ unlockSpeech(); if(!running) startCamera(); });
   retryBtn.addEventListener("click", startCamera);
 
   navStartBtn.addEventListener("click", function(){
-    // neu (TTS-Startup-Fix): zweite, gleichwertige Freischalt-Geste (siehe
-    // speech.js) — in der Praxis bereits durch den vorherigen Gate-Tap erledigt
-    // (Navigation starten ist ohne laufende Kamera nicht erreichbar), aber
-    // ausdruecklich als zusaetzliche, unabhaengige Absicherung erlaubt und
-    // wirkungslos, falls bereits entsperrt (unlockAttempted-Flag).
+    // A second, equally valid unlock gesture (see speech.js) -- in practice already
+    // completed by the earlier gate tap (starting navigation is unreachable without
+    // a running camera), but deliberately allowed here too as an additional,
+    // independent safeguard; a no-op if already unlocked (unlockAttempted flag).
     unlockSpeech();
     if(!running){
       say("Bitte zuerst die Kamera starten.",
@@ -88,14 +82,14 @@ import { renderNavigationUi } from './ui.js';
   muteBtn.addEventListener("click", function(){
     toggleSound();
     muteBtn.firstChild.textContent = soundOn ? "Ton an" : "Ton aus";
-    // neu: cancelSpeech() statt direktem speechSynthesis.cancel() — protokolliert die
-    // dadurch verdraengte Anfrage korrekt als TTS_CANCELLED, statt spurlos zu
-    // verschwinden (Audit-Befund F-10).
+    // Uses cancelSpeech() rather than calling speechSynthesis.cancel() directly --
+    // logs the preempted request correctly as TTS_CANCELLED instead of it silently
+    // disappearing.
     if(!soundOn) cancelSpeech("app.muteToggleOff");
     else say("Ton eingeschaltet", appTtsOpts({interrupt:true, source:"app.muteToggleOn", category:"STATUS"}));
   });
 
-  // ---- Logging-Panel (neu, Feldtest-Instrumentierung) ----
+  // ---- Logging-Panel (Feldtest-Instrumentierung) ----
   logExportBtn.addEventListener("click", function(){
     exportJson();
     say("Log exportiert.", appTtsOpts({interrupt:true, source:"app.logExported", category:"STATUS"}));
@@ -113,13 +107,12 @@ import { renderNavigationUi } from './ui.js';
     o.textContent = NODES[id].name + " (Tag " + id + ")";
     destSel.appendChild(o);
   });
-  // neu (VoiceOver-Fix, Ziel 7): destSel ist ein natives <select> — VoiceOver kuendigt
-  // die gewaehlte Option bereits selbst an. Die bisherigen say()-Aufrufe hier haben
-  // dieselbe Information ein zweites Mal ueber die Anwendungs-TTS gesprochen (Ziel 1-3:
-  // dieselbe Ansage darf nicht doppelt erfolgen). Stattdessen steuert dieser Handler
-  // jetzt ausschliesslich den aktivierten/deaktivierten Zustand von "Navigation
-  // starten" (Ziel 5/6) — ein rein nativer Zustand, den VoiceOver ohnehin selbst
-  // ("deaktiviert"/"aktiviert") ankuendigt, keine zusaetzliche Sprachausgabe noetig.
+  // destSel is a native <select> — VoiceOver already announces the selected option
+  // on its own. Speaking the same information a second time via the application's
+  // TTS would announce it twice, which must be avoided. This handler therefore
+  // controls only the enabled/disabled state of "Navigation starten" — a purely
+  // native state that VoiceOver already announces itself ("disabled"/"enabled"),
+  // so no additional speech output is needed here.
   destSel.addEventListener("change", function(){
     var v = destSel.value ? parseInt(destSel.value, 10) : null;
     var hasDestination = v != null && NODES[v] && NODES[v].destination;
@@ -129,11 +122,10 @@ import { renderNavigationUi } from './ui.js';
   try{
     setDetector(new AR.Detector({ dictionaryName: "APRILTAG_36h11" }));
   }catch(e){
-    // neu: kurzer, unverfaenglicher gesprochener Hinweis statt der rohen Exception —
-    // die technische Detailmeldung ("Interner Fehler beim Laden der Erkennung: " + e)
-    // bleibt UNVERAENDERT im visuellen Fehler-Feld (errMsg), wird aber NICHT mehr
-    // woertlich gesprochen (Audit-Anforderung: "avoid exposing raw technical exception
-    // text through TTS").
+    // Speaks a short, non-technical hint instead of the raw exception — the
+    // technical detail message ("Interner Fehler beim Laden der Erkennung: " + e)
+    // stays unchanged in the visual error field (errMsg), but is never spoken
+    // verbatim, to avoid exposing raw technical exception text through TTS.
     showError("Interner Fehler beim Laden der Erkennung: " + e, {
       source: "camera.detectorLoadError",
       spokenText: "Ein interner Fehler ist beim Starten der Erkennung aufgetreten. " +
@@ -141,10 +133,9 @@ import { renderNavigationUi } from './ui.js';
     });
   }
 
-  // ---- Initiale Bedienelement-Sichtbarkeit (neu, UX-Schritt: State-Rendering) ----
-  // Einmaliger Aufruf beim Anwendungsstart (navigationActive/destinationReached sind
-  // zu diesem Zeitpunkt beide false, siehe nav.js) -- setzt #navEndBtn/#whereBtn auf
-  // den vor dieser Aenderung bereits statisch im HTML vorhandenen sichtbaren Zustand
-  // NICHT laenger fest sichtbar, sondern korrekt eingeklappt/ausgeblendet, bevor die
-  // erste Navigation gestartet wird.
+  // ---- Initiale Bedienelement-Sichtbarkeit ----
+  // Called once at application start (navigationActive/destinationReached are both
+  // false at this point, see nav.js) -- ensures #navEndBtn/#whereBtn, which are
+  // statically visible in the HTML markup, are correctly collapsed/hidden before the
+  // first navigation is started, rather than staying permanently visible.
   renderNavigationUi();
