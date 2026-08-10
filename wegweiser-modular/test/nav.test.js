@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { spokenTexts } from './browser-stubs.js';
 import { destSel } from '../js/dom.js';
 import { EDGE_MAP } from '../js/graph.js';
+import { SETTINGS } from '../js/config.js';
 import * as nav from '../js/nav.js';
 
 function selectDestination(id){
@@ -180,4 +181,115 @@ test('pressing "Wo bin ich?" does not change route progression or expectedTag', 
   assert.equal(nav.segIndex, before.segIndex);
   assert.equal(nav.expectedNextTagId, before.expectedNextTagId);
   assert.equal(nav.currentTagId, before.currentTagId);
+});
+
+// ==================== Off-route warning vs. forward-skip candidate ====================
+// Regression coverage: a detected tag that is AHEAD of the expected position on the
+// active path is a forward-skip candidate and must never trigger nav.offRouteWarning
+// (onOtherTagConfirmed()'s off-route branch) -- that decision belongs exclusively to
+// updateSkipCandidate()/beginTrackingForwardCandidate(), even while its confirmation is
+// still accumulating. Tags absent from the active path, or behind the current position,
+// must keep using the existing off-route/behind-position warnings unchanged.
+//
+// Uses a fake performance.now() clock (installed only for this block, restored
+// afterward) so SETTINGS.wrongTagCooldownMs/candMemoryMs timing is deterministic and
+// independent of how fast the real test process happens to run.
+
+function withFakeClock(startMs, run){
+  var real = performance.now;
+  var t = startMs;
+  performance.now = function(){ return t; };
+  try{
+    return run(function advance(ms){ t += ms; });
+  } finally {
+    performance.now = real;
+  }
+}
+
+// Walks the real start-tag/tracking/reachPoint() chain from Tag 1 to Tag 6 on path
+// [1, 2, 3, 6, 4, 7, 8, 10, 11] (destination 11), leaving expectedNextTagId = 4 -- the
+// exact field-test scenario (expected Tag 4, detected Tag 8).
+function walkToTag4Expected(advance){
+  resetState();
+  selectDestination(11);
+  nav.startNavigation();
+  nav.onStartTagConfirmed(1);
+  var dist = 0.1;
+  nav.setEmaDist(dist);
+  nav.handleTracking(performance.now(), true, dist);
+  advance(50);
+  nav.handleTracking(performance.now(), true, dist); // Tag 1 reached (startTagReachedM)
+  advance(50);
+  for(var i = 0; i < 3; i++){ // reach Tag 2, then Tag 3, then Tag 6
+    nav.onNextTagFound(dist);
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+  }
+  assert.deepEqual(nav.pathTagIds, [1, 2, 3, 6, 4, 7, 8, 10, 11]);
+  assert.equal(nav.currentTagId, 6);
+  assert.equal(nav.expectedNextTagId, 4);
+}
+
+test('a forward-skip candidate ahead on the active path never triggers nav.offRouteWarning, even while confirming', () => {
+  withFakeClock(100000, (advance) => {
+    walkToTag4Expected(advance);
+    spokenTexts.length = 0;
+
+    // Frames 1-5 (below SETTINGS.otherTagFrames): must stay completely silent and must
+    // not mark Tag 8 as reached or retarget yet -- only the confirmation counter runs.
+    for(var i = 1; i <= 5; i++){
+      nav.onOtherTagConfirmed(8);
+      advance(100);
+      assert.ok(
+        !spokenTexts.some((t) => t.includes('nicht auf dem Weg') || t.includes('möglicherweise zurück')),
+        `must not warn while forward candidate confirmation accumulates (frame ${i}), got: ${JSON.stringify(spokenTexts)}`
+      );
+    }
+    assert.equal(nav.currentTagId, 6, 'a forward candidate must not be marked reached merely by detection');
+    assert.equal(nav.expectedNextTagId, 4, 'must not retarget before the real confirmation threshold is reached');
+
+    // Drive the existing forward-skip confirmation to its real threshold.
+    for(var f = 0; f < SETTINGS.otherTagFrames; f++){
+      nav.updateSkipCandidate([{ id: 8, dist: 5 }], performance.now());
+      advance(100);
+    }
+    assert.equal(nav.expectedNextTagId, 8, 'forward skip must retarget tracking to Tag 8');
+    assert.equal(nav.currentTagId, 6, 'forward skip retargets tracking -- it must not be a synthetic arrival');
+    assert.ok(
+      !spokenTexts.some((t) => t.includes('nicht auf dem Weg')),
+      'a confirmed forward skip must still never have spoken an off-route warning'
+    );
+  });
+});
+
+test('a tag absent from the active path still uses the existing off-route warning', () => {
+  withFakeClock(120000, (advance) => {
+    walkToTag4Expected(advance);
+    spokenTexts.length = 0;
+    nav.onOtherTagConfirmed(191); // not present anywhere in pathTagIds
+    assert.ok(
+      spokenTexts.some((t) => t.includes('nicht auf dem Weg')),
+      `expected the existing off-route warning for a tag absent from activePath, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('a tag behind the current position keeps the existing behind-position warning, not a forward candidate', () => {
+  withFakeClock(200000, (advance) => {
+    walkToTag4Expected(advance);
+    spokenTexts.length = 0;
+    nav.onOtherTagConfirmed(3); // already passed (index 2, segIndex 3)
+    assert.ok(
+      spokenTexts.some((t) => t.includes('möglicherweise zurück')),
+      `expected the existing behind-position warning for Tag 3, got: ${JSON.stringify(spokenTexts)}`
+    );
+    assert.ok(
+      !spokenTexts.some((t) => t.includes('nicht auf dem Weg')),
+      'a behind-position tag must not be treated as off-route'
+    );
+    assert.notEqual(nav.expectedNextTagId, 3, 'a behind-position tag must not become a forward candidate');
+  });
 });

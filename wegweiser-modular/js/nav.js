@@ -1445,8 +1445,13 @@ import { record, getTestName } from './logger.js';
     if(offRouteSaid[tagId]) return;      // pro Abschnitt nur einmal
     var now = performance.now();
     if(now - lastWrongTagAt < SETTINGS.wrongTagCooldownMs) return;
-    var p, source;
     var passedIdx = pathTagIds ? pathTagIds.indexOf(tagId) : -1;
+    // Auf dem aktiven Pfad, aber VOR dem erwarteten Tag (Vorgriffs-Kandidat, z.B. ein
+    // uebersprungener Zwischen-Tag): gehoert ausschliesslich der Vorgriffs-Bestaetigung
+    // (updateSkipCandidate()/beginTrackingForwardCandidate()) -- auch waehrend deren
+    // Bestaetigung noch laeuft darf hier weder Off-Route- noch Zurueck-Warnung sprechen.
+    if(passedIdx > segIndex) return;
+    var p, source;
     if(passedIdx >= 0 && passedIdx <= segIndex){
       p = "Sie gehen möglicherweise zurück. Sie sind wieder bei " + markerName(tagId) +
           ". Bitte folgen Sie der letzten Anweisung.";
