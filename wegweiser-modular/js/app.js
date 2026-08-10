@@ -1,3 +1,4 @@
+// GitHub Pages redeploy trigger — no functional changes.
 // ==================== App-Einstiegspunkt (Bedienung, Bootstrap) ====================
 // Verbatim aus wegweiser-v13.html (Abschnitte "---- Bedienung ----",
 // "---- Zielauswahl aus NODES ----" und die Detector-Instanziierung am Ende des IIFE),
