@@ -217,7 +217,7 @@
     // ---- Essbereich-Anbindung 4->9 (neu, physisch verifiziert) ----
     // Verifiziert: von Tag 4 aus geht es weiterhin GERADEAUS (kein Abbiegen im
     // Gehweg) -- departureAction bleibt "continue-straight", exakt wie bei
-    // 4->7 und 4->5. Nur die SUCHRICHTUNG der Kamera verschiebt sich leicht
+    // 4->7. Nur die SUCHRICHTUNG der Kamera verschiebt sich leicht
     // nach links, um die Markierung zu finden (searchHint unten) -- das ist
     // KEIN Abbiegen und wird daher nicht als departureAction kodiert.
     //
@@ -261,6 +261,45 @@
       departureAction: "continue-straight",
       locationDescription:
         "Sie befinden sich im Korridor zwischen dem Büro von Leonie und der Ecke." },
+
+    // ---- Tischtennis-Korrektur 7->5 (neu, Feldtest-Korrektur) ----
+    // Ein Feldtest zeigte, dass die vorherige direkte Kante 4->5 physisch NICHT
+    // begehbar war: nach Tag 4 fuehrt der tatsaechliche Weg GERADEAUS weiter zu
+    // Tag 7 (bestehende Kante 4->7, unveraendert), erst BEI Tag 7 biegt der Weg
+    // nach RECHTS Richtung Tischtennis ab. Die alte Kante 4->5 wurde entfernt
+    // (nicht nur "versteckt" -- der Graph darf keine ungehbaren Kanten mehr
+    // enthalten). departureAction gehoert daher zu 7->5 (Handlung BEI Tag 7),
+    // nicht zu 4->7 -- 4->7 bleibt unveraendert "continue-straight" und die
+    // bestehende Kante 7->8 (Ecke) direkt oberhalb ist davon vollstaendig
+    // unberuehrt.
+    //
+    // allowedPredecessors: [4] -- dieselbe generische Richtungs-Sperre wie bei
+    // 3->15 (siehe dort): diese Kante ist NUR begehbar, wenn Tag 7 gerade ueber
+    // Tag 4 erreicht wurde (Weg zu Tischtennis), NICHT ueber Tag 8 (Rueckweg
+    // 11->10->8->7->4->6->3 s.u.) -- das hier verifizierte "Biegen Sie rechts
+    // ab." gilt ausschliesslich fuer die Ankunft ueber Tag 4, nicht fuer eine
+    // Ankunft aus der Gegenrichtung. Ein frischer Navigationsstart direkt bei
+    // Tag 7 hat keinen widersprechenden Vorgaenger und bleibt daher erlaubt
+    // (findPath(7,5) liefert [7,5]).
+    //
+    // reachedM: 1,0 -- eigene, kleinere Ankunftsschwelle (Standard 1,8 m) statt
+    // einer Aenderung an SETTINGS.reachedM: die Strecke von Tag 7 zu Tag 5 ist
+    // kurz, und unmittelbar links neben Tag 5 befindet sich eine Tuer -- eine
+    // zu grosszuegige Schwelle koennte die Ankunft zu frueh ausloesen.
+    { from:7, to:5,
+      found:
+        "Orientierungspunkt gefunden: Tischtennis. Die Strecke ist kurz.",
+      reached:
+        "Sie sind bei Tischtennis. Die Tür befindet sich links.",
+      searchHint:
+        "Nach dem Rechtsabbiegen: halten Sie das Smartphone gerade vor sich und " +
+        "bewegen Sie es langsam nach links und rechts, bis die nächste Markierung " +
+        "erkannt wird.",
+      departureAction: "turn-right",
+      allowedPredecessors: [4],
+      reachedM: 1.0,
+      locationDescription:
+        "Sie befinden sich zwischen dem Büro von Leonie und Tischtennis." },
 
     { from:8, to:10,
       found:
@@ -335,20 +374,6 @@
       locationDescription:
         "Sie befinden sich zwischen Müggelsee und dem Ende des Büros." },
 
-    { from:4, to:5,
-      found:
-        "Orientierungspunkt gefunden: Tischtennis. Gehen Sie geradeaus, ungefähr elf Meter, " +
-        "in Richtung Küche. Die Küchentür befindet sich links.",
-      reached:
-        "Sie sind bei Tischtennis. Die Küchentür befindet sich links.",
-      searchHint:
-        "Wenden Sie sich in Richtung Küche und bewegen Sie das Smartphone langsam " +
-        "nach links und rechts, bis die Markierung bei Tischtennis erkannt wird.",
-      // Tag 5 hat ebenfalls keine Nachfolge-Kante -> immer Ziel; siehe Kommentar oben.
-      departureAction: "continue-straight",
-      locationDescription:
-        "Sie befinden sich zwischen dem Büro von Martin und Tischtennis." },
-
     // ---- Rueckwaerts-Experiment 11->10->8->7->4->6->3 (neu) ----
     // Bestaetigt: die gesamte Strecke von Tag 11 bis Tag 3 verlaeuft geradeaus,
     // keine Abbiegung noetig -- departureAction daher fuer alle sechs Kanten
@@ -358,7 +383,8 @@
     // Orientierungspunkt-Namen -- Ziel dieses Experiments ist, den Graph-Ablauf
     // auf einer durchgehend geraden Strecke zu beobachten, nicht jede
     // Zwischenmarkierung anzusagen. Betrifft ausschliesslich dieses Experiment;
-    // Tag 1, Tag 2 und die Kante 4->5 sind bewusst NICHT gespiegelt.
+    // Tag 1, Tag 2 und die Tischtennis-Verzweigung (7->5, s.o.) sind bewusst
+    // NICHT gespiegelt.
     //
     // Rueckweg 14->13->12->11 (neu, physisch begangen und verifiziert):
     // verifizierte Handlungen 14->13 geradeaus, 13->12 links abbiegen,
@@ -472,7 +498,7 @@
     // zu 1->2). Tag 16 ist das Ende dieser Rueckwaerts-Route (Ausgang) -- KEINE
     // Kante zurueck zu Tag 1 oder Tag 2, keine Verbindung/Kopie zu deren Daten.
     //
-    // allowedPredecessors (neu, EINZIGE Kante mit diesem Feld): 3->15 ist
+    // allowedPredecessors (siehe auch 7->5 oben, dieselbe generische Sperre): 3->15 ist
     // RICHTUNGSABHAENGIG -- nur begehbar, wenn Tag 3 gerade ueber Tag 6 erreicht
     // wurde (Rueckweg), NICHT ueber Tag 2 (Hinweg in die Bueros). findPath() in
     // graph.js wertet dieses Feld anhand des tatsaechlichen Vorgaenger-Tags im
@@ -508,7 +534,12 @@
     2:  "Ziel erreicht. Sie sind beim Büro von Patrik. Die Tür ist links.",
     3:  "Ziel erreicht. Sie sind am Eingang Flex. Die Tür befindet sich links.",
     4:  "Ziel erreicht. Sie sind bei Martin. Der Eingang Martin liegt vor Ihnen.",
-    5:  "Ziel erreicht. Sie sind bei Tischtennis. Die Küchentür befindet sich links.",
+    // Feldtest-Korrektur (neu): der bisherige Text ("Küchentür...", verfasst
+    // fuer die alte, physisch ungueltige Kante 4->5) beschrieb Tuer/Richtung
+    // fuer eine nie tatsaechlich begangene Anflugrichtung. Ersetzt durch die
+    // fuer die verifizierte Ankunft ueber 7->5 bestaetigte Tuer links, ohne
+    // "Küche"/Richtungs-Zusatz, der fuer DIESE Anflugrichtung nicht bestaetigt ist.
+    5:  "Ziel erreicht. Sie sind bei Tischtennis. Die Tür befindet sich links.",
     7:  "Ziel erreicht. Sie sind bei Leonie. Die Tür befindet sich links.",
     // Essbereich (neu, Zonen-Ankunft): bewusst OHNE Bezug zur Markierung selbst
     // -- das physische Ziel ist der Tisch, nicht die Wand, an der Tag 9 haengt.

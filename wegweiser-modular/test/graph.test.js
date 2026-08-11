@@ -126,7 +126,7 @@ test('edge 4->9 implements zone-destination arrival via the existing reachedM ov
 
 test('other existing destinations keep normal distance-based arrival (no reachedM override introduced by this change)', () => {
   const EDGES_EXPECTED_WITHOUT_REACHEDM_OVERRIDE = [
-    '1->2', '2->3', '3->6', '6->4', '4->7', '7->8', '8->10', '10->11', '4->5',
+    '1->2', '2->3', '3->6', '6->4', '4->7', '7->8', '8->10', '10->11',
   ];
   for (const key of EDGES_EXPECTED_WITHOUT_REACHEDM_OVERRIDE) {
     const edge = EDGE_MAP[key];
@@ -193,12 +193,15 @@ test('every reverse edge for the 11->3 experiment explicitly declares its own de
 // Expected arrays derived by hand-tracing findPath()'s BFS against the current
 // EDGES/ADJ (see the report preceding this file's creation).
 
+// Tischtennis-Korrektur (neu): a field test found the previous direct edge
+// 4->5 was physically unwalkable -- the real path continues straight from
+// Tag 4 to Tag 7, then turns right toward Tag 5 (see edge 7->5).
 const FORWARD_ROUTES = [
-  { from: 1, to: 5, expected: [1, 2, 3, 6, 4, 5] },
+  { from: 1, to: 5, expected: [1, 2, 3, 6, 4, 7, 5] },
   { from: 1, to: 11, expected: [1, 2, 3, 6, 4, 7, 8, 10, 11] },
-  { from: 2, to: 5, expected: [2, 3, 6, 4, 5] },
+  { from: 2, to: 5, expected: [2, 3, 6, 4, 7, 5] },
   { from: 2, to: 11, expected: [2, 3, 6, 4, 7, 8, 10, 11] },
-  { from: 4, to: 5, expected: [4, 5] },
+  { from: 4, to: 5, expected: [4, 7, 5] },
   { from: 4, to: 11, expected: [4, 7, 8, 10, 11] },
 ];
 
@@ -287,49 +290,53 @@ test('reverse-experiment route 11->3: every segment has valid edge metadata', ()
   }
 });
 
-// ==================== Side effects of reconnecting Tag 4 (documented, not fixed) ====================
-// The six reverse edges above reconnect Tag 4 -- a branch point in the forward
-// graph -- from the reverse direction. findPath()/ADJ have no concept of
-// "arrival direction", so the ORIGINAL, untouched edge 4->5 becomes traversable
-// from this new reverse side too. This is an EXPECTED CONSEQUENCE of the graph
-// shape, not a BFS bug, and is deliberately left as-is (not guarded, not
-// disabled, not given predecessor-dependent metadata) pending a graph-design
-// decision -- see the implementation report for options.
+// ==================== Tischtennis-Korrektur: the former Tag-4 reconnection ====================
+// ==================== side effect is now closed by allowedPredecessors ====================
+// This section previously documented an OPEN, unfixed side effect: the six
+// reverse edges above reconnect Tag 4 from the reverse direction, and since
+// findPath()/ADJ had no concept of "arrival direction", the old direct edge
+// 4->5 became traversable from Tags 11/10/8/7 too -- using departureAction/
+// searchHint text that was never physically verified for that direction.
 //
-// SAFETY: these Tag-5 paths are mathematically reachable right now, but the
-// 4->5 edge's departureAction/searchHint/ARRIVALS text were authored assuming
-// arrival at Tag 4 via Tag 6 (the original forward direction) and have NOT
-// been physically verified for arrival via Tag 7 (this reverse experiment).
-// These paths MUST NOT be used in the current field experiment. The only
-// approved experimental route remains 11->10->8->7->4->6->3 above.
+// The field test that produced the 7->5 correction above resolved this at
+// the root: edge 4->5 no longer exists at all (it was physically invalid --
+// see the 7->5 comment), and its replacement, 7->5, carries
+// allowedPredecessors: [4] -- the exact same generic mechanism as 3->15 --
+// so it is walkable only when Tag 7 is reached via Tag 4 (the verified
+// Tischtennis approach), never via Tag 8 (the reverse-experiment direction).
+// The former "mathematically reachable but unapproved" paths are therefore
+// no longer reachable at all, rather than merely staying undocumented.
 
-test(
-  'findPath(11, 5): reachable via the reconnected Tag 4 branch -- NOT approved for use, unverified 4->5 instruction',
-  () => {
-    assert.deepEqual(findPath(11, 5), [11, 10, 8, 7, 4, 5]);
-  }
-);
+test('findPath(11, 5), findPath(10, 5), findPath(8, 5): no longer reachable -- the old unverified 4->5 path is gone and 7->5 is gated to arrival via Tag 4 only', () => {
+  assert.equal(findPath(11, 5), null);
+  assert.equal(findPath(10, 5), null);
+  assert.equal(findPath(8, 5), null);
+});
 
-test(
-  'findPath(10, 5): reachable via the same reconnected branch -- NOT approved for use',
-  () => {
-    assert.deepEqual(findPath(10, 5), [10, 8, 7, 4, 5]);
-  }
-);
+test('findPath(7, 5): a fresh start at Tag 7 has no contradicting predecessor, so the verified 7->5 turn remains available', () => {
+  assert.deepEqual(findPath(7, 5), [7, 5]);
+});
 
-test(
-  'findPath(8, 5): reachable via the same reconnected branch -- NOT approved for use',
-  () => {
-    assert.deepEqual(findPath(8, 5), [8, 7, 4, 5]);
-  }
-);
+test('edge 7->5 carries the verified right-turn semantics', () => {
+  const edge = EDGE_MAP['7->5'];
+  assert.ok(edge, 'missing edge 7->5');
+  assert.equal(edge.departureAction, 'turn-right');
+  assert.equal(isTurnAction(edge), true);
+  assert.equal(departureActionSpeech(edge), 'Biegen Sie rechts ab.');
+});
 
-test(
-  'findPath(7, 5): reachable via the same reconnected branch -- NOT approved for use',
-  () => {
-    assert.deepEqual(findPath(7, 5), [7, 4, 5]);
-  }
-);
+test('edge 7->8 (toward the corner/Drucker/end-of-corridor branch) is unaffected by the new 7->5 turn', () => {
+  const edge = EDGE_MAP['7->8'];
+  assert.ok(edge, 'missing edge 7->8');
+  assert.equal(edge.departureAction, 'continue-straight');
+  assert.equal(isTurnAction(edge), false);
+});
+
+test('edge 7->5 uses its own smaller arrival threshold (reachedM: 1.0), not the global SETTINGS.reachedM', () => {
+  const edge = EDGE_MAP['7->5'];
+  assert.equal(edge.reachedM, 1.0);
+  assert.ok(edge.reachedM < SETTINGS.reachedM, 'the Tag 5 approach must use a smaller-than-default threshold');
+});
 
 // These two reuse only the two already field-verified edges (4->6, 6->3) --
 // unlike the Tag-5 case above, the edge DATA itself is verified
@@ -466,12 +473,13 @@ test('a route starting at Tag 14 travels back through Tags 13/12/11 and then the
   assert.deepEqual(findPath(14, 16), [14, 13, 12, 11, 10, 8, 7, 4, 6, 3, 15, 16]);
 });
 
-test(
-  'findPath(14, 5): reachable via the same already-documented Tag-4 reconnection side effect -- NOT approved for use',
-  () => {
-    assert.deepEqual(findPath(14, 5), [14, 13, 12, 11, 10, 8, 7, 4, 5]);
-  }
-);
+// Tischtennis-Korrektur (neu): this previously-reachable side-effect path no
+// longer exists -- edge 4->5 was removed (physically invalid) and its
+// replacement 7->5 is gated to arrival via Tag 4 only (allowedPredecessors),
+// which never happens on this reverse chain (Tag 7 is reached via Tag 8 here).
+test('findPath(14, 5): no longer reachable -- 4->5 is gone and 7->5 is gated to arrival via Tag 4 only', () => {
+  assert.equal(findPath(14, 5), null);
+});
 
 test('office-extension route (11->12->13->14): every segment has valid edge metadata', () => {
   const path = [11, 12, 13, 14];
