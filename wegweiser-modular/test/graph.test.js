@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 
 import { NODES, EDGES, ARRIVALS } from '../js/graph-data.js';
 import { EDGE_MAP, findPath, isTurnAction, departureActionSpeech } from '../js/graph.js';
+import { SETTINGS } from '../js/config.js';
 
 const ALLOWED_DEPARTURE_ACTIONS = ['turn-left', 'turn-right', 'continue-straight'];
 
@@ -79,10 +80,63 @@ test('Tag 16 (Ausgang) is a reverse-route-only destination, not reachable from T
   assert.deepEqual(findPath(11, 16), [11, 10, 8, 7, 4, 6, 3, 15, 16]);
 });
 
-test('Tag 9 is disconnected from route edges and is not selectable', () => {
-  assert.equal(NODES[9].destination, false);
-  const referencesTag9 = EDGES.some((e) => e.from === 9 || e.to === 9);
-  assert.equal(referencesTag9, false, 'Tag 9 must not appear in any route edge');
+// ==================== Essbereich (Tag 9) zone destination ====================
+// Replaces the old "Tag 9 stays disconnected" assumption above, which no
+// longer holds: Tag 9 is now a real, physically verified destination. The
+// AprilTag is mounted on a wall near the dining table, not at the table
+// itself -- reaching it should not require walking all the way up to the
+// wall. Verified: from Tag 4 the walking path stays straight (no real turn);
+// only the camera/search direction shifts slightly left.
+
+test('Tag 9 (Essbereich) is a selectable destination', () => {
+  assert.ok(NODES[9], 'Tag 9 must exist as a node');
+  assert.equal(NODES[9].destination, true);
+});
+
+test('findPath(4, 9) and findPath(1, 9) reach the Essbereich', () => {
+  assert.deepEqual(findPath(4, 9), [4, 9]);
+  assert.deepEqual(findPath(1, 9), [1, 2, 3, 6, 4, 9]);
+});
+
+test('edge 4->9 uses continue-straight, not turn-left -- there is no real turn in the walking path', () => {
+  const edge = EDGE_MAP['4->9'];
+  assert.ok(edge, 'missing edge 4->9');
+  assert.equal(edge.departureAction, 'continue-straight');
+  assert.equal(isTurnAction(edge), false);
+});
+
+test('edge 4->9 searchHint tells the user to scan/point the camera slightly left, not to turn', () => {
+  const edge = EDGE_MAP['4->9'];
+  assert.ok(edge.searchHint, 'edge 4->9 must have a searchHint');
+  assert.match(edge.searchHint, /links/, 'searchHint must mention scanning left');
+  assert.doesNotMatch(
+    edge.searchHint,
+    /biegen|abbiegen/i,
+    'searchHint must describe a camera scan, not a turn instruction'
+  );
+});
+
+test('edge 4->9 implements zone-destination arrival via the existing reachedM override, not a new mechanism', () => {
+  const edge = EDGE_MAP['4->9'];
+  assert.ok(
+    typeof edge.reachedM === 'number' && edge.reachedM > SETTINGS.reachedM,
+    'edge 4->9 must use a larger-than-default reachedM so arrival does not require reaching the wall-mounted marker'
+  );
+});
+
+test('other existing destinations keep normal distance-based arrival (no reachedM override introduced by this change)', () => {
+  const EDGES_EXPECTED_WITHOUT_REACHEDM_OVERRIDE = [
+    '1->2', '2->3', '3->6', '6->4', '4->7', '7->8', '8->10', '10->11', '4->5',
+  ];
+  for (const key of EDGES_EXPECTED_WITHOUT_REACHEDM_OVERRIDE) {
+    const edge = EDGE_MAP[key];
+    assert.ok(edge, `missing edge ${key}`);
+    assert.equal(
+      edge.reachedM,
+      undefined,
+      `${key} must keep using SETTINGS.reachedM (no per-edge override) -- global threshold must stay unaffected`
+    );
+  }
 });
 
 // Reverse edges are now intentional for the 11->3 experiment (see below), so the
@@ -361,11 +415,109 @@ test('Tag 16 is a selectable destination; Tag 15 is not', () => {
   assert.equal(NODES[15].destination, false);
 });
 
-test('Tags 12, 13, and 14 remain disconnected and unavailable as destinations', () => {
+// ==================== Büro-Erweiterung 11->12->13->14 ====================
+// Extends the corridor past Tag 11 with three physically walked and verified
+// tags (measured via "markers (newTags_16).json"): Tag 11 is no longer a dead
+// end -- it now has a real successor. Replaces the old blanket "12/13/14 stay
+// disconnected" assumption above, which no longer holds (mirrors how the
+// Tag 16 test above replaced the old "every destination reachable" blanket
+// check when Tag 16 was added).
+
+test('Tags 12, 13, and 14 exist and are selectable destinations, like the other named offices', () => {
   for (const id of [12, 13, 14]) {
-    assert.equal(NODES[id], undefined, `Tag ${id} must not exist as a node yet`);
-    const referencesTag = EDGES.some((e) => e.from === id || e.to === id);
-    assert.equal(referencesTag, false, `Tag ${id} must not appear in any route edge`);
+    assert.ok(NODES[id], `Tag ${id} must exist as a node`);
+    assert.equal(NODES[id].destination, true, `Tag ${id} must be a selectable destination`);
+  }
+});
+
+test('findPath(11, 14) reaches the office extension in the physically verified order', () => {
+  assert.deepEqual(findPath(11, 14), [11, 12, 13, 14]);
+});
+
+test('findPath(14, 11) returns via the physically verified reverse order', () => {
+  assert.deepEqual(findPath(14, 11), [14, 13, 12, 11]);
+});
+
+test('the six new Büro-Erweiterung edges use exactly the physically verified departureAction', () => {
+  const EXPECTED_ACTIONS = {
+    '11->12': 'continue-straight',
+    '12->13': 'turn-right',
+    '13->14': 'continue-straight',
+    '14->13': 'continue-straight',
+    '13->12': 'turn-left',
+    '12->11': 'continue-straight',
+  };
+  for (const key of Object.keys(EXPECTED_ACTIONS)) {
+    const edge = EDGE_MAP[key];
+    assert.ok(edge, `missing edge ${key}`);
+    assert.equal(
+      edge.departureAction,
+      EXPECTED_ACTIONS[key],
+      `${key}: expected departureAction "${EXPECTED_ACTIONS[key]}"`
+    );
+  }
+});
+
+test('Tag 14 (Ende des Büros) is reachable from Tag 1, continuing straight past Tag 11', () => {
+  assert.deepEqual(findPath(1, 14), [1, 2, 3, 6, 4, 7, 8, 10, 11, 12, 13, 14]);
+});
+
+test('a route starting at Tag 14 travels back through Tags 13/12/11 and then the existing reverse graph to the exit', () => {
+  assert.deepEqual(findPath(14, 16), [14, 13, 12, 11, 10, 8, 7, 4, 6, 3, 15, 16]);
+});
+
+test(
+  'findPath(14, 5): reachable via the same already-documented Tag-4 reconnection side effect -- NOT approved for use',
+  () => {
+    assert.deepEqual(findPath(14, 5), [14, 13, 12, 11, 10, 8, 7, 4, 5]);
+  }
+);
+
+test('office-extension route (11->12->13->14): every segment has valid edge metadata', () => {
+  const path = [11, 12, 13, 14];
+  for (let i = 0; i < path.length - 1; i++) {
+    const key = `${path[i]}->${path[i + 1]}`;
+    const edge = EDGE_MAP[key];
+    assert.ok(edge, `missing edge metadata for segment ${key}`);
+    assert.ok(
+      ALLOWED_DEPARTURE_ACTIONS.includes(edge.departureAction),
+      `segment ${key} has invalid departureAction "${edge.departureAction}"`
+    );
+
+    const spoken = departureActionSpeech(edge);
+    assert.equal(typeof spoken, 'string');
+    assert.ok(spoken.length > 0, `segment ${key} produced empty spoken text`);
+
+    const expectedIsTurn = edge.departureAction !== 'continue-straight';
+    assert.equal(
+      isTurnAction(edge),
+      expectedIsTurn,
+      `segment ${key}: isTurnAction() disagreed with departureAction "${edge.departureAction}"`
+    );
+  }
+});
+
+test('reverse office-extension route (14->13->12->11): every segment has valid edge metadata', () => {
+  const path = [14, 13, 12, 11];
+  for (let i = 0; i < path.length - 1; i++) {
+    const key = `${path[i]}->${path[i + 1]}`;
+    const edge = EDGE_MAP[key];
+    assert.ok(edge, `missing edge metadata for segment ${key}`);
+    assert.ok(
+      ALLOWED_DEPARTURE_ACTIONS.includes(edge.departureAction),
+      `segment ${key} has invalid departureAction "${edge.departureAction}"`
+    );
+
+    const spoken = departureActionSpeech(edge);
+    assert.equal(typeof spoken, 'string');
+    assert.ok(spoken.length > 0, `segment ${key} produced empty spoken text`);
+
+    const expectedIsTurn = edge.departureAction !== 'continue-straight';
+    assert.equal(
+      isTurnAction(edge),
+      expectedIsTurn,
+      `segment ${key}: isTurnAction() disagreed with departureAction "${edge.departureAction}"`
+    );
   }
 });
 
