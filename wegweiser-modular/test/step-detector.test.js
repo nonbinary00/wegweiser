@@ -375,3 +375,126 @@ test('stop() clears any pending warm-up timer via the injected clearTimeout', ()
   detector.stop();
   assert.equal(cleared.length, 1);
 });
+
+// ==================== Diagnostic sub-threshold peaks (calibration-only) ====================
+// The onPeak callback (third start() parameter) reports one event per finished
+// motion excursion whose deviation reached diagnosticPeakThreshold (0.6) but
+// which did NOT produce a counted step -- calibration evidence for cautious/
+// shuffling steps that currently fail the 1.5 motionThreshold. STEP_DETECTED
+// semantics are untouched; without the callback no diagnostics exist at all.
+//
+// Deviation math used below: after baseline init at magnitude b, one sample of
+// magnitude m yields deviation = (1 - baselineAlpha) * (m - b) = 0.95 * (m - b).
+// So m = b + 1.0 gives deviation ~0.95 (between the 0.6 floor and the 1.5
+// step threshold), and m = b + 0.3 gives ~0.285 (below the floor).
+
+function makePeakDetector(overrides){
+  const peaks = [];
+  const steps = [];
+  const detector = createStepDetector(
+    Object.assign({ warmupMs: 0 }, overrides || {}),
+    { window: makeFakeWindow(), now: () => 0 }
+  );
+  detector.start(
+    (count) => steps.push(count),
+    null,
+    (peak) => peaks.push(peak)
+  );
+  return { detector, peaks, steps };
+}
+
+test('a clear above-threshold step produces exactly one STEP_DETECTED and no diagnostic peak (no duplication)', () => {
+  const { detector, peaks, steps } = makePeakDetector();
+  detector.feedSample(0, 0, 9.8, 0);            // baseline init
+  detector.feedSample(0, 0, 9.8 + 3, 300);      // deviation ~2.85 -> counted step
+  detector.feedSample(0, 0, 9.8, 350);          // release -> excursion ends
+  assert.equal(detector.getStepCount(), 1);
+  assert.deepEqual(steps, [1]);
+  assert.equal(peaks.length, 0, 'an excursion that produced a counted step must not additionally emit a diagnostic peak');
+});
+
+test('a meaningful sub-threshold peak produces exactly one diagnostic event with the excursion maximum', () => {
+  const { detector, peaks } = makePeakDetector();
+  detector.feedSample(0, 0, 9.8, 0);            // baseline init
+  detector.feedSample(0, 0, 9.8 + 1.0, 300);    // deviation ~0.95: above 0.6 floor, below 1.5 threshold
+  detector.feedSample(0, 0, 9.8, 350);          // release
+  assert.equal(peaks.length, 1);
+  assert.ok(peaks[0].deviation > 0.6 && peaks[0].deviation < 1.5,
+    `expected a sub-threshold deviation, got ${peaks[0].deviation}`);
+  assert.equal(peaks[0].crossedStepThreshold, false);
+  assert.equal(peaks[0].motionThreshold, DEFAULT_STEP_DETECTOR_CONFIG.motionThreshold);
+  assert.equal(peaks[0].diagnosticPeakThreshold, DEFAULT_STEP_DETECTOR_CONFIG.diagnosticPeakThreshold);
+});
+
+test('tiny sensor noise below the diagnostic floor produces no diagnostic peaks', () => {
+  const { detector, peaks } = makePeakDetector();
+  detector.feedSample(0, 0, 9.8, 0);
+  for(let t = 100; t <= 1000; t += 100){
+    detector.feedSample(0, 0, 9.8 + 0.3, t);    // deviation ~0.285 < 0.6 floor
+    detector.feedSample(0, 0, 9.8, t + 50);
+  }
+  assert.equal(peaks.length, 0);
+});
+
+test('one prolonged movement staying above the floor emits exactly one diagnostic event', () => {
+  const { detector, peaks } = makePeakDetector();
+  detector.feedSample(0, 0, 9.8, 0);
+  for(let i = 0; i < 6; i++){
+    detector.feedSample(0, 0, 9.8 + 1.0, 100 + i * 50);  // sustained sub-threshold movement
+  }
+  detector.feedSample(0, 0, 9.8, 500);          // release
+  assert.equal(peaks.length, 1, 'a sustained excursion must produce one event, not one per sample');
+});
+
+test('diagnostic peaks never alter the step count', () => {
+  const { detector, peaks } = makePeakDetector();
+  detector.feedSample(0, 0, 9.8, 0);
+  detector.feedSample(0, 0, 9.8 + 1.0, 300);
+  detector.feedSample(0, 0, 9.8, 350);
+  detector.feedSample(0, 0, 9.8 + 1.2, 700);
+  detector.feedSample(0, 0, 9.8, 750);
+  assert.equal(peaks.length, 2);
+  assert.equal(detector.getStepCount(), 0, 'sub-threshold peaks must not be counted as steps');
+});
+
+test('diagnostics are disabled when no onPeak callback is passed -- step counting works unchanged', () => {
+  const detector = createStepDetector({ warmupMs: 0 }, { window: makeFakeWindow(), now: () => 0 });
+  detector.start(); // no onStep, no onPeak -- must not throw on any path
+  detector.feedSample(0, 0, 9.8, 0);
+  detector.feedSample(0, 0, 9.8 + 1.0, 300);    // sub-threshold excursion, silently untracked
+  detector.feedSample(0, 0, 9.8, 350);
+  detector.feedSample(0, 0, 9.8 + 3, 700);      // real step
+  assert.equal(detector.getStepCount(), 1);
+});
+
+test('reset() clears an in-flight diagnostic excursion', () => {
+  const { detector, peaks } = makePeakDetector();
+  detector.feedSample(0, 0, 9.8, 0);
+  detector.feedSample(0, 0, 9.8 + 1.0, 300);    // excursion active
+  detector.reset();                              // must discard it
+  detector.feedSample(0, 0, 9.8, 400);          // re-initializes baseline (post-reset first sample)
+  detector.feedSample(0, 0, 9.8, 450);          // would have been the release sample
+  assert.equal(peaks.length, 0, 'an excursion interrupted by reset() must not be reported');
+});
+
+test('an above-threshold peak rejected by the minimum step interval IS reported, marked crossedStepThreshold', () => {
+  const { detector, peaks, steps } = makePeakDetector();
+  detector.feedSample(0, 0, 9.8, 0);
+  detector.feedSample(0, 0, 9.8 + 3, 10);       // counted step (t=10)
+  detector.feedSample(0, 0, 9.8, 20);           // release + re-arm
+  detector.feedSample(0, 0, 9.8 + 3, 100);      // 90ms later: above threshold but < minStepIntervalMs -> rejected as step
+  detector.feedSample(0, 0, 9.8, 150);          // release
+  assert.deepEqual(steps, [1], 'the second peak must not be counted as a step');
+  assert.equal(peaks.length, 1, 'the rejected above-threshold excursion is exactly the calibration evidence wanted');
+  assert.equal(peaks[0].crossedStepThreshold, true);
+});
+
+test('excursions during the warm-up window are never reported as diagnostic peaks', () => {
+  const peaks = [];
+  const detector = createStepDetector({ warmupMs: 400 }, { window: makeFakeWindow(), now: () => 0 });
+  detector.start(null, null, (peak) => peaks.push(peak));
+  detector.feedSample(0, 0, 9.8, 0);            // baseline init, t=0
+  detector.feedSample(0, 0, 9.8 + 1.0, 100);    // inside warm-up
+  detector.feedSample(0, 0, 9.8, 150);          // inside warm-up
+  assert.equal(peaks.length, 0);
+});

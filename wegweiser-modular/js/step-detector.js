@@ -53,7 +53,22 @@ export var DEFAULT_STEP_DETECTOR_CONFIG = {
   // ins Gewicht. 400ms ist kurz/praktikabel (keine willkuerliche lange
   // Verzoegerung), aber lang genug fuer mehrere devicemotion-Ereignisse, in
   // denen sich die EMA-Basislinie bei ruhig gehaltenem Telefon einschwingt.
-  warmupMs: 400
+  warmupMs: 400,
+  // NUR Kalibrierungs-Diagnostik, KEINE zweite Schritt-Schwelle: Untergrenze
+  // (m/s^2 Abweichung von der Basislinie), ab der eine Bewegungs-Exkursion
+  // als "bedeutsamer lokaler Peak" verfolgt und -- falls sie KEINEN
+  // gezaehlten Schritt ausloest -- einmalig als Diagnose-Peak gemeldet wird
+  // (siehe onPeak in createStepDetector()). Zweck: Feldtest-Beleg, ob
+  // vorsichtige/schlurfende Schritte Ausschlaege im Bereich ~0,7-1,4
+  // erzeugen, die an der aktuellen motionThreshold (1,5) scheitern.
+  // 0,6 gewaehlt, weil (a) die kleinste im Feldtest interessierende
+  // Kandidaten-Abweichung ~0,7 betraegt (die Untergrenze muss darunter
+  // liegen, sonst waeren genau diese Peaks unsichtbar) und (b) reines
+  // Halte-Zittern nach denselben Feldtest-Logs deutlich darunter bleibt --
+  // bewusst NICHT tiefer (z.B. 0,3), um kein Rausch-Geflacker zu
+  // protokollieren. Wird zusammen mit den Schritt-Schwellen erst nach
+  // Auswertung der neuen Kalibrierungs-Logs nachjustiert.
+  diagnosticPeakThreshold: 0.6
 };
 
 // Betrags-Magnitude des 3D-Beschleunigungsvektors -- rotationsunabhaengig
@@ -158,8 +173,61 @@ export function createStepDetector(config, deps){
   var startedAt = null;
   var warmupTimer = null;
 
+  // ---- Diagnose-Peak-Zustand (NUR Kalibrierung, siehe diagnosticPeakThreshold
+  // oben). Getrennt vom armed/release-Zustand in processSample(): der dortige
+  // Zustand gehoert zur SCHRITT-Erkennung (Schwelle 1,5) und darf fuer die
+  // Diagnose (Untergrenze 0,6) weder mitbenutzt noch veraendert werden --
+  // kleinster eigener Zustand statt Umbau der reinen Kernfunktion. ----
+  var onPeakCb = null;
+  var peakActive = false;          // Exkursion >= diagnosticPeakThreshold laeuft
+  var peakMaxDeviation = 0;        // groesster Ausschlag DIESER Exkursion
+  var peakProducedStep = false;    // Exkursion hat bereits STEP_DETECTED erzeugt
+
+  function resetPeakState(){
+    peakActive = false;
+    peakMaxDeviation = 0;
+    peakProducedStep = false;
+  }
+
   function inWarmup(atTime){
     return startedAt != null && (atTime - startedAt) < cfg.warmupMs;
+  }
+
+  // Ein Diagnose-Peak = EINE zusammenhaengende Exkursion der Abweichung ueber
+  // diagnosticPeakThreshold: steigt -> lokales Maximum wird mitgefuehrt ->
+  // faellt wieder unter die Ausloese-Untergrenze * releaseRatio (dieselbe
+  // Hysterese-Idee wie beim armed/release der Schritt-Erkennung, gegen
+  // Geflacker um die Untergrenze) -> GENAU EIN Ereignis. Eine Exkursion, die
+  // einen gezaehlten Schritt erzeugt hat, wird NICHT zusaetzlich gemeldet
+  // (STEP_DETECTED traegt die Information bereits); eine Exkursion, die die
+  // Schritt-Schwelle zwar erreichte, aber verworfen wurde (Mindestabstand/
+  // Warm-up), WIRD gemeldet, mit crossedStepThreshold:true -- genau diese
+  // Faelle sind Kalibrierungs-Beleg. Waehrend des Warm-ups wird nichts
+  // verfolgt (Basislinie noch nicht eingeschwungen, Werte unzuverlaessig).
+  function trackDiagnosticPeak(deviation, stepAccepted, atTime){
+    if(!onPeakCb) return;
+    if(inWarmup(atTime)){ resetPeakState(); return; }
+    if(!peakActive){
+      if(deviation >= cfg.diagnosticPeakThreshold){
+        peakActive = true;
+        peakMaxDeviation = deviation;
+        peakProducedStep = stepAccepted;
+      }
+      return;
+    }
+    if(deviation > peakMaxDeviation) peakMaxDeviation = deviation;
+    if(stepAccepted) peakProducedStep = true;
+    if(deviation < cfg.diagnosticPeakThreshold * cfg.releaseRatio){
+      var finished = {
+        deviation: peakMaxDeviation,
+        crossedStepThreshold: peakMaxDeviation >= cfg.motionThreshold,
+        motionThreshold: cfg.motionThreshold,
+        diagnosticPeakThreshold: cfg.diagnosticPeakThreshold
+      };
+      var suppressed = peakProducedStep;
+      resetPeakState();
+      if(!suppressed) onPeakCb(finished);
+    }
   }
 
   function acceptMagnitude(magnitude, atTime){
@@ -169,11 +237,13 @@ export function createStepDetector(config, deps){
     // processSample() ganz normal weiter (die Basislinie MUSS sich
     // einschwingen), aber ein erkannter Ausschlag wird bewusst NICHT
     // gezaehlt und NICHT an den Aufrufer gemeldet.
-    if(result.stepDetected && !inWarmup(atTime)){
+    var accepted = result.stepDetected && !inWarmup(atTime);
+    if(accepted){
       stepCount++;
       if(onStepCb) onStepCb(stepCount, result.deviation);
     }
-    return result.stepDetected && !inWarmup(atTime);
+    trackDiagnosticPeak(result.deviation, accepted, atTime);
+    return accepted;
   }
 
   function handleEvent(event){
@@ -197,10 +267,17 @@ export function createStepDetector(config, deps){
     // onStep(stepCount, deviation) fires per accepted step (after warm-up).
     // onReady() fires once, after warmupMs has elapsed, signalling that
     // walking may now begin -- optional, purely informational.
-    start: function(onStep, onReady){
+    // onPeak({deviation, crossedStepThreshold, motionThreshold,
+    // diagnosticPeakThreshold}) -- optional, NUR Kalibrierungs-Diagnostik:
+    // fires once per finished sub-threshold motion excursion (see
+    // trackDiagnosticPeak() above). Without this callback, no diagnostic
+    // state is ever emitted -- normal use stays diagnostics-free.
+    start: function(onStep, onReady, onPeak){
       if(listening) return true;
       if(!isMotionApiSupported(win)) return false;
       onStepCb = onStep || null;
+      onPeakCb = onPeak || null;
+      resetPeakState();
       startedAt = now();
       win.addEventListener("devicemotion", handleEvent);
       listening = true;
@@ -218,10 +295,17 @@ export function createStepDetector(config, deps){
       listening = false;
       startedAt = null;
       clearWarmupTimer();
+      // Eine beim Stopp noch offene (nicht abgeklungene) Exkursion wird
+      // verworfen, nicht nachtraeglich gemeldet -- ein Ereignis beschreibt
+      // immer nur eine VOLLSTAENDIG beobachtete Exkursion. Praktisch kein
+      // Datenverlust: vor dem Stopp-Tastendruck steht der Nutzer ohnehin
+      // still, wodurch die letzte Exkursion natuerlich abklingt und meldet.
+      resetPeakState();
     },
     reset: function(){
       stepCount = 0;
       state = createStepDetectorState();
+      resetPeakState();
     },
     getStepCount: function(){ return stepCount; },
     isListening: function(){ return listening; },

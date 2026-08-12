@@ -133,6 +133,25 @@ import { createStepDetector, requestMotionPermission } from './step-detector.js'
       appTtsOpts({interrupt:true, source:"app.stepCalReady", category:"STATUS"}));
   }
 
+  // TEMPORAERE Kalibrierungs-Diagnostik (siehe diagnosticPeakThreshold in
+  // step-detector.js): bedeutsame Bewegungs-Peaks, die KEINEN gezaehlten
+  // Schritt ausgeloest haben -- Feldtest-Beleg dafuer, ob vorsichtige/
+  // schlurfende Schritte an der aktuellen motionThreshold scheitern. Der
+  // Callback wird NUR im Kalibrierungs-Start unten uebergeben; ausserhalb
+  // der manuellen Kalibrierung laeuft der Detektor gar nicht, es entsteht
+  // also nie Diagnose-Rauschen im normalen Navigations-Log. Genau EIN
+  // Ereignis pro Bewegungs-Exkursion (Peak-Verfolgung im Detektor-Modul),
+  // NIE pro Sensor-Rohwert.
+  function onMotionPeak(peak){
+    record("STEP_MOTION_PEAK", {
+      deviation: Math.round(peak.deviation * 100) / 100,
+      motionThreshold: peak.motionThreshold,
+      diagnosticPeakThreshold: peak.diagnosticPeakThreshold,
+      crossedStepThreshold: peak.crossedStepThreshold,
+      timestamp: Date.now()
+    });
+  }
+
   stepCalStartBtn.addEventListener("click", function(){
     // Direkte, explizite Nutzer-Geste -- der richtige Ort fuer
     // DeviceMotionEvent.requestPermission() (iOS verlangt das synchron/nah an
@@ -153,7 +172,7 @@ import { createStepDetector, requestMotionPermission } from './step-detector.js'
       stepDetector.stop();
       stepDetector.reset();
       record("STEP_DETECTOR_RESET", {});
-      var started = stepDetector.start(onStepDetected, onWarmupReady);
+      var started = stepDetector.start(onStepDetected, onWarmupReady, onMotionPeak);
       if(!started){
         record("STEP_DETECTOR_UNAVAILABLE", { reason: "start-failed-after-permission-granted" });
         updateStepCalUi(0, "nicht verfügbar");
