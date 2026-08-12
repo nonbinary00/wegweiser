@@ -19,6 +19,13 @@
       { tag_id:9,  label:"Essbereich",  type:"office",   x_m:78.211,  y_m:37.795, dir_deg:91.4  },
       { tag_id:10, label:"Drucker",     type:"office",   x_m:64.824,  y_m:41.103, dir_deg:10.8  },
       { tag_id:11, label:"end",         type:"office",   x_m:55.470,  y_m:43.375, dir_deg:334   },
+      // Buero-Erweiterung 11->12->13->14 (neu, physisch vermessen und begangen,
+      // siehe "markers (newTags_16).json"). Der Korridor endet NICHT bei Tag 11 --
+      // er setzt sich geradeaus zu Tag 12 fort. dir_deg fehlt fuer Tag 13/14 im
+      // Messexport (nicht erfasst) und wird NICHT geschaetzt/ergaenzt.
+      { tag_id:12, label:"Büro Malte",  type:"office",   x_m:48.852,  y_m:42.294, dir_deg:355.1 },
+      { tag_id:13, label:"Müggelsee",   type:"office",   x_m:51.103,  y_m:47.561 },
+      { tag_id:14, label:"end",         type:"office",   x_m:49.111,  y_m:49.867 },
       // Rueckwaerts-Route-Erweiterung 3->15->16 (neu). Label wie im
       // Original-Marker-Export ("back tag1"/"back tag 2") uebernommen -- rein
       // informelle Planungsbezeichnung, siehe NODES-Eintrag fuer den
@@ -38,7 +45,9 @@
       { label:"Tür Leonie",     type:"door", x_m:74.203,  y_m:39.844, width_m:0.802, opening_deg:90.5,  dir_deg:180.5 },
       { label:"Tür 3",          type:"door", x_m:63.275,  y_m:41.069, width_m:0.868, opening_deg:177.7, dir_deg:null  },
       { label:"Tür 4",          type:"door", x_m:59.814,  y_m:41.029, width_m:0.855, opening_deg:0,     dir_deg:null  },
-      { label:"Tür end",        type:"door", x_m:55.156,  y_m:41.418, width_m:0.835, opening_deg:90.7,  dir_deg:180.7 }
+      { label:"Tür end",        type:"door", x_m:55.156,  y_m:41.418, width_m:0.835, opening_deg:90.7,  dir_deg:180.7 },
+      { label:"tür Malte",      type:"door", x_m:49.703,  y_m:40.570, width_m:0.945, opening_deg:180,   dir_deg:270   },
+      { label:"Tür Müggelsee",  type:"door", x_m:52.029,  y_m:47.649, width_m:0.739, opening_deg:358.3, dir_deg:268.3 }
     ]
   };
 
@@ -52,9 +61,22 @@
     6:  { name:"Korridor",            destination:false },
     7:  { name:"Leonie",              destination:true  },
     8:  { name:"Ecke",                destination:false },
-    9:  { name:"Essbereich",          destination:false },
+    // Essbereich (neu, physisch verifiziert): Tag 9 markiert die Wand, an der
+    // die Markierung haengt -- NICHT den eigentlichen Zielort. Das physische
+    // Ziel ist der Esstisch/Essbereich, ein paar Schritte VOR der Markierung.
+    // Siehe Kante 4->9 unten (reachedM) fuer die daraus abgeleitete
+    // "Zonen-Ankunft"; kein neues Feld hier noetig.
+    9:  { name:"Essbereich",          destination:true  },
     10: { name:"Drucker",             destination:true  },
     11: { name:"Ende des Korridors",  destination:true  },
+    // Buero-Erweiterung 11->12->13->14 (neu, physisch verifiziert): der
+    // Korridor setzt sich hinter Tag 11 fort, ist also entgegen dem alten
+    // Kommentar bei Kante 10->11 (siehe dort) kein Sackgassen-Ende mehr.
+    // Alle drei sind wie Martin/Leonie/Patrik/Drucker echte, waehlbare
+    // Ziele (kein reiner Wendepunkt wie Tag 15).
+    12: { name:"Malte",               destination:true  },
+    13: { name:"Müggelsee",           destination:true  },
+    14: { name:"Ende des Büros",      destination:true  },
     // Rueckwaerts-Route-Erweiterung 3->15->16 (neu). Tag 15 ist ein reiner
     // Wendepunkt (kein eigenes Ziel); Tag 16 ist das tatsaechliche Ende der
     // Rueckwaerts-Route (Ausgang), unabhaengig von Tag 1/Tag 2 -- KEINE Kante
@@ -192,6 +214,41 @@
         "Sie befinden sich im Korridor zwischen dem Büro von Martin und dem " +
         "Büro von Leonie." },
 
+    // ---- Essbereich-Anbindung 4->9 (neu, physisch verifiziert) ----
+    // Verifiziert: von Tag 4 aus geht es weiterhin GERADEAUS (kein Abbiegen im
+    // Gehweg) -- departureAction bleibt "continue-straight", exakt wie bei
+    // 4->7. Nur die SUCHRICHTUNG der Kamera verschiebt sich leicht
+    // nach links, um die Markierung zu finden (searchHint unten) -- das ist
+    // KEIN Abbiegen und wird daher nicht als departureAction kodiert.
+    //
+    // "Zonen-Ankunft" (neu): Tag 9 haengt an der Wand, nicht am eigentlichen
+    // Zielort (Esstisch/Essbereich, ein paar Schritte davor). Die bestehende,
+    // bereits vorhandene optionale Kanten-Schwelle reachedM (siehe
+    // handleTracking() in nav.js) reicht dafuer bereits aus -- kein neues
+    // Feld/Mechanismus noetig: ein groesserer Wert als SETTINGS.reachedM
+    // (1,8 m) loest REACHED aus, sobald die Markierung zuverlaessig auf
+    // groessere Distanz erkannt wird, statt erst direkt vor der Wand. Alle
+    // anderen Sicherheitslogiken (arrivalConfirmFrames, trackingConfirmed,
+    // Verlust-/Wiederfindungs-Timer, Vorgriffs-Erkennung, Away-Warnung) bleiben
+    // dadurch vollstaendig unveraendert -- nur DIESE eine Kante nutzt den
+    // groesseren Schwellenwert. 3,0 m ist ein konservativer Startwert
+    // (deutlich ueber dem Standard, aber noch keine exakt vor Ort gemessene
+    // Distanz zwischen Scan-Punkt und Markierung) und sollte im Feldtest
+    // nachjustiert werden.
+    { from:4, to:9,
+      found:
+        "Orientierungspunkt gefunden: Essbereich.",
+      reached:
+        "Der Essbereich ist erreicht. Der Tisch befindet sich wenige Schritte " +
+        "vor Ihnen.",
+      searchHint:
+        "Gehen Sie noch etwa zwei Meter geradeaus und suchen Sie die Markierung " +
+        "leicht links.",
+      departureAction: "continue-straight",
+      reachedM: 3.0,
+      locationDescription:
+        "Sie befinden sich zwischen dem Büro von Martin und dem Essbereich." },
+
     { from:7, to:8,
       found:
         "Orientierungspunkt gefunden: Ecke. Gehen Sie geradeaus, ungefähr sechs Meter, " +
@@ -204,6 +261,45 @@
       departureAction: "continue-straight",
       locationDescription:
         "Sie befinden sich im Korridor zwischen dem Büro von Leonie und der Ecke." },
+
+    // ---- Tischtennis-Korrektur 7->5 (neu, Feldtest-Korrektur) ----
+    // Ein Feldtest zeigte, dass die vorherige direkte Kante 4->5 physisch NICHT
+    // begehbar war: nach Tag 4 fuehrt der tatsaechliche Weg GERADEAUS weiter zu
+    // Tag 7 (bestehende Kante 4->7, unveraendert), erst BEI Tag 7 biegt der Weg
+    // nach RECHTS Richtung Tischtennis ab. Die alte Kante 4->5 wurde entfernt
+    // (nicht nur "versteckt" -- der Graph darf keine ungehbaren Kanten mehr
+    // enthalten). departureAction gehoert daher zu 7->5 (Handlung BEI Tag 7),
+    // nicht zu 4->7 -- 4->7 bleibt unveraendert "continue-straight" und die
+    // bestehende Kante 7->8 (Ecke) direkt oberhalb ist davon vollstaendig
+    // unberuehrt.
+    //
+    // allowedPredecessors: [4] -- dieselbe generische Richtungs-Sperre wie bei
+    // 3->15 (siehe dort): diese Kante ist NUR begehbar, wenn Tag 7 gerade ueber
+    // Tag 4 erreicht wurde (Weg zu Tischtennis), NICHT ueber Tag 8 (Rueckweg
+    // 11->10->8->7->4->6->3 s.u.) -- das hier verifizierte "Biegen Sie rechts
+    // ab." gilt ausschliesslich fuer die Ankunft ueber Tag 4, nicht fuer eine
+    // Ankunft aus der Gegenrichtung. Ein frischer Navigationsstart direkt bei
+    // Tag 7 hat keinen widersprechenden Vorgaenger und bleibt daher erlaubt
+    // (findPath(7,5) liefert [7,5]).
+    //
+    // reachedM: 1,0 -- eigene, kleinere Ankunftsschwelle (Standard 1,8 m) statt
+    // einer Aenderung an SETTINGS.reachedM: die Strecke von Tag 7 zu Tag 5 ist
+    // kurz, und unmittelbar links neben Tag 5 befindet sich eine Tuer -- eine
+    // zu grosszuegige Schwelle koennte die Ankunft zu frueh ausloesen.
+    { from:7, to:5,
+      found:
+        "Orientierungspunkt gefunden: Tischtennis. Die Strecke ist kurz.",
+      reached:
+        "Sie sind bei Tischtennis. Die Tür befindet sich links.",
+      searchHint:
+        "Nach dem Rechtsabbiegen: halten Sie das Smartphone gerade vor sich und " +
+        "bewegen Sie es langsam nach links und rechts, bis die nächste Markierung " +
+        "erkannt wird.",
+      departureAction: "turn-right",
+      allowedPredecessors: [4],
+      reachedM: 1.0,
+      locationDescription:
+        "Sie befinden sich zwischen dem Büro von Leonie und Tischtennis." },
 
     { from:8, to:10,
       found:
@@ -226,26 +322,57 @@
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
         "Markierung am Ende des Korridors, geradeaus voraus.",
-      // Tag 11 hat keine Nachfolge-Kante -> ist auf jeder Route, die ihn enthaelt,
-      // automatisch das Ziel; departureAction hier nur der Vollstaendigkeit halber.
+      // Tag 11 ist NICHT mehr zwangslaeufig das Ziel jeder Route, die ihn
+      // enthaelt (Kante 11->12 unten): der Korridor setzt sich physisch
+      // verifiziert geradeaus fort. Wie jeder andere Zwischen-Tag (z.B. Tag 10)
+      // ist Tag 11 nur dann das Ziel, wenn reachPoint() reachedTagId ===
+      // destinationId feststellt (siehe nav.js) -- departureAction hier bleibt
+      // trotzdem gepflegt, fuer den Fall, dass die Route bei Tag 11 endet.
       departureAction: "continue-straight",
       locationDescription:
         "Sie befinden sich im Korridor zwischen dem Drucker und dem Ende des " +
         "Korridors." },
 
-    { from:4, to:5,
+    // ---- Buero-Erweiterung 11->12->13->14 (neu, physisch begangen und
+    // verifiziert, siehe "markers (newTags_16).json") ----
+    // Verifizierte Handlungen: 11->12 geradeaus, 12->13 rechts abbiegen,
+    // 13->14 geradeaus. Tag 14 ist das tatsaechliche Ende des Buerobereichs.
+    { from:11, to:12,
       found:
-        "Orientierungspunkt gefunden: Tischtennis. Gehen Sie geradeaus, ungefähr elf Meter, " +
-        "in Richtung Küche. Die Küchentür befindet sich links.",
+        "Orientierungspunkt gefunden: Malte. Gehen Sie weiter geradeaus.",
       reached:
-        "Sie sind bei Tischtennis. Die Küchentür befindet sich links.",
+        "Sie sind bei Malte. Gehen Sie weiter geradeaus.",
       searchHint:
-        "Wenden Sie sich in Richtung Küche und bewegen Sie das Smartphone langsam " +
-        "nach links und rechts, bis die Markierung bei Tischtennis erkannt wird.",
-      // Tag 5 hat ebenfalls keine Nachfolge-Kante -> immer Ziel; siehe Kommentar oben.
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
+        "Markierung bei Malte, geradeaus im Korridor.",
       departureAction: "continue-straight",
       locationDescription:
-        "Sie befinden sich zwischen dem Büro von Martin und Tischtennis." },
+        "Sie befinden sich zwischen dem Ende des Korridors und dem Büro von Malte." },
+
+    { from:12, to:13,
+      found:
+        "Orientierungspunkt gefunden: Müggelsee.",
+      reached:
+        "Sie sind bei Malte. Biegen Sie rechts ab.",
+      searchHint:
+        "Nach dem Rechtsabbiegen: halten Sie das Smartphone gerade vor sich und " +
+        "bewegen Sie es langsam nach links und rechts, bis die nächste Markierung " +
+        "erkannt wird.",
+      departureAction: "turn-right",
+      locationDescription:
+        "Sie befinden sich zwischen dem Büro von Malte und Müggelsee." },
+
+    { from:13, to:14,
+      found:
+        "Orientierungspunkt gefunden: Ende des Büros. Gehen Sie weiter geradeaus.",
+      reached:
+        "Sie sind bei Müggelsee. Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die " +
+        "Markierung am Ende des Büros, geradeaus voraus.",
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich zwischen Müggelsee und dem Ende des Büros." },
 
     // ---- Rueckwaerts-Experiment 11->10->8->7->4->6->3 (neu) ----
     // Bestaetigt: die gesamte Strecke von Tag 11 bis Tag 3 verlaeuft geradeaus,
@@ -256,7 +383,44 @@
     // Orientierungspunkt-Namen -- Ziel dieses Experiments ist, den Graph-Ablauf
     // auf einer durchgehend geraden Strecke zu beobachten, nicht jede
     // Zwischenmarkierung anzusagen. Betrifft ausschliesslich dieses Experiment;
-    // Tag 1, Tag 2 und die Kante 4->5 sind bewusst NICHT gespiegelt.
+    // Tag 1, Tag 2 und die Tischtennis-Verzweigung (7->5, s.o.) sind bewusst
+    // NICHT gespiegelt.
+    //
+    // Rueckweg 14->13->12->11 (neu, physisch begangen und verifiziert):
+    // verifizierte Handlungen 14->13 geradeaus, 13->12 links abbiegen,
+    // 12->11 geradeaus (exaktes Spiegelbild von 11->12/12->13/13->14 oben).
+    // Ab Tag 11 setzt sich der Rueckweg unveraendert ueber die bereits
+    // bestehende Kante 11->10 fort -- keine weitere neue Kante noetig.
+    { from:14, to:13,
+      found: "Gehen Sie weiter geradeaus.",
+      reached: "Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich zwischen dem Ende des Büros und Müggelsee." },
+
+    { from:13, to:12,
+      found: "Nächster Punkt gefunden.",
+      reached: "Biegen Sie links ab.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "turn-left",
+      locationDescription:
+        "Sie befinden sich zwischen Müggelsee und dem Büro von Malte." },
+
+    { from:12, to:11,
+      found: "Gehen Sie weiter geradeaus.",
+      reached: "Gehen Sie weiter geradeaus.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich zwischen dem Büro von Malte und dem Ende des Korridors." },
+
     { from:11, to:10,
       found: "Gehen Sie weiter geradeaus.",
       reached: "Gehen Sie weiter geradeaus.",
@@ -334,7 +498,7 @@
     // zu 1->2). Tag 16 ist das Ende dieser Rueckwaerts-Route (Ausgang) -- KEINE
     // Kante zurueck zu Tag 1 oder Tag 2, keine Verbindung/Kopie zu deren Daten.
     //
-    // allowedPredecessors (neu, EINZIGE Kante mit diesem Feld): 3->15 ist
+    // allowedPredecessors (siehe auch 7->5 oben, dieselbe generische Sperre): 3->15 ist
     // RICHTUNGSABHAENGIG -- nur begehbar, wenn Tag 3 gerade ueber Tag 6 erreicht
     // wurde (Rueckweg), NICHT ueber Tag 2 (Hinweg in die Bueros). findPath() in
     // graph.js wertet dieses Feld anhand des tatsaechlichen Vorgaenger-Tags im
@@ -370,10 +534,25 @@
     2:  "Ziel erreicht. Sie sind beim Büro von Patrik. Die Tür ist links.",
     3:  "Ziel erreicht. Sie sind am Eingang Flex. Die Tür befindet sich links.",
     4:  "Ziel erreicht. Sie sind bei Martin. Der Eingang Martin liegt vor Ihnen.",
-    5:  "Ziel erreicht. Sie sind bei Tischtennis. Die Küchentür befindet sich links.",
+    // Feldtest-Korrektur (neu): der bisherige Text ("Küchentür...", verfasst
+    // fuer die alte, physisch ungueltige Kante 4->5) beschrieb Tuer/Richtung
+    // fuer eine nie tatsaechlich begangene Anflugrichtung. Ersetzt durch die
+    // fuer die verifizierte Ankunft ueber 7->5 bestaetigte Tuer links, ohne
+    // "Küche"/Richtungs-Zusatz, der fuer DIESE Anflugrichtung nicht bestaetigt ist.
+    5:  "Ziel erreicht. Sie sind bei Tischtennis. Die Tür befindet sich links.",
     7:  "Ziel erreicht. Sie sind bei Leonie. Die Tür befindet sich links.",
+    // Essbereich (neu, Zonen-Ankunft): bewusst OHNE Bezug zur Markierung selbst
+    // -- das physische Ziel ist der Tisch, nicht die Wand, an der Tag 9 haengt.
+    9:  "Ziel erreicht. Sie sind im Essbereich. Der Tisch befindet sich wenige " +
+        "Schritte vor Ihnen.",
     10: "Ziel erreicht. Sie sind beim Drucker.",
     11: "Ziel erreicht. Sie haben das Ende des Korridors erreicht. Die Tür befindet sich links.",
+    // Buero-Erweiterung 12/13/14 (neu): Tuerseite (links/rechts) wurde fuer diese
+    // drei Ziele NICHT physisch verifiziert -- bewusst ohne "Die Tür ist links/
+    // rechts"-Zusatz, anders als bei 2/4/5/7/11 oben.
+    12: "Ziel erreicht. Sie sind bei Malte.",
+    13: "Ziel erreicht. Sie sind bei Müggelsee.",
+    14: "Ziel erreicht. Sie haben das Ende des Büros erreicht.",
     // Rueckwaerts-Route-Erweiterung (neu): arriveAtDestination() stellt bei der
     // Ankunfts-Ansage KEIN "Stopp." voran (anders als reachPoint() bei einem
     // echten Zwischen-Abbiegen) -- der geforderte Wortlaut enthaelt es daher
