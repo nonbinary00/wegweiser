@@ -85,6 +85,16 @@
         <button class="ctrl danger" id="logClearBtn">Log löschen</button>
       </div>
 
+      <!-- neu: experimentelle Schritt-Kalibrierung (Feldtest-Baustein, siehe
+           js/step-detector.js) -- rein diagnostisch, noch NICHT mit der
+           Tag 4 -> Tag 9-Route verbunden. Erkannte Schritte werden hier live
+           angezeigt UND als STEP_DETECTED-Ereignisse ueber das bestehende
+           Log exportiert (logExportBtn oben). -->
+      <div class="btnrow">
+        <button class="ctrl" id="stepCalStartBtn">Schritt-Kalibrierung starten<small id="stepCalCounter">0 Schritte</small></button>
+        <button class="ctrl danger" id="stepCalStopBtn">Schritt-Kalibrierung stoppen</button>
+      </div>
+
       <div id="navPanel" aria-hidden="true">
         <div>Ziel: <b id="uiDest">–</b></div>
         <div>Zustand: <b id="navState">IDLE</b></div>

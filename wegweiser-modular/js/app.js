@@ -6,7 +6,7 @@
 
 import {
   gate, retryBtn, navStartBtn, navEndBtn, whereBtn, muteBtn, destSel,
-  logExportBtn, logClearBtn
+  logExportBtn, logClearBtn, stepCalStartBtn, stepCalStopBtn, stepCalCounter
 } from './dom.js';
 import { NODES } from './graph-data.js';
 import { markerName } from './graph.js';
@@ -20,6 +20,7 @@ import { say, toggleSound, soundOn, cancelSpeech, unlockSpeech } from './speech.
 import { setDetector } from './detector-state.js';
 import { exportJson, clear, record } from './logger.js';
 import { renderNavigationUi } from './ui.js';
+import { createStepDetector, requestMotionPermission } from './step-detector.js';
 
   // ---- TTS-Observability ----: shared metadata for app.js's own announcements,
   // mirroring nav.js's ttsOpts() -- this module holds no navState of its own, but
@@ -97,6 +98,83 @@ import { renderNavigationUi } from './ui.js';
   logClearBtn.addEventListener("click", function(){
     clear();
     say("Log gelöscht.", appTtsOpts({interrupt:true, source:"app.logCleared", category:"STATUS"}));
+  });
+
+  // ---- Schritt-Kalibrierung (neu, experimentell, siehe step-detector.js) ----
+  // Rein diagnostisch: erkennt Gehschritte ueber Bewegungssensordaten, um die
+  // spaetere Tag 4 -> Tag 9-Strecke kalibrieren zu koennen -- NOCH NICHT mit
+  // dieser oder irgendeiner anderen Route/TTS-Ansage verbunden. Ein einziges
+  // geteiltes Detektor-Objekt reicht fuer diese rein manuelle Bedienung; jeder
+  // Start-Tastendruck stoppt zuerst (idempotent, falls schon aktiv) und setzt
+  // dann sauber zurueck, statt einen halb-laufenden Zustand fortzusetzen.
+  var stepDetector = createStepDetector();
+
+  function updateStepCalUi(count, statusText){
+    if(!stepCalCounter) return;
+    stepCalCounter.textContent = count + " Schritte" + (statusText ? " (" + statusText + ")" : "");
+  }
+
+  function onStepDetected(stepCount, deviation){
+    var roundedDeviation = Math.round(deviation * 100) / 100;
+    record("STEP_DETECTED", {
+      stepCount: stepCount,
+      deviation: roundedDeviation,
+      timestamp: Date.now()
+    });
+    updateStepCalUi(stepCount, "läuft …");
+  }
+
+  function onWarmupReady(){
+    // Rein informativ (kein eigenes Log-Ereignis) -- signalisiert, dass die
+    // kurze Einschwingphase (siehe warmupMs in step-detector.js) vorbei ist
+    // und das eigentliche Gehen jetzt beginnen sollte.
+    updateStepCalUi(stepDetector.getStepCount(), "bereit – jetzt gehen");
+    say("Bereit. Gehen Sie jetzt.",
+      appTtsOpts({interrupt:true, source:"app.stepCalReady", category:"STATUS"}));
+  }
+
+  stepCalStartBtn.addEventListener("click", function(){
+    // Direkte, explizite Nutzer-Geste -- der richtige Ort fuer
+    // DeviceMotionEvent.requestPermission() (iOS verlangt das synchron/nah an
+    // einem Tap, siehe step-detector.js). Unabhaengig vom gate-Klick/
+    // unlockSpeech(), da die Kalibrierung ohne laufende Kamera nutzbar sein soll.
+    requestMotionPermission().then(function(state){
+      if(state !== "granted"){
+        record("STEP_PERMISSION_DENIED", { state: state });
+        if(state === "unsupported"){
+          record("STEP_DETECTOR_UNAVAILABLE", { reason: "no-devicemotion-api" });
+        }
+        updateStepCalUi(0, "nicht verfügbar");
+        say("Bewegungssensor nicht verfügbar.",
+          appTtsOpts({interrupt:true, source:"app.stepCalUnavailable", category:"STATUS"}));
+        return;
+      }
+      record("STEP_PERMISSION_GRANTED", { state: state });
+      stepDetector.stop();
+      stepDetector.reset();
+      record("STEP_DETECTOR_RESET", {});
+      var started = stepDetector.start(onStepDetected, onWarmupReady);
+      if(!started){
+        record("STEP_DETECTOR_UNAVAILABLE", { reason: "start-failed-after-permission-granted" });
+        updateStepCalUi(0, "nicht verfügbar");
+        say("Bewegungssensor nicht verfügbar.",
+          appTtsOpts({interrupt:true, source:"app.stepCalUnavailable", category:"STATUS"}));
+        return;
+      }
+      record("STEP_DETECTOR_STARTED", { stepCount: stepDetector.getStepCount() });
+      updateStepCalUi(0, "einschwingen …");
+      say("Schritt-Kalibrierung gestartet. Halten Sie das Smartphone ruhig.",
+        appTtsOpts({interrupt:true, source:"app.stepCalStarted", category:"STATUS"}));
+    });
+  });
+
+  stepCalStopBtn.addEventListener("click", function(){
+    var finalCount = stepDetector.getStepCount();
+    stepDetector.stop();
+    record("STEP_DETECTOR_STOPPED", { stepCount: finalCount });
+    updateStepCalUi(finalCount, "gestoppt");
+    say("Schritt-Kalibrierung gestoppt. " + finalCount + " Schritte erkannt.",
+      appTtsOpts({interrupt:true, source:"app.stepCalStopped", category:"STATUS"}));
   });
 
   // ---- Zielauswahl aus NODES (destination:true) ----

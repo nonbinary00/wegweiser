@@ -31,6 +31,11 @@
   var logExportBtn  = document.getElementById("logExportBtn");
   var logClearBtn   = document.getElementById("logClearBtn");
 
+  // ---- Schritt-Kalibrierung (neu, experimentell, siehe step-detector.js) ----
+  var stepCalStartBtn = document.getElementById("stepCalStartBtn");
+  var stepCalStopBtn  = document.getElementById("stepCalStopBtn");
+  var stepCalCounter  = document.getElementById("stepCalCounter");
+
 export {
   video,
   canvas,
@@ -58,5 +63,8 @@ export {
   testNameInput,
   logCounter,
   logExportBtn,
-  logClearBtn
+  logClearBtn,
+  stepCalStartBtn,
+  stepCalStopBtn,
+  stepCalCounter
 };
