@@ -21,6 +21,7 @@ import { setDetector } from './detector-state.js';
 import { exportJson, clear, record } from './logger.js';
 import { renderNavigationUi } from './ui.js';
 import { createStepDetector, requestMotionPermission } from './step-detector.js';
+import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
 
   // ---- TTS-Observability ----: shared metadata for app.js's own announcements,
   // mirroring nav.js's ttsOpts() -- this module holds no navState of its own, but
@@ -152,6 +153,46 @@ import { createStepDetector, requestMotionPermission } from './step-detector.js'
     });
   }
 
+  // ---- Experimenteller adaptiver Detektor (NUR Diagnose, siehe
+  // adaptive-step-detector.js) ----
+  // Laeuft parallel am SELBEN Sensorstrom (Sample-Tap des Produktions-
+  // Detektors, 4. start()-Parameter unten) -- der Produktions-Detektor mit
+  // seiner festen Schwelle bleibt die einzige Quelle fuer STEP_DETECTED;
+  // saemtliche ADAPTIVE_*-Ereignisse sind reine Vergleichsdaten fuer die
+  // Feldauswertung (fest 1,5 vs. adaptiv) und beeinflussen weder Zaehlung
+  // noch Navigation. Rundung nur hier (Log-Kompaktheit), nie im Modul.
+  function r2(v){ return v == null ? null : Math.round(v * 100) / 100; }
+
+  var adaptiveDetector = createAdaptiveStepDetector(null, {
+    onPeak: function(p){
+      record("ADAPTIVE_STEP_PEAK", {
+        amplitude: r2(p.amplitude), threshold: r2(p.threshold),
+        mean: r2(p.mean), std: r2(p.std),
+        intervalFromPreviousPeak: p.intervalFromPreviousPeak != null ? Math.round(p.intervalFromPreviousPeak) : null,
+        consecutivePeaks: p.consecutivePeaks, classification: p.classification,
+        timestamp: Date.now()
+      });
+    },
+    onStep: function(s){
+      record("ADAPTIVE_STEP_DETECTED", {
+        timestamp: Date.now(), t: Math.round(s.t),
+        amplitude: r2(s.amplitude), threshold: r2(s.threshold),
+        backfilled: s.backfilled
+      });
+    },
+    onWalkingStart: function(w){
+      record("ADAPTIVE_WALKING_STARTED", { consecutivePeaks: w.consecutivePeaks, timestamp: Date.now() });
+    },
+    onWalkingStop: function(w){
+      record("ADAPTIVE_WALKING_STOPPED", { reason: w.reason,
+        adaptiveStepCount: w.adaptiveStepCount, timestamp: Date.now() });
+    }
+  });
+
+  function onMotionSample(x, y, z, atTime, reportedIntervalMs){
+    adaptiveDetector.addSample(x, y, z, atTime, reportedIntervalMs);
+  }
+
   stepCalStartBtn.addEventListener("click", function(){
     // Direkte, explizite Nutzer-Geste -- der richtige Ort fuer
     // DeviceMotionEvent.requestPermission() (iOS verlangt das synchron/nah an
@@ -171,8 +212,9 @@ import { createStepDetector, requestMotionPermission } from './step-detector.js'
       record("STEP_PERMISSION_GRANTED", { state: state });
       stepDetector.stop();
       stepDetector.reset();
+      adaptiveDetector.reset();
       record("STEP_DETECTOR_RESET", {});
-      var started = stepDetector.start(onStepDetected, onWarmupReady, onMotionPeak);
+      var started = stepDetector.start(onStepDetected, onWarmupReady, onMotionPeak, onMotionSample);
       if(!started){
         record("STEP_DETECTOR_UNAVAILABLE", { reason: "start-failed-after-permission-granted" });
         updateStepCalUi(0, "nicht verfügbar");
@@ -191,6 +233,25 @@ import { createStepDetector, requestMotionPermission } from './step-detector.js'
     var finalCount = stepDetector.getStepCount();
     stepDetector.stop();
     record("STEP_DETECTOR_STOPPED", { stepCount: finalCount });
+    // GENAU EIN kompaktes Pro-Lauf-Ereignis statt Dauerprotokollierung
+    // einzelner Sensor-Samples: echte Abtastrate (gemessen + vom Browser
+    // gemeldet), adaptive Zaehler und letzte adaptive Statistik -- damit ist
+    // jeder Kalibrierungslauf direkt "fest 1,5 vs. adaptiv" vergleichbar.
+    var adaptiveSummary = adaptiveDetector.getSummary();
+    record("ADAPTIVE_RUN_SUMMARY", {
+      sampleCount: adaptiveSummary.sampleCount,
+      avgSampleIntervalMs: r2(adaptiveSummary.avgSampleIntervalMs),
+      minSampleIntervalMs: r2(adaptiveSummary.minSampleIntervalMs),
+      maxSampleIntervalMs: r2(adaptiveSummary.maxSampleIntervalMs),
+      reportedEventIntervalMs: r2(adaptiveSummary.reportedEventIntervalMs),
+      adaptiveStepCount: adaptiveSummary.adaptiveStepCount,
+      peakCount: adaptiveSummary.peakCount,
+      walking: adaptiveSummary.walking,
+      lastThreshold: r2(adaptiveSummary.lastThreshold),
+      lastMean: r2(adaptiveSummary.lastMean),
+      lastStd: r2(adaptiveSummary.lastStd),
+      productionStepCount: finalCount
+    });
     updateStepCalUi(finalCount, "gestoppt");
     say("Schritt-Kalibrierung gestoppt. " + finalCount + " Schritte erkannt.",
       appTtsOpts({interrupt:true, source:"app.stepCalStopped", category:"STATUS"}));

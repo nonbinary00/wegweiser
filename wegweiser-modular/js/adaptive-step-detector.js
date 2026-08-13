@@ -1,0 +1,367 @@
+// ==================== Experimenteller ADAPTIVER Schritt-Detektor (NUR Diagnose) ====================
+// Zweiter, rein experimenteller Erkennungspfad NEBEN dem Produktions-Detektor
+// (step-detector.js, feste motionThreshold 1,5 -- bleibt unveraendert die einzige
+// Quelle fuer STEP_DETECTED). Dieses Modul erhaelt exakt dieselben Sensorwerte
+// ueber den Sample-Tap des Produktions-Detektors (siehe onSample in
+// step-detector.js/app.js), besitzt KEINE eigene devicemotion-Subscription,
+// KEINE Berechtigungslogik, KEIN window/DOM -- ausschliesslich addSample().
+//
+// Hintergrund (Feldtest, 9 Laeufe a 5 Schritte): normale Schritte 14/15 erkannt,
+// vorsichtige 6/15, schlurfende 3/15 -- schlurfende Peaks lagen meist bei
+// ~0,65-0,95, vorsichtige teils bei ~1,3-1,48, also unterhalb der festen 1,5.
+// Statt die Produktionsschwelle auf Verdacht zu senken, liefert dieser Detektor
+// VERGLEICHSDATEN: adaptive Schwelle aus rollender Statistik + Rhythmus-
+// Validierung, protokolliert parallel zum Produktionspfad am selben Signal.
+//
+// Verarbeitungskette (bewusst einfach, KEIN strenger Bandpass, kein ML):
+//   accelerationIncludingGravity (x,y,z)
+//   -> Schwerkraft-Schaetzung je Achse (langsame EMA) und Abzug
+//   -> Betrag des dynamischen Rest-Vektors (lageunabhaengig)
+//   -> Glaettung (kurze EMA)
+//   -> adaptive Schwelle: max(thresholdFloor, mean + thresholdK * std)
+//      ueber ein rollendes Statistikfenster
+//   -> Exkursions-/Lokalmaximum-Erkennung -> Kandidaten-Peak
+//   -> Rhythmus-Validierung (min/max-Intervall, minConsecutivePeaks)
+//   -> experimentelle Geh-/Schritt-Ereignisse (Callbacks)
+//
+// KEINE Kopplung an Navigation: dieses Modul importiert nichts und kennt keine
+// Tags/Routen/TTS/NavState -- es kann Navigationszustand strukturell weder
+// lesen noch veraendern (von test/adaptive-step-detector.test.js abgesichert).
+
+// ---- Experimentelle Konfiguration. AUSDRUECKLICH KEINE validierten
+// Produktionskonstanten -- Startwerte fuer die Feld-Datensammlung, danach
+// anhand der exportierten Logs nachzujustieren. ----
+export var DEFAULT_ADAPTIVE_STEP_CONFIG = {
+  // Langsame Je-Achse-EMA als Schwerkraft-/Orientierungs-Schaetzung. Der
+  // Abzug VOR der Betragsbildung (anders als im Produktionspfad, der erst
+  // den Betrag bildet) haelt den dynamischen Anteil auch bei langsamen
+  // Orientierungsaenderungen sauberer getrennt.
+  gravityAlpha: 0.02,
+  // Kurze EMA ueber den dynamischen Betrag -- Glaettung gegen Einzelsample-
+  // Ausreisser. Bewusst als einfache Glaettung dokumentiert, NICHT als
+  // Bandpass (das ist sie mathematisch nicht).
+  smoothingAlpha: 0.3,
+  // Rollendes Fenster fuer mean/std des geglaetteten Signals. ACHTUNG
+  // (dokumentierte Einschraenkung, bewusst NICHT in dieser Aufgabe
+  // umgestaltet): das Fenster enthaelt die Gehbewegung selbst -- energisches
+  // Gehen hebt mean/std und damit die Schwelle mit an. Deshalb werden
+  // mean/std/threshold in jedem Peak-Ereignis mitprotokolliert, damit genau
+  // dieses Verhalten aus echten Logs bewertet werden kann.
+  statsWindowMs: 3000,
+  // threshold = max(thresholdFloor, mean + thresholdK * std)
+  thresholdK: 1.2,
+  thresholdFloor: 0.35,
+  // Exkursions-Hysterese: eine laufende Peak-Exkursion endet erst, wenn das
+  // Signal unter (Exkursions-Startschwelle * peakReleaseRatio) faellt --
+  // gegen Geflacker um die Schwelle, analog releaseRatio im Produktionspfad.
+  peakReleaseRatio: 0.5,
+  // Rhythmus-Validierung: plausibles Schrittintervall-Fenster und Anzahl
+  // aufeinanderfolgender rhythmischer Peaks, bevor "Gehen" als bestaetigt
+  // gilt. Experimentelle Startwerte, keine physiologischen Endwerte.
+  minStepIntervalMs: 400,
+  maxStepIntervalMs: 1500,
+  minConsecutivePeaks: 3,
+  // Gehen gilt als beendet, wenn nach Bestaetigung ca. so lange kein
+  // gueltiger rhythmischer Peak mehr kam: maxStepIntervalMs * dieser Faktor.
+  walkingStopTimeoutFactor: 2,
+  // Kurze Einschwingphase nach reset()/Erstsample: Schwerkraft-EMA und
+  // Statistikfenster sind anfangs leer/unzuverlaessig -- in dieser Zeit
+  // werden keine Kandidaten-Peaks erzeugt (gleiche Idee wie warmupMs im
+  // Produktionspfad).
+  warmupMs: 400
+};
+
+// ==================== Reine Rhythmus-Validierung ====================
+// Bewusst als reine Funktionen ausgelagert (deterministisch mit synthetischen
+// Kandidaten testbar, ohne Signal-Simulation). Ein Kandidat ist IMMER das
+// vollstaendige Objekt { t, amplitude, threshold } -- NIE nur ein Zeitstempel:
+// beim Backfill (Gehen wird erst ab dem N-ten Peak bestaetigt) behaelt jeder
+// nachgemeldete Schritt seine EIGENEN Originalwerte, statt Zeit/Amplitude/
+// Schwelle des letzten Peaks zu duplizieren.
+
+export function createRhythmState(){
+  return {
+    walking: false,
+    consecutive: 0,
+    sequence: [],          // Kandidaten { t, amplitude, threshold } der aktuellen, noch unbestaetigten Serie
+    lastValidPeakT: null
+  };
+}
+
+// (Zustand, Kandidat, Konfiguration) -> { state, classification, steps,
+// walkingStarted, walkingStopped }. steps enthaelt 0..n experimentelle
+// Schritte; beim Bestaetigungs-Backfill traegt jeder Eintrag die Werte
+// SEINES urspruenglichen Kandidaten, der bestaetigende Peak selbst genau
+// einmal (backfilled:false) -- keine Doppelzaehlung.
+export function processCandidatePeak(state, candidate, config){
+  var cfg = config || DEFAULT_ADAPTIVE_STEP_CONFIG;
+  var next = {
+    walking: state.walking,
+    consecutive: state.consecutive,
+    sequence: state.sequence.slice(),
+    lastValidPeakT: state.lastValidPeakT
+  };
+  var steps = [];
+  var walkingStarted = false;
+  var walkingStopped = false;
+  var interval = next.lastValidPeakT == null ? null : candidate.t - next.lastValidPeakT;
+  var classification;
+
+  if(interval != null && interval < cfg.minStepIntervalMs){
+    // Zu schnell (z.B. Doppel-Ausschlag innerhalb EINES physischen Schritts,
+    // Haendezittern): wird ignoriert, zerstoert aber die laufende Serie NICHT
+    // und verschiebt auch die Referenzzeit nicht.
+    classification = "too-fast";
+  } else if(interval == null || interval > cfg.maxStepIntervalMs){
+    // Erster Kandidat ueberhaupt ODER Luecke oberhalb des plausiblen
+    // Schrittintervalls: Serie bricht, dieser Kandidat beginnt eine neue.
+    // War Gehen bereits bestaetigt, endet es hiermit (Rhythmus gebrochen).
+    if(next.walking){
+      next.walking = false;
+      walkingStopped = true;
+    }
+    next.sequence = [candidate];
+    next.consecutive = 1;
+    next.lastValidPeakT = candidate.t;
+    classification = "sequence-start";
+  } else {
+    // Gueltiger rhythmischer Peak.
+    classification = "valid";
+    next.consecutive++;
+    next.lastValidPeakT = candidate.t;
+    if(next.walking){
+      steps.push({ t: candidate.t, amplitude: candidate.amplitude,
+        threshold: candidate.threshold, backfilled: false });
+    } else {
+      next.sequence.push(candidate);
+      if(next.consecutive >= cfg.minConsecutivePeaks){
+        next.walking = true;
+        walkingStarted = true;
+        // Backfill: JEDER Kandidat der Serie wird genau einmal als
+        // experimenteller Schritt gemeldet, mit seinen eigenen Werten;
+        // nur der bestaetigende (letzte) gilt als nicht-backfilled.
+        for(var i = 0; i < next.sequence.length; i++){
+          var c = next.sequence[i];
+          steps.push({ t: c.t, amplitude: c.amplitude, threshold: c.threshold,
+            backfilled: c !== candidate });
+        }
+        next.sequence = [];
+      }
+    }
+  }
+
+  return { state: next, classification: classification, steps: steps,
+    walkingStarted: walkingStarted, walkingStopped: walkingStopped,
+    intervalFromPreviousPeak: interval };
+}
+
+// Inaktivitaets-Pruefung (Sicherheitsnetz fuer den Fall, dass gar keine
+// Kandidaten mehr eintreffen -- der Rhythmusbruch ueber einen zu spaeten
+// Kandidaten wird bereits in processCandidatePeak() behandelt).
+export function checkWalkingTimeout(state, t, config){
+  var cfg = config || DEFAULT_ADAPTIVE_STEP_CONFIG;
+  if(!state.walking || state.lastValidPeakT == null) return { state: state, walkingStopped: false };
+  if(t - state.lastValidPeakT <= cfg.maxStepIntervalMs * cfg.walkingStopTimeoutFactor){
+    return { state: state, walkingStopped: false };
+  }
+  return {
+    state: { walking: false, consecutive: 0, sequence: [], lastValidPeakT: state.lastValidPeakT },
+    walkingStopped: true
+  };
+}
+
+// ==================== Detektor-Objekt ====================
+// callbacks (alle optional):
+//   onPeak({ t, amplitude, threshold, mean, std, intervalFromPreviousPeak,
+//            consecutivePeaks, classification })      -- jeder Kandidaten-Peak
+//   onStep({ t, amplitude, threshold, backfilled })   -- experimenteller Schritt
+//   onWalkingStart({ t, consecutivePeaks })
+//   onWalkingStop({ t, reason, adaptiveStepCount })
+export function createAdaptiveStepDetector(config, callbacks){
+  var cfg = Object.assign({}, DEFAULT_ADAPTIVE_STEP_CONFIG, config || {});
+  var cb = callbacks || {};
+
+  // Signal-Zustand
+  var gravity = null;              // {x,y,z} EMA-Schwerkraftschaetzung
+  var smoothed = null;             // geglaetteter dynamischer Betrag
+  var windowSamples = [];          // { t, v } fuer mean/std
+  var firstSampleT = null;
+
+  // Exkursions-Zustand (lokale Peak-Erkennung)
+  var exActive = false;
+  var exStartThreshold = 0;
+  var exMax = 0, exMaxT = 0, exThresholdAtMax = 0, exMeanAtMax = 0, exStdAtMax = 0;
+
+  // Rhythmus-/Zaehl-Zustand
+  var rhythm = createRhythmState();
+  var adaptiveStepCount = 0;
+  var peakCount = 0;
+
+  // Abtast-Diagnostik (Feld-Beleg der echten Sensorrate -- NICHT pro Sample
+  // protokolliert, sondern nur aggregiert per getSummary() abfragbar)
+  var sampleCount = 0;
+  var lastSampleT = null;
+  var minSampleIntervalMs = null;
+  var maxSampleIntervalMs = null;
+  var reportedEventIntervalMs = null;   // letztes non-null event.interval
+
+  // zuletzt berechnete Statistik (fuer Diagnose/Summary)
+  var lastMean = 0, lastStd = 0, lastThreshold = cfg.thresholdFloor;
+
+  function emitStep(step){
+    adaptiveStepCount++;
+    if(cb.onStep) cb.onStep(step);
+  }
+
+  function handleRhythmResult(result){
+    rhythm = result.state;
+    if(result.walkingStopped && cb.onWalkingStop){
+      cb.onWalkingStop({ t: result.state.lastValidPeakT, reason: "rhythm-break",
+        adaptiveStepCount: adaptiveStepCount });
+    }
+    for(var i = 0; i < result.steps.length; i++) emitStep(result.steps[i]);
+    if(result.walkingStarted && cb.onWalkingStart){
+      cb.onWalkingStart({ t: result.state.lastValidPeakT,
+        consecutivePeaks: rhythm.consecutive });
+    }
+  }
+
+  function processCandidate(candidate){
+    peakCount++;
+    var result = processCandidatePeak(rhythm, candidate, cfg);
+    var consecutiveAfter = result.state.consecutive;
+    handleRhythmResult(result);
+    if(cb.onPeak){
+      cb.onPeak({ t: candidate.t, amplitude: candidate.amplitude,
+        threshold: candidate.threshold, mean: candidate.mean, std: candidate.std,
+        intervalFromPreviousPeak: result.intervalFromPreviousPeak,
+        consecutivePeaks: consecutiveAfter, classification: result.classification });
+    }
+  }
+
+  return {
+    // Erhaelt jedes Sensor-Sample vom Produktions-Detektor-Tap. reportedIntervalMs
+    // ist event.interval (falls der Browser es liefert), atTime die gleiche
+    // Zeitbasis wie im Produktionspfad (performance.now()).
+    addSample: function(x, y, z, atTime, reportedIntervalMs){
+      // -- Abtast-Diagnostik --
+      sampleCount++;
+      if(firstSampleT == null) firstSampleT = atTime;
+      if(lastSampleT != null){
+        var dt = atTime - lastSampleT;
+        if(minSampleIntervalMs == null || dt < minSampleIntervalMs) minSampleIntervalMs = dt;
+        if(maxSampleIntervalMs == null || dt > maxSampleIntervalMs) maxSampleIntervalMs = dt;
+      }
+      lastSampleT = atTime;
+      if(reportedIntervalMs != null) reportedEventIntervalMs = reportedIntervalMs;
+
+      // -- Schwerkraft-Schaetzung / dynamischer Betrag --
+      if(gravity == null){
+        gravity = { x: x, y: y, z: z };   // Erstsample: direkt uebernehmen (keine Sprungantwort)
+        return;
+      }
+      gravity.x += cfg.gravityAlpha * (x - gravity.x);
+      gravity.y += cfg.gravityAlpha * (y - gravity.y);
+      gravity.z += cfg.gravityAlpha * (z - gravity.z);
+      var dx = x - gravity.x, dy = y - gravity.y, dz = z - gravity.z;
+      var dynMag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      smoothed = (smoothed == null) ? dynMag : smoothed + cfg.smoothingAlpha * (dynMag - smoothed);
+
+      // -- rollende Statistik + adaptive Schwelle --
+      windowSamples.push({ t: atTime, v: smoothed });
+      var cutoff = atTime - cfg.statsWindowMs;
+      while(windowSamples.length && windowSamples[0].t < cutoff) windowSamples.shift();
+      var sum = 0, sumSq = 0;
+      for(var i = 0; i < windowSamples.length; i++){
+        sum += windowSamples[i].v;
+        sumSq += windowSamples[i].v * windowSamples[i].v;
+      }
+      var n = windowSamples.length;
+      var mean = n ? sum / n : 0;
+      var variance = n ? Math.max(0, sumSq / n - mean * mean) : 0;
+      var std = Math.sqrt(variance);
+      var threshold = Math.max(cfg.thresholdFloor, mean + cfg.thresholdK * std);
+      lastMean = mean; lastStd = std; lastThreshold = threshold;
+
+      // -- Geh-Inaktivitaets-Timeout (Sicherheitsnetz) --
+      var timeoutResult = checkWalkingTimeout(rhythm, atTime, cfg);
+      if(timeoutResult.walkingStopped){
+        rhythm = timeoutResult.state;
+        if(cb.onWalkingStop){
+          cb.onWalkingStop({ t: atTime, reason: "inactivity-timeout",
+            adaptiveStepCount: adaptiveStepCount });
+        }
+      }
+
+      // -- Einschwingphase: keine Kandidaten-Erzeugung --
+      if(atTime - firstSampleT < cfg.warmupMs){
+        exActive = false;
+        return;
+      }
+
+      // -- Exkursions-/Lokalmaximum-Erkennung --
+      if(!exActive){
+        if(smoothed >= threshold){
+          exActive = true;
+          exStartThreshold = threshold;
+          exMax = smoothed; exMaxT = atTime;
+          exThresholdAtMax = threshold; exMeanAtMax = mean; exStdAtMax = std;
+        }
+        return;
+      }
+      if(smoothed > exMax){
+        exMax = smoothed; exMaxT = atTime;
+        exThresholdAtMax = threshold; exMeanAtMax = mean; exStdAtMax = std;
+      }
+      if(smoothed < exStartThreshold * cfg.peakReleaseRatio){
+        var candidate = { t: exMaxT, amplitude: exMax, threshold: exThresholdAtMax,
+          mean: exMeanAtMax, std: exStdAtMax };
+        exActive = false;
+        processCandidate(candidate);
+      }
+    },
+
+    reset: function(){
+      gravity = null;
+      smoothed = null;
+      windowSamples = [];
+      firstSampleT = null;
+      exActive = false;
+      exStartThreshold = 0; exMax = 0; exMaxT = 0;
+      exThresholdAtMax = 0; exMeanAtMax = 0; exStdAtMax = 0;
+      rhythm = createRhythmState();
+      adaptiveStepCount = 0;
+      peakCount = 0;
+      sampleCount = 0;
+      lastSampleT = null;
+      minSampleIntervalMs = null;
+      maxSampleIntervalMs = null;
+      reportedEventIntervalMs = null;
+      lastMean = 0; lastStd = 0; lastThreshold = cfg.thresholdFloor;
+    },
+
+    isWalking: function(){ return rhythm.walking; },
+    getAdaptiveStepCount: function(){ return adaptiveStepCount; },
+    getPeakCount: function(){ return peakCount; },
+
+    // Kompakte Pro-Lauf-Zusammenfassung (Abtastrate + Zaehler + letzte
+    // Statistik) -- gedacht fuer GENAU EIN Log-Ereignis beim Kalibrierungs-
+    // Stopp, statt Dauerprotokollierung einzelner Samples.
+    getSummary: function(){
+      var elapsed = (firstSampleT != null && lastSampleT != null) ? (lastSampleT - firstSampleT) : 0;
+      return {
+        sampleCount: sampleCount,
+        avgSampleIntervalMs: sampleCount > 1 ? elapsed / (sampleCount - 1) : null,
+        minSampleIntervalMs: minSampleIntervalMs,
+        maxSampleIntervalMs: maxSampleIntervalMs,
+        reportedEventIntervalMs: reportedEventIntervalMs,
+        adaptiveStepCount: adaptiveStepCount,
+        peakCount: peakCount,
+        walking: rhythm.walking,
+        lastThreshold: lastThreshold,
+        lastMean: lastMean,
+        lastStd: lastStd
+      };
+    }
+  };
+}

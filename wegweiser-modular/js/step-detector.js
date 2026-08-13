@@ -173,6 +173,15 @@ export function createStepDetector(config, deps){
   var startedAt = null;
   var warmupTimer = null;
 
+  // Optionaler, rein passiver Sample-Tap (siehe start()): reicht jedes
+  // Roh-Sample UNVERAENDERT an einen Beobachter weiter (z.B. den
+  // experimentellen adaptiven Detektor, adaptive-step-detector.js), NACHDEM
+  // die Produktionsverarbeitung des Samples abgeschlossen ist. Der Tap kann
+  // die Produktionserkennung strukturell nicht beeinflussen: er erhaelt nur
+  // Kopien der Werte und wird nach acceptMagnitude() aufgerufen. Vermeidet
+  // eine zweite devicemotion-Subscription samt doppelter Berechtigungslogik.
+  var onSampleCb = null;
+
   // ---- Diagnose-Peak-Zustand (NUR Kalibrierung, siehe diagnosticPeakThreshold
   // oben). Getrennt vom armed/release-Zustand in processSample(): der dortige
   // Zustand gehoert zur SCHRITT-Erkennung (Schwelle 1,5) und darf fuer die
@@ -254,7 +263,11 @@ export function createStepDetector(config, deps){
     // (weitgehend konstanten) Schwerkraftanteil wieder.
     var a = event.accelerationIncludingGravity;
     if(!a || a.x == null || a.y == null || a.z == null) return; // unbrauchbare Messung: ignorieren, NICHT als Schritt werten
-    acceptMagnitude(computeMagnitude(a.x, a.y, a.z), now());
+    var atTime = now();
+    acceptMagnitude(computeMagnitude(a.x, a.y, a.z), atTime);
+    // event.interval (vom Browser gemeldetes Sensor-Intervall, ms) wird nur
+    // durchgereicht, nie hier verarbeitet -- Feld-Beleg der echten Abtastrate.
+    if(onSampleCb) onSampleCb(a.x, a.y, a.z, atTime, event.interval != null ? event.interval : null);
   }
 
   function clearWarmupTimer(){
@@ -272,11 +285,14 @@ export function createStepDetector(config, deps){
     // fires once per finished sub-threshold motion excursion (see
     // trackDiagnosticPeak() above). Without this callback, no diagnostic
     // state is ever emitted -- normal use stays diagnostics-free.
-    start: function(onStep, onReady, onPeak){
+    // onSample(x, y, z, atTime, reportedIntervalMs) -- optional, rein
+    // passiver Beobachter-Tap (siehe Kommentar bei onSampleCb oben).
+    start: function(onStep, onReady, onPeak, onSample){
       if(listening) return true;
       if(!isMotionApiSupported(win)) return false;
       onStepCb = onStep || null;
       onPeakCb = onPeak || null;
+      onSampleCb = onSample || null;
       resetPeakState();
       startedAt = now();
       win.addEventListener("devicemotion", handleEvent);
@@ -315,7 +331,13 @@ export function createStepDetector(config, deps){
     // benoetigen -- fuer Integrationstests des gesamten Detektor-Objekts
     // (zusaetzlich zu den reinen Funktionstests von processSample() selbst).
     feedSample: function(x, y, z, atTime){
-      return acceptMagnitude(computeMagnitude(x, y, z), atTime != null ? atTime : now());
+      var t = atTime != null ? atTime : now();
+      var accepted = acceptMagnitude(computeMagnitude(x, y, z), t);
+      // Gleicher Tap-Pfad wie im echten devicemotion-Handler (kein
+      // event.interval verfuegbar -> null), damit Integrationstests beide
+      // Detektoren ueber dieselbe Nahtstelle mit identischen Samples speisen.
+      if(onSampleCb) onSampleCb(x, y, z, t, null);
+      return accepted;
     }
   };
 }
