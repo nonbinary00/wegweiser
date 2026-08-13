@@ -171,6 +171,10 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
         intervalFromPreviousPeak: p.intervalFromPreviousPeak != null ? Math.round(p.intervalFromPreviousPeak) : null,
         consecutivePeaks: p.consecutivePeaks, classification: p.classification,
         peakDurationMs: p.peakDurationMs != null ? Math.round(p.peakDurationMs) : null,
+        // Richtungs-Diagnose (Scan-vs-Gehen, siehe adaptive-step-detector.js):
+        // Antwortdaten fuer die naechste Feldrunde, KEINE Klassifikation.
+        verticalRatio: r2(p.verticalRatio),
+        rotationRateMean: r2(p.rotationRateMean),
         timestamp: Date.now()
       });
     },
@@ -190,8 +194,8 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
     }
   });
 
-  function onMotionSample(x, y, z, atTime, reportedIntervalMs){
-    adaptiveDetector.addSample(x, y, z, atTime, reportedIntervalMs);
+  function onMotionSample(x, y, z, atTime, reportedIntervalMs, rotation){
+    adaptiveDetector.addSample(x, y, z, atTime, reportedIntervalMs, rotation);
   }
 
   stepCalStartBtn.addEventListener("click", function(){

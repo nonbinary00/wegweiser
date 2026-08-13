@@ -265,9 +265,16 @@ export function createStepDetector(config, deps){
     if(!a || a.x == null || a.y == null || a.z == null) return; // unbrauchbare Messung: ignorieren, NICHT als Schritt werten
     var atTime = now();
     acceptMagnitude(computeMagnitude(a.x, a.y, a.z), atTime);
-    // event.interval (vom Browser gemeldetes Sensor-Intervall, ms) wird nur
-    // durchgereicht, nie hier verarbeitet -- Feld-Beleg der echten Abtastrate.
-    if(onSampleCb) onSampleCb(a.x, a.y, a.z, atTime, event.interval != null ? event.interval : null);
+    // event.interval (vom Browser gemeldetes Sensor-Intervall, ms) und
+    // event.rotationRate (deg/s, falls das Geraet ein Gyroskop liefert)
+    // werden nur durchgereicht, nie hier verarbeitet -- der Produktionspfad
+    // liest weiterhin ausschliesslich accelerationIncludingGravity.
+    if(onSampleCb){
+      var r = event.rotationRate;
+      var rotation = (r && r.alpha != null && r.beta != null && r.gamma != null)
+        ? { alpha: r.alpha, beta: r.beta, gamma: r.gamma } : null;
+      onSampleCb(a.x, a.y, a.z, atTime, event.interval != null ? event.interval : null, rotation);
+    }
   }
 
   function clearWarmupTimer(){
@@ -330,13 +337,14 @@ export function createStepDetector(config, deps){
     // der echte devicemotion-Handler oben, ohne ein echtes Ereignis zu
     // benoetigen -- fuer Integrationstests des gesamten Detektor-Objekts
     // (zusaetzlich zu den reinen Funktionstests von processSample() selbst).
-    feedSample: function(x, y, z, atTime){
+    feedSample: function(x, y, z, atTime, rotation){
       var t = atTime != null ? atTime : now();
       var accepted = acceptMagnitude(computeMagnitude(x, y, z), t);
       // Gleicher Tap-Pfad wie im echten devicemotion-Handler (kein
       // event.interval verfuegbar -> null), damit Integrationstests beide
       // Detektoren ueber dieselbe Nahtstelle mit identischen Samples speisen.
-      if(onSampleCb) onSampleCb(x, y, z, t, null);
+      // rotation optional (5. Parameter), fuer Tests der Rotations-Diagnose.
+      if(onSampleCb) onSampleCb(x, y, z, t, null, rotation != null ? rotation : null);
       return accepted;
     }
   };

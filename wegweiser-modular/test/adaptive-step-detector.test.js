@@ -420,3 +420,151 @@ test('every candidate peak reports amplitude, threshold, mean, std, interval, co
   assert.equal(p.consecutivePeaks, 1);
   assert.equal(p.classification, 'sequence-start');
 });
+
+// ==================== Walking vs. left-right scanning diagnostics ====================
+// Field evidence after the excursion fix: normal/shuffling walking improved
+// sharply, but standing still while scanning the phone left-right (normal
+// AprilTag-search behavior) produces rhythmic magnitude peaks that the
+// current magnitude+rhythm classifier cannot distinguish from real steps.
+//
+// These tests answer Step 2's question directly with deterministic signals:
+// can walking and left-right scanning produce similar scalar peak sequences?
+// -- and validate the new, NON-classifying diagnostic features (verticalRatio,
+// rotationRateMean) that a future field round needs to set an evidence-based
+// boundary. No classification change is made here: both A and B are still
+// expected to confirm "walking" under the UNCHANGED rhythm/magnitude rule --
+// that is the documented insufficiency, not a bug in these tests.
+//
+// Deterministic setup: gravityAlpha 0 freezes gravity at the very first fed
+// sample, smoothingAlpha 1 disables smoothing, thresholdK 0 clamps the
+// threshold to the 0.35 floor -- isolates the new direction math from the
+// unrelated adaptive-threshold behavior already covered above.
+
+function makeDirectionalDetector(peaks, walkingEvents){
+  return createAdaptiveStepDetector(
+    { gravityAlpha: 0, smoothingAlpha: 1, thresholdK: 0 },
+    {
+      onPeak: (p) => peaks.push(p),
+      onWalkingStart: () => walkingEvents.push('started'),
+    }
+  );
+}
+
+test('A. walking-like vertical pulses: high verticalRatio, rhythm confirms walking', () => {
+  const peaks = [];
+  const walkingEvents = [];
+  const detector = makeDirectionalDetector(peaks, walkingEvents);
+  let t = 0;
+  // Gravity settles along z (0,0,9.81); each pulse is ALONG that axis --
+  // a vertical, gravity-aligned impulse, as a real footfall jolt is.
+  detector.addSample(0, 0, 9.81, t, null); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0, 0, 9.81 + 0.05, t, null);
+  for(let s = 0; s < 4; s++){
+    detector.addSample(0, 0, 9.81 + 1.0, t, null); t += 50;
+    for(let k = 0; k < 11; k++){ detector.addSample(0, 0, 9.81 + 0.02, t, null); t += 50; }
+  }
+  assert.equal(peaks.length, 4);
+  for(const p of peaks) assert.equal(p.verticalRatio, 1, 'a purely gravity-aligned pulse must be 100% vertical');
+  assert.ok(walkingEvents.length > 0, 'rhythmic vertical pulses must still confirm walking (unchanged classification)');
+});
+
+test('B. left-right scan oscillation produces a similar rhythmic peak sequence and is (still) misclassified as walking -- the documented insufficiency', () => {
+  const peaks = [];
+  const walkingEvents = [];
+  const detector = makeDirectionalDetector(peaks, walkingEvents);
+  let t = 0;
+  const rotation = { alpha: 40, beta: 5, gamma: 5 }; // device rotating while scanning
+  // Alternating swings on x, perpendicular to gravity (still along z) -- a
+  // lateral, non-gravity-aligned oscillation, as a hand scanning the phone
+  // left-right produces.
+  detector.addSample(0, 0, 9.81, t, null, rotation); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0.02, 0, 9.81, t, null, rotation);
+  let sign = 1;
+  for(let s = 0; s < 4; s++){
+    detector.addSample(sign * 1.0, 0, 9.81, t, null, rotation); t += 50; sign = -sign;
+    for(let k = 0; k < 11; k++){ detector.addSample(0.02, 0, 9.81, t, null, rotation); t += 50; }
+  }
+  assert.equal(peaks.length, 4);
+  for(const p of peaks) assert.equal(p.verticalRatio, 0, 'a purely lateral swing must be 0% vertical');
+  assert.ok(peaks.every((p) => p.rotationRateMean != null && p.rotationRateMean > 0),
+    'rotation data present on the same event must be reflected in rotationRateMean');
+  // This is the key evidence for Step 2: magnitude + rhythm ALONE cannot
+  // separate this from case A above -- both confirm "walking" today.
+  assert.ok(walkingEvents.length > 0,
+    'documents that the CURRENT unchanged classifier still confirms walking for scan-like input');
+});
+
+test('C. irregular phone repositioning remains rejected by the unchanged rhythm rule', () => {
+  const peaks = [];
+  const walkingEvents = [];
+  const detector = makeDirectionalDetector(peaks, walkingEvents);
+  let t = 0;
+  detector.addSample(0, 0, 9.81, t, null); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0, 0, 9.81, t, null);
+  // Aperiodic jolts (mixed vertical/lateral), gaps deliberately irregular
+  // and mostly outside the [minStepIntervalMs, maxStepIntervalMs] window.
+  const gaps = [200, 2600, 350, 1900, 250];
+  for(const gap of gaps){
+    detector.addSample(0.5, 0, 9.81 + 0.6, t, null); t += 50;
+    const quietUntil = t + gap;
+    for(; t <= quietUntil; t += 50) detector.addSample(0.02, 0, 9.81, t, null);
+  }
+  assert.equal(walkingEvents.length, 0, 'irregular, non-rhythmic movement must not confirm walking');
+});
+
+test('rotationRateMean stays null throughout when the device never reports rotation data', () => {
+  const peaks = [];
+  const walkingEvents = [];
+  const detector = makeDirectionalDetector(peaks, walkingEvents);
+  let t = 0;
+  detector.addSample(0, 0, 9.81, t, null); t += 50; // no rotation argument at all
+  for(; t <= 500; t += 50) detector.addSample(0, 0, 9.81 + 0.05, t, null);
+  for(let s = 0; s < 2; s++){
+    detector.addSample(0, 0, 9.81 + 1.0, t, null); t += 50;
+    for(let k = 0; k < 11; k++){ detector.addSample(0, 0, 9.81 + 0.02, t, null); t += 50; }
+  }
+  assert.equal(peaks.length, 2);
+  for(const p of peaks) assert.equal(p.rotationRateMean, null);
+});
+
+test('reset() clears the directional/rotation accumulators -- no leakage into the next excursion', () => {
+  const peaks = [];
+  const walkingEvents = [];
+  const detector = makeDirectionalDetector(peaks, walkingEvents);
+  let t = 0;
+  const rotation = { alpha: 90, beta: 0, gamma: 0 };
+  // First: a lateral, rotating excursion (verticalRatio 0, rotation present).
+  detector.addSample(0, 0, 9.81, t, null, rotation); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0.02, 0, 9.81, t, null, rotation);
+  detector.addSample(1.0, 0, 9.81, t, null, rotation); t += 50;
+  for(let k = 0; k < 11; k++){ detector.addSample(0.02, 0, 9.81, t, null, rotation); t += 50; }
+  assert.equal(peaks.length, 1);
+  assert.equal(peaks[0].verticalRatio, 0);
+  assert.ok(peaks[0].rotationRateMean > 0);
+
+  detector.reset();
+
+  // Second: a vertical, non-rotating excursion, fed immediately after reset.
+  peaks.length = 0;
+  detector.addSample(0, 0, 9.81, t, null); t += 50;
+  const settleUntil = t + 500;
+  for(; t <= settleUntil; t += 50) detector.addSample(0, 0, 9.81 + 0.05, t, null);
+  detector.addSample(0, 0, 9.81 + 1.0, t, null); t += 50;
+  for(let k = 0; k < 11; k++){ detector.addSample(0, 0, 9.81 + 0.02, t, null); t += 50; }
+  assert.equal(peaks.length, 1);
+  assert.equal(peaks[0].verticalRatio, 1,
+    'the post-reset excursion must be scored purely on its own samples, not blended with the pre-reset lateral/rotation state');
+  assert.equal(peaks[0].rotationRateMean, null,
+    'post-reset rotation accumulator must not carry over the pre-reset rotating excursion');
+});
+
+test('the onStep (backfill/live) payload shape is unaffected by the new directional fields', () => {
+  // Guards against the new candidate.verticalRatio/rotationRateMean fields
+  // silently leaking into the ADAPTIVE_STEP_DETECTED shape, which the
+  // pre-existing backfill-exactness tests above assert with assert.deepEqual
+  // against a fixed 4-key object.
+  const r = runCandidates([candidate(1000), candidate(1600), candidate(2200)]);
+  for(const s of r.steps){
+    assert.deepEqual(Object.keys(s).sort(), ['amplitude', 'backfilled', 't', 'threshold']);
+  }
+});

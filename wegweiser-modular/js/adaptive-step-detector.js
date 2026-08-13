@@ -200,6 +200,24 @@ export function createAdaptiveStepDetector(config, callbacks){
   var exActive = false;
   var exStartT = 0;                // Beginn der Exkursion (fuer peakDurationMs-Diagnose)
   var exMax = 0, exMaxT = 0, exThresholdAtMax = 0, exMeanAtMax = 0, exStdAtMax = 0;
+  // Richtungs-Diagnose je Exkursion (NUR Protokoll, KEINE Klassifikation --
+  // Feldtest-Befund: Links-Rechts-Scannen im Stand erzeugt rhythmische
+  // Magnituden-Peaks, die von echten Schritten skalar nicht unterscheidbar
+  // sind. Der dynamische Beschleunigungsvektor wird deshalb VOR der
+  // Betragsbildung auf den bereits geschaetzten Schwerkraftvektor projiziert:
+  // Schritt-Impulse liegen ueberwiegend ENTLANG der Schwerkraft (vertikal),
+  // Scan-Schwuenge senkrecht dazu (lateral) -- lageunabhaengig, da die
+  // Referenz der gemessene Schwerkraftvektor selbst ist, nicht eine feste
+  // Geraeteachse. Zusaetzlich wird, falls das Geraet rotationRate liefert,
+  // die mittlere Rotationsrate der Exkursion erfasst (Drehen des Telefons
+  // beim Scannen; dort ist die traege Schwerkraft-EMA am unzuverlaessigsten).
+  // Erst der naechste Feldlauf zeigt, wo echte (auch schlurfende!) Schritte
+  // auf dieser Skala liegen -- eine Ablehnungsgrenze JETZT zu waehlen waere
+  // blindes Tuning gegen die geschuetzten Geh-Ergebnisse.
+  var exVertSum = 0;               // Summe |vertikaler Anteil| waehrend der Exkursion
+  var exLatSum = 0;                // Summe lateraler Anteil waehrend der Exkursion
+  var exRotSum = 0;                // Summe |rotationRate| (deg/s), falls geliefert
+  var exRotCount = 0;              // Anzahl Samples mit Rotationsdaten
 
   // Rhythmus-/Zaehl-Zustand
   var rhythm = createRhythmState();
@@ -245,7 +263,9 @@ export function createAdaptiveStepDetector(config, callbacks){
         threshold: candidate.threshold, mean: candidate.mean, std: candidate.std,
         intervalFromPreviousPeak: result.intervalFromPreviousPeak,
         consecutivePeaks: consecutiveAfter, classification: result.classification,
-        peakDurationMs: candidate.peakDurationMs });
+        peakDurationMs: candidate.peakDurationMs,
+        verticalRatio: candidate.verticalRatio,
+        rotationRateMean: candidate.rotationRateMean });
     }
   }
 
@@ -253,7 +273,10 @@ export function createAdaptiveStepDetector(config, callbacks){
     // Erhaelt jedes Sensor-Sample vom Produktions-Detektor-Tap. reportedIntervalMs
     // ist event.interval (falls der Browser es liefert), atTime die gleiche
     // Zeitbasis wie im Produktionspfad (performance.now()).
-    addSample: function(x, y, z, atTime, reportedIntervalMs){
+    // rotation (optional): { alpha, beta, gamma } aus event.rotationRate des
+    // SELBEN devicemotion-Ereignisses (deg/s), oder null falls das Geraet
+    // keine Rotationsdaten liefert.
+    addSample: function(x, y, z, atTime, reportedIntervalMs, rotation){
       // -- Abtast-Diagnostik --
       sampleCount++;
       if(firstSampleT == null) firstSampleT = atTime;
@@ -275,6 +298,22 @@ export function createAdaptiveStepDetector(config, callbacks){
       gravity.z += cfg.gravityAlpha * (z - gravity.z);
       var dx = x - gravity.x, dy = y - gravity.y, dz = z - gravity.z;
       var dynMag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      // Richtungs-Zerlegung (siehe Kommentar am Exkursions-Zustand oben):
+      // Anteil des dynamischen Vektors ENTLANG der Schwerkraft (vertikal)
+      // vs. senkrecht dazu (lateral). gMag ~9,81 bei realen Sensordaten;
+      // der Schutz gegen ~0 greift nur bei degenerierten (synthetischen)
+      // Eingaben ohne Schwerkraftanteil.
+      var gMag = Math.sqrt(gravity.x * gravity.x + gravity.y * gravity.y + gravity.z * gravity.z);
+      var vertComp = 0, latComp = dynMag;
+      if(gMag > 1e-6){
+        vertComp = (dx * gravity.x + dy * gravity.y + dz * gravity.z) / gMag;
+        latComp = Math.sqrt(Math.max(0, dynMag * dynMag - vertComp * vertComp));
+      }
+      var rotMag = null;
+      if(rotation && rotation.alpha != null && rotation.beta != null && rotation.gamma != null){
+        rotMag = Math.sqrt(rotation.alpha * rotation.alpha +
+          rotation.beta * rotation.beta + rotation.gamma * rotation.gamma);
+      }
       // rising = das geglaettete Signal ist mit DIESEM Sample gestiegen --
       // Voraussetzung fuer einen Exkursions-START (siehe unten): die
       // abfallende Flanke eines gerade abgeschlossenen Peaks liegt zwar noch
@@ -337,20 +376,38 @@ export function createAdaptiveStepDetector(config, callbacks){
           exStartT = atTime;
           exMax = smoothed; exMaxT = atTime;
           exThresholdAtMax = threshold; exMeanAtMax = mean; exStdAtMax = std;
+          exVertSum = Math.abs(vertComp); exLatSum = latComp;
+          exRotSum = rotMag != null ? rotMag : 0;
+          exRotCount = rotMag != null ? 1 : 0;
         }
         return;
       }
+      // Richtungs-/Rotationsanteile ueber die GESAMTE Exkursion aufsummieren
+      // (robuster als der Einzelwert am Maximum-Sample).
+      exVertSum += Math.abs(vertComp);
+      exLatSum += latComp;
+      if(rotMag != null){ exRotSum += rotMag; exRotCount++; }
       if(smoothed > exMax){
         exMax = smoothed; exMaxT = atTime;
         exThresholdAtMax = threshold; exMeanAtMax = mean; exStdAtMax = std;
       }
       if(smoothed < exMax * cfg.peakReleaseRatio){
+        var energySum = exVertSum + exLatSum;
         var candidate = { t: exMaxT, amplitude: exMax, threshold: exThresholdAtMax,
           mean: exMeanAtMax, std: exStdAtMax,
           // Diagnose: Dauer der gesamten Exkursion -- im Feldlog direkt
           // pruefbar, ob Exkursionen jetzt schrittkurz (<1s) sind statt der
           // frueheren 3-5s-Verschmelzungen.
-          peakDurationMs: atTime - exStartT };
+          peakDurationMs: atTime - exStartT,
+          // Richtungs-Diagnose (siehe Kommentar am Exkursions-Zustand):
+          // Anteil (0..1) der vertikalen (schwerkraft-parallelen) Energie an
+          // der Gesamtenergie der Exkursion -- Gehen erwartungsgemaess hoch,
+          // Links-Rechts-Scannen niedrig. null bei degeneriertem
+          // Schwerkraftvektor (nur synthetisch moeglich).
+          verticalRatio: energySum > 0 ? exVertSum / energySum : null,
+          // Mittlere |rotationRate| (deg/s) waehrend der Exkursion, null wenn
+          // das Geraet keine Rotationsdaten liefert.
+          rotationRateMean: exRotCount > 0 ? exRotSum / exRotCount : null };
         exActive = false;
         processCandidate(candidate);
       }
@@ -364,6 +421,7 @@ export function createAdaptiveStepDetector(config, callbacks){
       exActive = false;
       exStartT = 0; exMax = 0; exMaxT = 0;
       exThresholdAtMax = 0; exMeanAtMax = 0; exStdAtMax = 0;
+      exVertSum = 0; exLatSum = 0; exRotSum = 0; exRotCount = 0;
       rhythm = createRhythmState();
       adaptiveStepCount = 0;
       peakCount = 0;
