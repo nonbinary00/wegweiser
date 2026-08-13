@@ -170,6 +170,7 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
         mean: r2(p.mean), std: r2(p.std),
         intervalFromPreviousPeak: p.intervalFromPreviousPeak != null ? Math.round(p.intervalFromPreviousPeak) : null,
         consecutivePeaks: p.consecutivePeaks, classification: p.classification,
+        peakDurationMs: p.peakDurationMs != null ? Math.round(p.peakDurationMs) : null,
         timestamp: Date.now()
       });
     },

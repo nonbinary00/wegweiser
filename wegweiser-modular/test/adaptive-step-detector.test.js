@@ -291,6 +291,115 @@ test('getSummary() reports sample count, average/min/max interval, and the repor
   assert.equal(s.reportedEventIntervalMs, 33.3, 'the most recent non-null event.interval is kept');
 });
 
+// ==================== Excursion merging fix (field-test correction) ====================
+// Field evidence: during normal walking the old release rule (signal must
+// fall below exStartThreshold * 0.5, with the threshold frozen at excursion
+// START) merged several physical steps into one excursion, producing
+// apparent candidate intervals of 3-5s at a real ~0.5-1s cadence -- so the
+// rhythm validator saw nothing but "sequence-start" resets. The corrected
+// rule closes relative to the RUNNING local maximum (smoothed < exMax *
+// peakReleaseRatio) and only opens a new excursion on a RISING sample.
+//
+// Deterministic setup: gravityAlpha 0 freezes gravity at the first sample
+// (0,0,0), smoothingAlpha 1 disables smoothing (smoothed === fed magnitude),
+// thresholdK 0 clamps the threshold to the 0.35 floor for constant-threshold
+// cases. Peaks/valleys are then exact, not approximations.
+
+function makeDeterministicDetector(overrides, peaks){
+  return createAdaptiveStepDetector(
+    Object.assign({ gravityAlpha: 0, smoothingAlpha: 1, thresholdK: 0 }, overrides || {}),
+    { onPeak: (p) => peaks.push(p) }
+  );
+}
+
+// Feeds: warm-up quiet, then `n` peak/valley cycles (~600ms cadence), then a
+// final collapse so any open excursion terminates.
+function walkPattern(detector, n, peakAmp, valleyAmp){
+  let t = 0;
+  detector.addSample(0, 0, 0, t, null); t += 50;             // gravity init
+  for(; t <= 500; t += 50) detector.addSample(0, 0.05, 0, t, null);
+  for(let s = 0; s < n; s++){
+    detector.addSample(0, peakAmp, 0, t, null); t += 50;
+    for(let k = 0; k < 11; k++){ detector.addSample(0, valleyAmp, 0, t, null); t += 50; }
+  }
+  for(let k = 0; k < 10; k++){ detector.addSample(0, 0.02, 0, t, null); t += 50; }
+}
+
+test('Case A: full release between peaks yields one candidate per physical peak', () => {
+  const peaks = [];
+  walkPattern(makeDeterministicDetector(null, peaks), 3, 1.0, 0.05);
+  assert.equal(peaks.length, 3);
+});
+
+test('Case B regression: valleys below the threshold but above the OLD frozen release no longer merge steps', () => {
+  // Valley 0.25 = 25% of peak: below the 0.35 threshold, but above the old
+  // frozen release boundary (0.35 * 0.5 = 0.175). The old rule produced ONE
+  // candidate here (confirmed before the fix); the corrected rule separates
+  // all three steps.
+  const peaks = [];
+  walkPattern(makeDeterministicDetector(null, peaks), 3, 1.0, 0.25);
+  assert.equal(peaks.length, 3, 'physically separate steps must not merge into one excursion');
+});
+
+test('release-boundary documentation: valleys at 40% of the local peak separate; at/above 50% they still merge', () => {
+  // Documents the actual robustness boundary of the unchanged
+  // peakReleaseRatio = 0.5 (strictly-below comparison): this is expected
+  // current behavior to evaluate against field data, not a hidden defect.
+  const at40 = [];
+  walkPattern(makeDeterministicDetector(null, at40), 3, 1.0, 0.4);
+  assert.equal(at40.length, 3);
+
+  const at50 = [];
+  walkPattern(makeDeterministicDetector(null, at50), 3, 1.0, 0.5);
+  assert.equal(at50.length, 1, 'a valley exactly AT 50% of the peak does not release (strict <)');
+
+  const at60 = [];
+  walkPattern(makeDeterministicDetector(null, at60), 3, 1.0, 0.6);
+  assert.equal(at60.length, 1);
+});
+
+test('the falling tail of one physical peak cannot reopen an excursion and duplicate the candidate', () => {
+  // Rise to 3.0, then a gradual decay: the release fires while the tail
+  // (1.2 -> 0.45) is still above the 0.35 threshold -- but every tail sample
+  // is FALLING, so no second excursion may open.
+  const peaks = [];
+  const detector = makeDeterministicDetector(null, peaks);
+  let t = 0;
+  detector.addSample(0, 0, 0, t, null); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0, 0.05, 0, t, null);
+  for(const v of [3.0, 2.4, 1.9, 1.2, 0.9, 0.6, 0.45, 0.05, 0.05]){
+    detector.addSample(0, v, 0, t, null); t += 50;
+  }
+  assert.equal(peaks.length, 1, 'one physical peak must yield exactly one candidate');
+  assert.equal(Math.round(peaks[0].amplitude * 10) / 10, 3.0, 'the candidate must carry the true local maximum');
+});
+
+test('Case C: an inflated adaptive threshold does not delay excursion close (release is exMax-relative)', () => {
+  // Default thresholdK (1.2): strong peaks inflate mean/std so the threshold
+  // rises well above the floor while excursions are open. Valleys at 40% of
+  // the peak must still separate every step, because the close rule
+  // references only the excursion's own local maximum, never the threshold.
+  const peaks = [];
+  const detector = createAdaptiveStepDetector(
+    { gravityAlpha: 0, smoothingAlpha: 1 },   // default thresholdK stays active
+    { onPeak: (p) => peaks.push(p) }
+  );
+  walkPattern(detector, 5, 3.0, 1.2);          // valley = 40% of 3.0
+  assert.equal(peaks.length, 5);
+  const lastPeak = peaks[peaks.length - 1];
+  assert.ok(lastPeak.threshold > DEFAULT_ADAPTIVE_STEP_CONFIG.thresholdFloor,
+    `expected an inflated threshold by the last step, got ${lastPeak.threshold}`);
+});
+
+test('candidate peaks carry a peakDurationMs diagnostic covering the whole excursion', () => {
+  const peaks = [];
+  walkPattern(makeDeterministicDetector(null, peaks), 1, 1.0, 0.05);
+  assert.equal(peaks.length, 1);
+  assert.equal(typeof peaks[0].peakDurationMs, 'number');
+  assert.ok(peaks[0].peakDurationMs >= 0 && peaks[0].peakDurationMs < 1000,
+    `a single clean step must produce a short excursion, got ${peaks[0].peakDurationMs}ms`);
+});
+
 // ==================== Peak diagnostics content ====================
 
 test('every candidate peak reports amplitude, threshold, mean, std, interval, consecutive count, and classification', () => {

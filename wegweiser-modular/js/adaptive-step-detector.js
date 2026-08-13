@@ -51,9 +51,18 @@ export var DEFAULT_ADAPTIVE_STEP_CONFIG = {
   // threshold = max(thresholdFloor, mean + thresholdK * std)
   thresholdK: 1.2,
   thresholdFloor: 0.35,
-  // Exkursions-Hysterese: eine laufende Peak-Exkursion endet erst, wenn das
-  // Signal unter (Exkursions-Startschwelle * peakReleaseRatio) faellt --
-  // gegen Geflacker um die Schwelle, analog releaseRatio im Produktionspfad.
+  // Lokalmaximum-Abschluss: eine laufende Peak-Exkursion endet, sobald das
+  // Signal um diesen Anteil unter ihr LAUFENDES lokales Maximum faellt
+  // (smoothed < exMax * peakReleaseRatio). Feldtest-Korrektur: die fruehere
+  // Referenz auf die beim Exkursions-START eingefrorene Schwelle
+  // (exStartThreshold * ratio) verschmolz bei normalem Gehen mehrere
+  // physische Schritte zu EINER Exkursion, weil das Signal zwischen
+  // Schritten zwar deutlich einbricht, aber nicht bis unter 50% der
+  // niedrigen Startschwelle kollabiert -- deterministisch reproduziert in
+  // test/adaptive-step-detector.test.js (Fall B) und sichtbar in den
+  // Feldlogs als scheinbare Kandidaten-Intervalle von 3-5s bei realer
+  // Kadenz von ~0,5-1s. Der Abfall relativ zum lokalen Maximum skaliert
+  // dagegen mit der tatsaechlichen Schritthoehe. Wert (0,5) unveraendert.
   peakReleaseRatio: 0.5,
   // Rhythmus-Validierung: plausibles Schrittintervall-Fenster und Anzahl
   // aufeinanderfolgender rhythmischer Peaks, bevor "Gehen" als bestaetigt
@@ -189,7 +198,7 @@ export function createAdaptiveStepDetector(config, callbacks){
 
   // Exkursions-Zustand (lokale Peak-Erkennung)
   var exActive = false;
-  var exStartThreshold = 0;
+  var exStartT = 0;                // Beginn der Exkursion (fuer peakDurationMs-Diagnose)
   var exMax = 0, exMaxT = 0, exThresholdAtMax = 0, exMeanAtMax = 0, exStdAtMax = 0;
 
   // Rhythmus-/Zaehl-Zustand
@@ -235,7 +244,8 @@ export function createAdaptiveStepDetector(config, callbacks){
       cb.onPeak({ t: candidate.t, amplitude: candidate.amplitude,
         threshold: candidate.threshold, mean: candidate.mean, std: candidate.std,
         intervalFromPreviousPeak: result.intervalFromPreviousPeak,
-        consecutivePeaks: consecutiveAfter, classification: result.classification });
+        consecutivePeaks: consecutiveAfter, classification: result.classification,
+        peakDurationMs: candidate.peakDurationMs });
     }
   }
 
@@ -265,7 +275,19 @@ export function createAdaptiveStepDetector(config, callbacks){
       gravity.z += cfg.gravityAlpha * (z - gravity.z);
       var dx = x - gravity.x, dy = y - gravity.y, dz = z - gravity.z;
       var dynMag = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      smoothed = (smoothed == null) ? dynMag : smoothed + cfg.smoothingAlpha * (dynMag - smoothed);
+      // rising = das geglaettete Signal ist mit DIESEM Sample gestiegen --
+      // Voraussetzung fuer einen Exkursions-START (siehe unten): die
+      // abfallende Flanke eines gerade abgeschlossenen Peaks liegt zwar noch
+      // ueber der Schwelle, faellt aber und darf keine zweite Exkursion
+      // desselben physischen Schritts eroeffnen (Doppelzaehlungs-Schutz).
+      var rising = false;
+      if(smoothed == null){
+        smoothed = dynMag;               // erster Glaettungswert: keine Richtung bestimmbar
+      } else {
+        var nextSmoothed = smoothed + cfg.smoothingAlpha * (dynMag - smoothed);
+        rising = nextSmoothed > smoothed;
+        smoothed = nextSmoothed;
+      }
 
       // -- rollende Statistik + adaptive Schwelle --
       windowSamples.push({ t: atTime, v: smoothed });
@@ -300,10 +322,19 @@ export function createAdaptiveStepDetector(config, callbacks){
       }
 
       // -- Exkursions-/Lokalmaximum-Erkennung --
+      // Feldtest-Korrektur (Details am peakReleaseRatio-Kommentar oben):
+      // START zusaetzlich nur bei STEIGENDEM Signal (rising) -- die noch ueber
+      // der Schwelle liegende, aber fallende Flanke eines soeben
+      // abgeschlossenen Peaks darf keine zweite Exkursion desselben
+      // physischen Schritts eroeffnen. ABSCHLUSS relativ zum LAUFENDEN
+      // lokalen Maximum (exMax) statt zur eingefrorenen Startschwelle --
+      // dadurch trennen sich aufeinanderfolgende Schritte, deren Taeler
+      // deutlich einbrechen, ohne bis unter 50% der (niedrigen)
+      // Startschwelle kollabieren zu muessen.
       if(!exActive){
-        if(smoothed >= threshold){
+        if(rising && smoothed >= threshold){
           exActive = true;
-          exStartThreshold = threshold;
+          exStartT = atTime;
           exMax = smoothed; exMaxT = atTime;
           exThresholdAtMax = threshold; exMeanAtMax = mean; exStdAtMax = std;
         }
@@ -313,9 +344,13 @@ export function createAdaptiveStepDetector(config, callbacks){
         exMax = smoothed; exMaxT = atTime;
         exThresholdAtMax = threshold; exMeanAtMax = mean; exStdAtMax = std;
       }
-      if(smoothed < exStartThreshold * cfg.peakReleaseRatio){
+      if(smoothed < exMax * cfg.peakReleaseRatio){
         var candidate = { t: exMaxT, amplitude: exMax, threshold: exThresholdAtMax,
-          mean: exMeanAtMax, std: exStdAtMax };
+          mean: exMeanAtMax, std: exStdAtMax,
+          // Diagnose: Dauer der gesamten Exkursion -- im Feldlog direkt
+          // pruefbar, ob Exkursionen jetzt schrittkurz (<1s) sind statt der
+          // frueheren 3-5s-Verschmelzungen.
+          peakDurationMs: atTime - exStartT };
         exActive = false;
         processCandidate(candidate);
       }
@@ -327,7 +362,7 @@ export function createAdaptiveStepDetector(config, callbacks){
       windowSamples = [];
       firstSampleT = null;
       exActive = false;
-      exStartThreshold = 0; exMax = 0; exMaxT = 0;
+      exStartT = 0; exMax = 0; exMaxT = 0;
       exThresholdAtMax = 0; exMeanAtMax = 0; exStdAtMax = 0;
       rhythm = createRhythmState();
       adaptiveStepCount = 0;
