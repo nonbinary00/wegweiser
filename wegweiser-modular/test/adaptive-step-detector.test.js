@@ -568,3 +568,128 @@ test('the onStep (backfill/live) payload shape is unaffected by the new directio
     assert.deepEqual(Object.keys(s).sort(), ['amplitude', 'backfilled', 't', 'threshold']);
   }
 });
+
+// ==================== Scan suppression (Tag4->9 field-log-based prototype) ====================
+// Field log wegweiser-v13-log-20260814-185329(28).json (9 controlled walking
+// runs across normal/cautious/shuffling + 3 scan-left-right runs): scan peaks'
+// verticalRatio (0.11-0.55) overlaps too much with cautious/shuffling gait
+// (0.13-0.43) to reject on verticalRatio alone, but rotationRateMean during
+// scanning was almost always far higher (commonly 40-136) than the highest
+// rotationRateMean any CONFIRMED real walking peak reached in that log
+// (32.72) -- a >12 point margin. Requiring TWO consecutive candidates that
+// combine low verticalRatio AND high rotationRateMean (rather than rejecting
+// on a single peak) reproduced zero false suppressions across every
+// walking run in the log while still halting all three scan runs, per the
+// offline analysis -- see scanSuppressionEnabled and friends in
+// DEFAULT_ADAPTIVE_STEP_CONFIG for the exact values and rationale.
+
+function makeScanSuppressionDetector(configOverrides){
+  const peaks = [];
+  const walkStarts = [];
+  const walkStops = [];
+  const detector = createAdaptiveStepDetector(
+    Object.assign({ gravityAlpha: 0, smoothingAlpha: 1, thresholdK: 0 }, configOverrides || {}),
+    {
+      onPeak: (p) => peaks.push(p),
+      onWalkingStart: (w) => walkStarts.push(w),
+      onWalkingStop: (w) => walkStops.push(w),
+    }
+  );
+  return { detector, peaks, walkStarts, walkStops };
+}
+
+function feedVerticalWalkingPulses(detector, t, pulseCount){
+  for(let s = 0; s < pulseCount; s++){
+    detector.addSample(0, 0, 9.81 + 1.0, t, null); t += 50;
+    for(let k = 0; k < 11; k++){ detector.addSample(0, 0, 9.81 + 0.02, t, null); t += 50; }
+  }
+  return t;
+}
+
+function feedScanPulses(detector, t, pulseCount, rotation){
+  let sign = 1;
+  for(let s = 0; s < pulseCount; s++){
+    detector.addSample(sign * 1.0, 0, 9.81, t, null, rotation); t += 50; sign = -sign;
+    for(let k = 0; k < 11; k++){ detector.addSample(0.02, 0, 9.81, t, null, rotation); t += 50; }
+  }
+  return t;
+}
+
+test('sustained left-right scanning stops an already-confirmed walking sequence (scan-suppressed)', () => {
+  const { detector, peaks, walkStarts, walkStops } = makeScanSuppressionDetector();
+  let t = 0;
+  const rotation = { alpha: 60, beta: 5, gamma: 5 }; // rotationRateMean ~60.4, well above scanRotationRateMin (45)
+  detector.addSample(0, 0, 9.81, t, null); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0, 0, 9.81 + 0.05, t, null);
+  t = feedVerticalWalkingPulses(detector, t, 3); // confirms walking (minConsecutivePeaks 3)
+  assert.equal(walkStarts.length, 1, 'walking must confirm normally before any scanning starts');
+
+  t = feedScanPulses(detector, t, 2, rotation); // two consecutive scan-like candidates
+
+  assert.equal(walkStops.length, 1, 'sustained scanning must stop the confirmed walking sequence');
+  assert.equal(walkStops[0].reason, 'scan-suppressed');
+  assert.equal(detector.isWalking(), false);
+  assert.equal(peaks[peaks.length - 1].classification, 'scan-suppressed');
+});
+
+test('a single isolated scan-like peak does not interrupt an already-confirmed walking sequence', () => {
+  const { detector, walkStarts, walkStops } = makeScanSuppressionDetector();
+  let t = 0;
+  const rotation = { alpha: 60, beta: 5, gamma: 5 };
+  detector.addSample(0, 0, 9.81, t, null); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0, 0, 9.81 + 0.05, t, null);
+  t = feedVerticalWalkingPulses(detector, t, 3);
+  assert.equal(walkStarts.length, 1);
+
+  t = feedScanPulses(detector, t, 1, rotation); // ONE scan-like candidate only
+  t = feedVerticalWalkingPulses(detector, t, 2); // back to genuine walking
+
+  assert.equal(walkStops.length, 0,
+    'one isolated scan-like candidate must be tolerated -- only a sustained (2+) pattern should stop walking');
+  assert.equal(detector.isWalking(), true);
+});
+
+test('two consecutive scan-like peaks before confirmation block a new sequence from starting, without corrupting a later genuine one', () => {
+  const { detector, walkStarts, walkStops } = makeScanSuppressionDetector();
+  let t = 0;
+  const rotation = { alpha: 60, beta: 5, gamma: 5 };
+  detector.addSample(0, 0, 9.81, t, null); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0, 0, 9.81 + 0.05, t, null);
+
+  t = feedScanPulses(detector, t, 2, rotation); // scanning while standing still, no walking ever confirmed
+  assert.equal(walkStarts.length, 0, 'scanning alone must never confirm walking');
+
+  t = feedVerticalWalkingPulses(detector, t, 3); // genuine walking begins right after
+  assert.equal(walkStarts.length, 1, 'a later genuine walking sequence must still confirm normally');
+  assert.equal(walkStops.length, 0);
+});
+
+test('low-verticalRatio walking without elevated rotation (shuffling/cautious-like) is never suppressed', () => {
+  // verticalRatio alone is deliberately NOT sufficient to trigger suppression
+  // (see field-log analysis): a lateral-leaning but non-rotating gait must
+  // pass through untouched, matching the protected shuffling/cautious result.
+  const { detector, walkStarts, walkStops } = makeScanSuppressionDetector();
+  let t = 0;
+  detector.addSample(0, 0, 9.81, t, null); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0.01, 0, 9.81 + 0.02, t, null);
+  for(let s = 0; s < 5; s++){
+    // mixed vertical+lateral pulse (low verticalRatio) with NO rotation data at all
+    detector.addSample(0.9, 0, 9.81 + 0.3, t, null); t += 50;
+    for(let k = 0; k < 11; k++){ detector.addSample(0.02, 0, 9.81 + 0.02, t, null); t += 50; }
+  }
+  assert.equal(walkStarts.length, 1, 'weak-vertical, non-rotating gait must still confirm walking');
+  assert.equal(walkStops.length, 0, 'weak-vertical, non-rotating gait must never be scan-suppressed');
+});
+
+test('scanSuppressionEnabled: false fully restores the previous (diagnostics-only) behavior', () => {
+  const { detector, walkStarts, walkStops, peaks } = makeScanSuppressionDetector({ scanSuppressionEnabled: false });
+  let t = 0;
+  const rotation = { alpha: 60, beta: 5, gamma: 5 };
+  detector.addSample(0, 0, 9.81, t, null); t += 50;
+  for(; t <= 500; t += 50) detector.addSample(0, 0, 9.81 + 0.05, t, null);
+  t = feedVerticalWalkingPulses(detector, t, 3);
+  t = feedScanPulses(detector, t, 4, rotation); // would trigger suppression if enabled
+
+  assert.equal(walkStops.length, 0, 'disabling the flag must remove all suppression behavior');
+  assert.ok(!peaks.some((p) => p.classification === 'scan-suppressed'));
+});

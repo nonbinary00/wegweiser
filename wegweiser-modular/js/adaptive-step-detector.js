@@ -77,7 +77,26 @@ export var DEFAULT_ADAPTIVE_STEP_CONFIG = {
   // Statistikfenster sind anfangs leer/unzuverlaessig -- in dieser Zeit
   // werden keine Kandidaten-Peaks erzeugt (gleiche Idee wie warmupMs im
   // Produktionspfad).
-  warmupMs: 400
+  warmupMs: 400,
+  // ---- Experimentelle Scan-Unterdrueckung (Tag4->9-Feldbefund) ----
+  // NUR aktiv, wenn scanSuppressionEnabled true ist -- auf false setzen
+  // schaltet exakt das vorige (rein diagnostische) Verhalten wieder frei.
+  // Herleitung/Belege: naechster Feldlog-Analysebericht (verticalRatio +
+  // rotationRateMean ueber 9 kontrollierte Laeufe je Gangart plus 3
+  // Scan-Laeufe). Scan-Peaks lagen bei verticalRatio 0,11-0,55 (ueberlappt
+  // mit schlurfendem/vorsichtigem Gehen -- verticalRatio ALLEIN daher NICHT
+  // sicher) aber rotationRateMean meist 40-136 (deutlich ueber dem Maximum
+  // 32,72, das irgendein bestaetigter Gehen-Peak in diesem Log erreichte).
+  // Ein EINZELNER Kandidat, der beide Bedingungen erfuellt, wird bewusst
+  // NICHT unterdrueckt (im Log kam genau ein isolierter schlurfender Peak
+  // mit rotationRateMean 41,89 vor, der nie zu einer Gehen-Bestaetigung
+  // beitrug) -- erst ZWEI SOLCHER Kandidaten IN FOLGE loesen aus. Absichtlich
+  // konservativ: ein einzelner Scan-Ausschlag darf durchrutschen, siehe
+  // scanConsecutivePeaksToSuppress.
+  scanSuppressionEnabled: true,
+  scanVerticalRatioMax: 0.30,
+  scanRotationRateMin: 45,
+  scanConsecutivePeaksToSuppress: 2
 };
 
 // ==================== Reine Rhythmus-Validierung ====================
@@ -182,10 +201,17 @@ export function checkWalkingTimeout(state, t, config){
 // ==================== Detektor-Objekt ====================
 // callbacks (alle optional):
 //   onPeak({ t, amplitude, threshold, mean, std, intervalFromPreviousPeak,
-//            consecutivePeaks, classification })      -- jeder Kandidaten-Peak
+//            consecutivePeaks, classification })      -- jeder Kandidaten-Peak.
+//            classification kann jetzt auch "scan-suppressed" sein (siehe
+//            scanSuppressionEnabled) -- consecutivePeaks/intervalFromPreviousPeak
+//            sind fuer diese Klassifikation ohne Bedeutung (immer 0/null), der
+//            Kandidat wurde bewusst NICHT an processCandidatePeak() weitergegeben.
 //   onStep({ t, amplitude, threshold, backfilled })   -- experimenteller Schritt
 //   onWalkingStart({ t, consecutivePeaks })
-//   onWalkingStop({ t, reason, adaptiveStepCount })
+//   onWalkingStop({ t, reason, adaptiveStepCount })   -- reason kann jetzt auch
+//            "scan-suppressed" sein (zwei aufeinanderfolgende Scan-verdaechtige
+//            Kandidaten waehrend bereits bestaetigtem Gehen), zusaetzlich zu den
+//            bestehenden "rhythm-break"/"inactivity-timeout".
 export function createAdaptiveStepDetector(config, callbacks){
   var cfg = Object.assign({}, DEFAULT_ADAPTIVE_STEP_CONFIG, config || {});
   var cb = callbacks || {};
@@ -211,9 +237,11 @@ export function createAdaptiveStepDetector(config, callbacks){
   // Geraeteachse. Zusaetzlich wird, falls das Geraet rotationRate liefert,
   // die mittlere Rotationsrate der Exkursion erfasst (Drehen des Telefons
   // beim Scannen; dort ist die traege Schwerkraft-EMA am unzuverlaessigsten).
-  // Erst der naechste Feldlauf zeigt, wo echte (auch schlurfende!) Schritte
-  // auf dieser Skala liegen -- eine Ablehnungsgrenze JETZT zu waehlen waere
-  // blindes Tuning gegen die geschuetzten Geh-Ergebnisse.
+  // Ein Feldlog (9 kontrollierte Gang-Laeufe + 3 Scan-Laeufe) belegt inzwischen
+  // eine mit Sicherheitsabstand getrennte Grenze auf rotationRateMean, siehe
+  // scanRotationRateMin/scanVerticalRatioMax weiter oben -- die eigentliche
+  // Unterdrueckungs-Entscheidung bleibt unten in processCandidate() isoliert
+  // und ueber scanSuppressionEnabled abschaltbar.
   var exVertSum = 0;               // Summe |vertikaler Anteil| waehrend der Exkursion
   var exLatSum = 0;                // Summe lateraler Anteil waehrend der Exkursion
   var exRotSum = 0;                // Summe |rotationRate| (deg/s), falls geliefert
@@ -223,6 +251,9 @@ export function createAdaptiveStepDetector(config, callbacks){
   var rhythm = createRhythmState();
   var adaptiveStepCount = 0;
   var peakCount = 0;
+  // Anzahl AUFEINANDERFOLGENDER Scan-verdaechtiger Kandidaten (siehe
+  // scanSuppressionEnabled), NICHT dasselbe wie rhythm.consecutive.
+  var scanStreak = 0;
 
   // Abtast-Diagnostik (Feld-Beleg der echten Sensorrate -- NICHT pro Sample
   // protokolliert, sondern nur aggregiert per getSummary() abfragbar)
@@ -255,6 +286,47 @@ export function createAdaptiveStepDetector(config, callbacks){
 
   function processCandidate(candidate){
     peakCount++;
+
+    // Scan-Unterdrueckung (siehe scanSuppressionEnabled-Kommentar bei der
+    // Konfiguration): bewusst VOR processCandidatePeak() und bewusst auf
+    // Basis eines eigenen Streak-Zaehlers (NICHT rhythm.consecutive) --
+    // ein einzelner Scan-verdaechtiger Kandidat durchlaeuft die normale
+    // Rhythmus-Verarbeitung unveraendert (darf also z.B. noch eine
+    // Gehen-Bestaetigung ausloesen, falls er zufaellig der dritte
+    // rhythmische Peak ist); erst der ZWEITE Scan-verdaechtige Kandidat IN
+    // FOLGE greift ein -- entweder er verhindert eine noch unbestaetigte
+    // Serie (Reset auf leeren Rhythmus-Zustand) oder er beendet ein
+    // bereits bestaetigtes Gehen sofort (wie ein Rhythmusbruch), statt auf
+    // den naechsten inactivity-timeout zu warten.
+    var isScanLike = cfg.scanSuppressionEnabled &&
+      candidate.verticalRatio != null && candidate.rotationRateMean != null &&
+      candidate.verticalRatio < cfg.scanVerticalRatioMax &&
+      candidate.rotationRateMean > cfg.scanRotationRateMin;
+    scanStreak = isScanLike ? scanStreak + 1 : 0;
+
+    if(scanStreak >= cfg.scanConsecutivePeaksToSuppress){
+      var wasWalking = rhythm.walking;
+      if(wasWalking){
+        rhythm = { walking: false, consecutive: 0, sequence: [],
+          lastValidPeakT: rhythm.lastValidPeakT };
+        if(cb.onWalkingStop){
+          cb.onWalkingStop({ t: candidate.t, reason: "scan-suppressed",
+            adaptiveStepCount: adaptiveStepCount });
+        }
+      } else {
+        rhythm = createRhythmState();
+      }
+      if(cb.onPeak){
+        cb.onPeak({ t: candidate.t, amplitude: candidate.amplitude,
+          threshold: candidate.threshold, mean: candidate.mean, std: candidate.std,
+          intervalFromPreviousPeak: null, consecutivePeaks: 0,
+          classification: "scan-suppressed", peakDurationMs: candidate.peakDurationMs,
+          verticalRatio: candidate.verticalRatio,
+          rotationRateMean: candidate.rotationRateMean });
+      }
+      return;
+    }
+
     var result = processCandidatePeak(rhythm, candidate, cfg);
     var consecutiveAfter = result.state.consecutive;
     handleRhythmResult(result);
@@ -425,6 +497,7 @@ export function createAdaptiveStepDetector(config, callbacks){
       rhythm = createRhythmState();
       adaptiveStepCount = 0;
       peakCount = 0;
+      scanStreak = 0;
       sampleCount = 0;
       lastSampleT = null;
       minSampleIntervalMs = null;
