@@ -26,6 +26,11 @@ function selectDestination(id){
 function resetState(){
   nav.endNavigation(false);
   spokenTexts.length = 0;
+  // Test isolation for the Tag4->9 detector-lifecycle hooks (setTag9DetectorHooks)
+  // and the adaptiveDetectorActive flag -- both are nav.js module-level state
+  // that must never leak from one test into the next.
+  nav.setTag9DetectorHooks(null);
+  nav.setAdaptiveDetectorActive(false);
 }
 
 // ==================== Problem 1: Tag 11 start ====================
@@ -712,5 +717,175 @@ test('the generic time-based scanHint() is suppressed while the local flow is in
       spokenTexts.length > 0,
       'the generic search-retry mechanism must still be able to speak once SEARCH_TAG9 is reached'
     );
+  });
+});
+
+// ==================== Automatic detector lifecycle hooks (setTag9DetectorHooks) ====================
+// app.js registers { ensureActive, notifyFlowEnded } once at module load (see
+// ensureTag9DetectorActive()/onTag9FlowEnded() there); nav.js itself still
+// knows nothing about the detector/permission/ownership -- it only calls
+// these two functions synchronously at the exact points documented in
+// beginSegment()/resetTag9Flow()/completeTag9FlowArrival(). These tests
+// exercise that CONTRACT with fake hooks standing in for app.js, without a
+// DOM/detector harness (none exists for app.js in this project).
+
+function makeFakeTag9Hooks(simulateGranted){
+  var calls = { ensureActiveCount: 0, flowEndedReasons: [] };
+  nav.setTag9DetectorHooks({
+    ensureActive: function(){
+      calls.ensureActiveCount++;
+      // Mirrors app.js's real contract: on success, the hook itself calls
+      // setAdaptiveDetectorActive(true) as a side effect; on failure
+      // (permission denied/unavailable), it does nothing.
+      if(simulateGranted) nav.setAdaptiveDetectorActive(true);
+    },
+    notifyFlowEnded: function(reason){ calls.flowEndedReasons.push(reason); }
+  });
+  return calls;
+}
+
+test('permission granted (simulated via hooks): entering edge 4->9 automatically activates the detector and starts the local flow', () => {
+  withFakeClock(500000, (advance) => {
+    resetState();
+    var calls = makeFakeTag9Hooks(true);
+    selectDestination(9);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(6);
+    var closeDist = 0.5;
+    nav.onNextTagFound(closeDist);
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(closeDist);
+      nav.handleTracking(performance.now(), true, closeDist);
+      advance(50);
+    }
+    assert.equal(calls.ensureActiveCount, 1, 'ensureActive() must be called exactly once when edge 4->9 begins');
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4,
+      'the local flow must activate once the hook grants an active detector');
+  });
+});
+
+test('permission denied (simulated via hooks): entering edge 4->9 does NOT start the local flow, and no 11s fake-distance fallback exists', () => {
+  withFakeClock(510000, (advance) => {
+    resetState();
+    var calls = makeFakeTag9Hooks(false); // hook is called but never activates the detector
+    selectDestination(9);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(6);
+    var closeDist = 0.5;
+    nav.onNextTagFound(closeDist);
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(closeDist);
+      nav.handleTracking(performance.now(), true, closeDist);
+      advance(50);
+    }
+    assert.equal(calls.ensureActiveCount, 1, 'ensureActive() must still be attempted');
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE,
+      'the local flow must stay inactive when the hook cannot activate the detector');
+    spokenTexts.length = 0;
+    advance(12000); // well past the old, no-longer-relevant ~11s window
+    nav.scanHint();
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE, 'there is no local phase to time out');
+    assert.ok(
+      !spokenTexts.includes('Stopp. Drehen Sie das Smartphone leicht nach links und suchen Sie die Markierung.'),
+      'no fake-distance-driven instruction may ever appear when permission was denied'
+    );
+  });
+});
+
+test('ensureActive() is never called for any edge other than 4->9', () => {
+  withFakeClock(520000, (advance) => {
+    resetState();
+    var calls = makeFakeTag9Hooks(true);
+    walkToTag4Expected(advance); // real path [1,2,3,6,4,7,8,10,11] -- reaches Tag 2, 3, 6 first
+    assert.equal(calls.ensureActiveCount, 0, 'no edge before 4->9 may ever call ensureActive()');
+    var closeDist = 0.5;
+    nav.onNextTagFound(closeDist);
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(closeDist);
+      nav.handleTracking(performance.now(), true, closeDist);
+      advance(50);
+    }
+    assert.equal(nav.expectedNextTagId, 7, 'this route continues 4->7, not 4->9');
+    assert.equal(calls.ensureActiveCount, 0, 'edge 4->7 must never call ensureActive() either');
+  });
+});
+
+test('arrival via the step-based path calls notifyFlowEnded exactly once with reason "step-count"', () => {
+  withFakeClock(530000, (advance) => {
+    resetState();
+    var calls = makeFakeTag9Hooks(true);
+    selectDestination(9);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(6);
+    var closeDist = 0.5;
+    nav.onNextTagFound(closeDist);
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(closeDist);
+      nav.handleTracking(performance.now(), true, closeDist);
+      advance(50);
+    }
+    var enteredAt = performance.now();
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 100);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 700);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 1300);
+    nav.onNextTagFound(3.3);
+    for(var j = 0; j < 3; j++){
+      nav.setEmaDist(3.3);
+      nav.handleTracking(performance.now(), true, 3.3);
+      advance(50);
+    }
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_INTO_ESSBEREICH);
+    var finalEnteredAt = performance.now();
+    nav.notifyTag9FlowAdaptiveStep(finalEnteredAt + 100);
+    nav.notifyTag9FlowAdaptiveStep(finalEnteredAt + 700);
+    assert.equal(nav.destinationReached, true);
+    assert.deepEqual(calls.flowEndedReasons, ['step-count'],
+      'notifyFlowEnded must fire exactly once, with reason "step-count"');
+  });
+});
+
+test('route restart/cancellation calls notifyFlowEnded so an automatically-started detector can be stopped, and a later fresh 4->9 entry starts clean', () => {
+  withFakeClock(540000, (advance) => {
+    resetState();
+    var calls = makeFakeTag9Hooks(true);
+    selectDestination(9);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(6);
+    var closeDist = 0.5;
+    nav.onNextTagFound(closeDist);
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(closeDist);
+      nav.handleTracking(performance.now(), true, closeDist);
+      advance(50);
+    }
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4);
+    assert.equal(calls.ensureActiveCount, 1);
+
+    nav.endNavigation(false); // route cancelled mid-flow
+    assert.deepEqual(calls.flowEndedReasons, ['route-end:manual'],
+      'ending navigation mid-flow must notify with a route-end reason');
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE);
+
+    // A later, fresh 4->9 entry (new route) must call ensureActive() again,
+    // independently, and start from a clean phase/step count.
+    nav.setAdaptiveDetectorActive(false); // simulates the previous auto-started session having been stopped
+    selectDestination(9);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(6);
+    nav.onNextTagFound(closeDist);
+    for(var j = 0; j < 3; j++){
+      nav.setEmaDist(closeDist);
+      nav.handleTracking(performance.now(), true, closeDist);
+      advance(50);
+    }
+    assert.equal(calls.ensureActiveCount, 2, 'a later 4->9 entry must call ensureActive() again, fresh');
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4);
+  });
+});
+
+test('without any registered hooks, behavior is unchanged from before this stage (nav.setAdaptiveDetectorActive remains the direct control, as used by all prior 3+2 tests)', () => {
+  withFakeClock(550000, (advance) => {
+    walkToTag9Segment(advance); // no hooks registered -- relies purely on nav.setAdaptiveDetectorActive(true)
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4);
   });
 });

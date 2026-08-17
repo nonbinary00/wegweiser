@@ -14,7 +14,7 @@ import {
   startNavigation, endNavigation, destinationReached, currentTagId,
   navigationActive, expectedNextTagId,
   destinationId, routeRunId, navState, whereAmIResponse,
-  notifyTag9FlowAdaptiveStep, setAdaptiveDetectorActive
+  notifyTag9FlowAdaptiveStep, setAdaptiveDetectorActive, setTag9DetectorHooks
 } from './nav.js';
 import { startCamera, showError, running } from './camera.js';
 import { say, toggleSound, soundOn, cancelSpeech, unlockSpeech } from './speech.js';
@@ -32,6 +32,26 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
     if(extra) for(var k in extra) o[k] = extra[k];
     return o;
   }
+
+  // ---- Bewegungsberechtigung (Routenstart) / Detektor-Besitzer ----
+  // Drei bewusst GETRENNTE Zustaende (siehe Aufgabenstellung "Architectural
+  // rule"), keiner davon steuert einen anderen implizit mit:
+  //   motionPermissionState -- "unknown"/"granted"/"denied"/"unsupported":
+  //     Ergebnis von requestMotionPermission(), zuletzt gesetzt beim
+  //     Routenstart-Klick (navStartBtn) ODER manuell (stepCalStartBtn) --
+  //     beide rufen dieselbe requestMotionPermission() auf und aktualisieren
+  //     denselben Zustand.
+  //   detectorOwner -- "none"/"manual"/"navigation": WER den (einzigen,
+  //     geteilten) stepDetector/adaptiveDetector gerade betreibt. Verhindert,
+  //     dass die automatische Tag4->9-Logik eine manuell vom Entwickler
+  //     gestartete Test-und-Diagnose-Sitzung uebernimmt/stoppt, und
+  //     umgekehrt, dass ein spaeterer manueller Klick von der Navigation als
+  //     "eigene" Sitzung missverstanden wird.
+  //   nav.js's adaptiveDetectorActive (siehe dort) bleibt unveraendert die
+  //     einzige Groesse, die den Tag4->9-Fluss tatsaechlich gated -- sowohl
+  //     manuelles ALS AUCH automatisches Starten setzen sie am Ende gleich.
+  var motionPermissionState = "unknown";
+  var detectorOwner = "none";
 
   // ---- Bedienung ----
   // unlockSpeech() must be called synchronously, right at the start of the direct
@@ -53,7 +73,22 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
         appTtsOpts({interrupt:true, source:"app.cameraNotRunning", category:"STATUS"}));
       return;
     }
-    startNavigation();
+    // Motion permission is requested HERE -- directly inside this click handler,
+    // synchronously with the user gesture (see requestMotionPermission()'s own
+    // comment in step-detector.js: iOS 13+ Safari requires this) -- never later
+    // from a Tag-detection callback, timer, or animation frame. navigation still
+    // starts afterward regardless of the outcome (granted or denied/unavailable):
+    // this only determines whether the experimental Tag4->9 3+2 flow can later
+    // auto-activate (see ensureTag9DetectorActive() below) -- it never blocks
+    // normal navigation. No new spoken message is added here deliberately (see
+    // motionPermissionState comment) -- keeps this route-start gesture minimal.
+    record("MOTION_PERMISSION_REQUESTED", { source: "route-start" });
+    requestMotionPermission().then(function(state){
+      motionPermissionState = state; // "granted" | "denied" | "unsupported"
+      record(state === "granted" ? "MOTION_PERMISSION_GRANTED" : "MOTION_PERMISSION_DENIED",
+        { source: "route-start", state: state });
+      startNavigation();
+    });
   });
   navEndBtn.addEventListener("click", function(){ endNavigation(true); });
 
@@ -204,12 +239,69 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
     adaptiveDetector.addSample(x, y, z, atTime, reportedIntervalMs, rotation);
   }
 
+  // Deliberately SILENT (no TTS): reused only for the navigation-auto-started
+  // production detector below. The manual calibration path's own
+  // onWarmupReady (further down) speaks "Bereit. Gehen Sie jetzt." -- correct
+  // during an explicit calibration session, but wrong mid-navigation (see task
+  // constraint: "do not add a permission interaction at Tag 4" / "do not
+  // redesign TTS"). onStepDetected/onMotionPeak are reused as-is below (they
+  // only call record(), no speech), keeping STEP_DETECTED/STEP_MOTION_PEAK
+  // diagnostics available during real navigation too.
+  function silentOnWarmupReady(){}
+
+  // ---- Tag 4 -> Tag 9: automatischer Detektor-Lebenszyklus (naechste Ausbaustufe) ----
+  // Registriert bei nav.js (siehe setTag9DetectorHooks()) -- nav.js kennt
+  // weiterhin nichts vom Detektor selbst, ruft nur diese beiden Funktionen
+  // synchron auf. ensureActive() wird AUSSCHLIESSLICH beim Betreten von GENAU
+  // der Kante 4->9 aufgerufen (siehe beginSegment() in nav.js) -- nie fuer
+  // irgendeine andere Kante.
+  function ensureTag9DetectorActive(){
+    if(detectorOwner === "manual" || detectorOwner === "navigation"){
+      // Bereits eine laufende Sitzung (manuell ODER schon automatisch
+      // gestartet) -- adaptiveDetectorActive spiegelt deren echten Zustand
+      // bereits korrekt wider. NIEMALS eine manuelle Entwickler-Sitzung hier
+      // anfassen/zuruecksetzen.
+      return;
+    }
+    if(motionPermissionState !== "granted"){
+      record("ADAPTIVE_NAV_AUTO_START_FAILED", { reason: "permission-not-granted", state: motionPermissionState });
+      return;
+    }
+    stepDetector.stop();
+    stepDetector.reset();
+    adaptiveDetector.reset();
+    var started = stepDetector.start(onStepDetected, silentOnWarmupReady, onMotionPeak, onMotionSample);
+    if(!started){
+      record("ADAPTIVE_NAV_AUTO_START_FAILED", { reason: "start-failed" });
+      return;
+    }
+    detectorOwner = "navigation";
+    setAdaptiveDetectorActive(true);
+    record("ADAPTIVE_NAV_AUTO_START", { reason: "edge-4-9" });
+  }
+
+  // Aufgerufen von nav.js, sobald der Tag4->9-Fluss (aus JEDEM Grund: Ankunft,
+  // Routen-Abbruch/-Neustart, Kanten-Wechsel) wieder INACTIVE wird. Stoppt NUR
+  // eine selbst automatisch gestartete Sitzung -- eine zwischenzeitlich vom
+  // Entwickler manuell uebernommene Sitzung (detectorOwner "manual") bleibt
+  // unangetastet.
+  function onTag9FlowEnded(reason){
+    if(detectorOwner !== "navigation") return;
+    stepDetector.stop();
+    detectorOwner = "none";
+    setAdaptiveDetectorActive(false);
+    record("ADAPTIVE_NAV_AUTO_STOP", { reason: reason });
+  }
+
+  setTag9DetectorHooks({ ensureActive: ensureTag9DetectorActive, notifyFlowEnded: onTag9FlowEnded });
+
   stepCalStartBtn.addEventListener("click", function(){
     // Direkte, explizite Nutzer-Geste -- der richtige Ort fuer
     // DeviceMotionEvent.requestPermission() (iOS verlangt das synchron/nah an
     // einem Tap, siehe step-detector.js). Unabhaengig vom gate-Klick/
     // unlockSpeech(), da die Kalibrierung ohne laufende Kamera nutzbar sein soll.
     requestMotionPermission().then(function(state){
+      motionPermissionState = state; // shared with the route-start request -- same underlying permission
       if(state !== "granted"){
         record("STEP_PERMISSION_DENIED", { state: state });
         if(state === "unsupported"){
@@ -237,6 +329,10 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
       // Reine Diagnose-Markierung fuer den Tag4->9-Schritt-Fluss (nav.js) --
       // steuert dort NIE den Ablauf selbst, nur das detectorActive-Log-Feld.
       setAdaptiveDetectorActive(true);
+      // Diese explizite manuelle Geste besitzt die Sitzung jetzt -- verhindert,
+      // dass eine spaetere automatische Tag4->9-Uebernahme/-Beendigung diese
+      // Entwickler-Sitzung anfasst (siehe ensureTag9DetectorActive()/onTag9FlowEnded() oben).
+      detectorOwner = "manual";
       updateStepCalUi(0, "einschwingen …");
       say("Schritt-Kalibrierung gestartet. Halten Sie das Smartphone ruhig.",
         appTtsOpts({interrupt:true, source:"app.stepCalStarted", category:"STATUS"}));
@@ -248,6 +344,7 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
     stepDetector.stop();
     record("STEP_DETECTOR_STOPPED", { stepCount: finalCount });
     setAdaptiveDetectorActive(false);
+    detectorOwner = "none";
     // GENAU EIN kompaktes Pro-Lauf-Ereignis statt Dauerprotokollierung
     // einzelner Sensor-Samples: echte Abtastrate (gemessen + vom Browser
     // gemeldet), adaptive Zaehler und letzte adaptive Statistik -- damit ist

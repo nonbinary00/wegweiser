@@ -510,15 +510,23 @@ import { record, getTestName } from './logger.js';
   //     bis zum Phase-2-Timeout zurueck (siehe dort) -- alle anderen Kanten
   //     bleiben davon vollstaendig unberuehrt.
   //
-  // WICHTIG (diese Implementierungsstufe): der adaptive Schritt-Detektor bleibt
-  // vollstaendig manuell gesteuert (app.js, Start/Stop-Kalibrierungsknoepfe).
-  // Dieser Block ruft NIEMALS reset()/start()/stop() auf dem Detektor auf und
-  // fordert keine DeviceMotion-Berechtigung an. Laeuft der Detektor nicht (aus,
-  // keine Berechtigung, nie gestartet), liefert notifyTag9FlowAdaptiveStep()
-  // schlicht nie Aufrufe -- die Timeouts unten sind dann der EINZIGE
-  // Fortschrittsmechanismus, identisch zum Fall "schlurfender Gang bestaetigt
-  // nie 3 in Folge". setAdaptiveDetectorActive() dient AUSSCHLIESSLICH der
-  // Log-Diagnose (Feld detectorActive) und wird nie zur Steuerung gelesen.
+  // Dieses Modul ruft NIEMALS selbst reset()/start()/stop() auf dem Detektor
+  // auf und fordert nie DeviceMotion-Berechtigung an -- diese Datei kennt
+  // weiterhin nichts vom Detektor selbst (unveraendertes Architektur-Prinzip).
+  // Automatisches Start/Stop (naechste Ausbaustufe: Berechtigung wird jetzt
+  // beim Routenstart eingeholt, siehe app.js) laeuft ausschliesslich ueber die
+  // optionalen tag9DetectorHooks unten -- zwei kleine, von app.js einmalig
+  // registrierte Funktionen (ensureActive/notifyFlowEnded), die dort die
+  // eigentliche Detektor-/Berechtigungs-/Besitzer-Logik kapseln. Ohne
+  // registrierte Hooks (z.B. in nav.test.js, das nav.js direkt treibt) bleibt
+  // adaptiveDetectorActive weiterhin ausschliesslich ueber
+  // setAdaptiveDetectorActive() direkt steuerbar, exakt wie zuvor -- keine der
+  // bestehenden 3+2-Tests aendert sich dadurch.
+  var tag9DetectorHooks = null;
+  function setTag9DetectorHooks(hooks){
+    tag9DetectorHooks = hooks || null;
+  }
+
   var Tag9Flow = {
     INACTIVE: "INACTIVE",
     WALK_AFTER_TAG4: "WALK_AFTER_TAG4",
@@ -554,6 +562,7 @@ import { record, getTestName } from './logger.js';
     tag9FlowPhaseEnteredAt = 0;
     tag9FlowStepCount = 0;
     tag9FlowPhase2FallbackLogged = false;
+    if(tag9DetectorHooks && tag9DetectorHooks.notifyFlowEnded) tag9DetectorHooks.notifyFlowEnded(reason);
   }
 
   function enterTag9FlowPhase(phase){
@@ -629,6 +638,7 @@ import { record, getTestName } from './logger.js';
     navLog("TAG9_STEP_FLOW_ENDED", { phase: tag9FlowPhase, reason: reason,
       stepCount: tag9FlowStepCount, detectorActive: adaptiveDetectorActive });
     tag9FlowPhase = Tag9Flow.INACTIVE;
+    if(tag9DetectorHooks && tag9DetectorHooks.notifyFlowEnded) tag9DetectorHooks.notifyFlowEnded(reason);
     arriveAtDestination();
   }
 
@@ -782,13 +792,22 @@ import { record, getTestName } from './logger.js';
     // Detektor JETZT, beim Betreten der Kante, bereits laeuft -- laeuft er
     // nicht, bleibt diese Kante vollstaendig beim bestehenden, bereits vorher
     // feldgetesteten visuellen Verhalten (generischer scanHint() + sofort
-    // aktives reachedM, wie auf jeder anderen Kante).
-    if(fromTag === 4 && expectedNextTagId === 9 && adaptiveDetectorActive){
-      startTag9Flow();
+    // aktives reachedM, wie auf jeder anderen Kante). Naechste Ausbaustufe:
+    // ensureActive() (falls von app.js registriert) versucht HIER, synchron
+    // VOR der Pruefung unten, den Detektor automatisch bereitzustellen (siehe
+    // tag9DetectorHooks-Kommentar oben) -- setzt bei Erfolg
+    // adaptiveDetectorActive selbst per setAdaptiveDetectorActive(). Ohne
+    // registrierte Hooks (z.B. Tests) ist dies ein reiner No-op, unveraendert
+    // zur vorherigen Stufe.
+    if(fromTag === 4 && expectedNextTagId === 9){
+      if(tag9DetectorHooks && tag9DetectorHooks.ensureActive) tag9DetectorHooks.ensureActive();
+      if(adaptiveDetectorActive){
+        startTag9Flow();
+      } else {
+        navLog("TAG9_STEP_FLOW_SKIPPED", { reason: "detector-inactive" });
+      }
     } else if(tag9FlowPhase !== Tag9Flow.INACTIVE){
       resetTag9Flow("segment-changed");
-    } else if(fromTag === 4 && expectedNextTagId === 9){
-      navLog("TAG9_STEP_FLOW_SKIPPED", { reason: "detector-inactive" });
     }
   }
 
@@ -1853,5 +1872,6 @@ export {
   Tag9Flow,
   tag9FlowPhase,
   notifyTag9FlowAdaptiveStep,
-  setAdaptiveDetectorActive
+  setAdaptiveDetectorActive,
+  setTag9DetectorHooks
 };
