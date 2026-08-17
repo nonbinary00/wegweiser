@@ -13,13 +13,16 @@ import { markerName } from './graph.js';
 import {
   startNavigation, endNavigation, destinationReached, currentTagId,
   navigationActive, expectedNextTagId,
-  destinationId, routeRunId, navState, whereAmIResponse
+  destinationId, routeRunId, navState, whereAmIResponse,
+  notifyTag9FlowAdaptiveStep, setAdaptiveDetectorActive, setTag9DetectorHooks
 } from './nav.js';
 import { startCamera, showError, running } from './camera.js';
 import { say, toggleSound, soundOn, cancelSpeech, unlockSpeech } from './speech.js';
 import { setDetector } from './detector-state.js';
 import { exportJson, clear, record } from './logger.js';
 import { renderNavigationUi } from './ui.js';
+import { createStepDetector, requestMotionPermission } from './step-detector.js';
+import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
 
   // ---- TTS-Observability ----: shared metadata for app.js's own announcements,
   // mirroring nav.js's ttsOpts() -- this module holds no navState of its own, but
@@ -29,6 +32,27 @@ import { renderNavigationUi } from './ui.js';
     if(extra) for(var k in extra) o[k] = extra[k];
     return o;
   }
+
+  // ---- Bewegungsberechtigung (Routenstart) / Detektor-Besitzer ----
+  // Drei bewusst GETRENNTE Zustaende (siehe Aufgabenstellung "Architectural
+  // rule"), keiner davon steuert einen anderen implizit mit:
+  //   motionPermissionState -- "unknown"/"granted"/"denied"/"unsupported":
+  //     Ergebnis von requestMotionPermission(), gesetzt beim
+  //     Routenstart-Klick (navStartBtn) -- der einzige verbleibende Aufrufer,
+  //     seit die manuelle Schritt-Kalibrierungs-UI entfernt wurde (siehe
+  //     unten).
+  //   detectorOwner -- "none"/"manual"/"navigation": WER den (einzigen,
+  //     geteilten) stepDetector/adaptiveDetector gerade betreibt. "manual"
+  //     wird aktuell von keiner UI mehr gesetzt (die Test-und-Diagnose-
+  //     Kalibrierungsknoepfe existieren nicht mehr), bleibt aber als
+  //     Schutzmechanismus bestehen, falls ein spaeterer Entwickler-Zugang den
+  //     Detektor je wieder manuell startet -- verhindert dann, dass die
+  //     automatische Tag4->9-Logik eine solche Sitzung uebernimmt/stoppt.
+  //   nav.js's adaptiveDetectorActive (siehe dort) bleibt unveraendert die
+  //     einzige Groesse, die den Tag4->9-Fluss tatsaechlich gated -- sowohl
+  //     manuelles ALS AUCH automatisches Starten setzen sie am Ende gleich.
+  var motionPermissionState = "unknown";
+  var detectorOwner = "none";
 
   // ---- Bedienung ----
   // unlockSpeech() must be called synchronously, right at the start of the direct
@@ -50,7 +74,22 @@ import { renderNavigationUi } from './ui.js';
         appTtsOpts({interrupt:true, source:"app.cameraNotRunning", category:"STATUS"}));
       return;
     }
-    startNavigation();
+    // Motion permission is requested HERE -- directly inside this click handler,
+    // synchronously with the user gesture (see requestMotionPermission()'s own
+    // comment in step-detector.js: iOS 13+ Safari requires this) -- never later
+    // from a Tag-detection callback, timer, or animation frame. navigation still
+    // starts afterward regardless of the outcome (granted or denied/unavailable):
+    // this only determines whether the experimental Tag4->9 3+2 flow can later
+    // auto-activate (see ensureTag9DetectorActive() below) -- it never blocks
+    // normal navigation. No new spoken message is added here deliberately (see
+    // motionPermissionState comment) -- keeps this route-start gesture minimal.
+    record("MOTION_PERMISSION_REQUESTED", { source: "route-start" });
+    requestMotionPermission().then(function(state){
+      motionPermissionState = state; // "granted" | "denied" | "unsupported"
+      record(state === "granted" ? "MOTION_PERMISSION_GRANTED" : "MOTION_PERMISSION_DENIED",
+        { source: "route-start", state: state });
+      startNavigation();
+    });
   });
   navEndBtn.addEventListener("click", function(){ endNavigation(true); });
 
@@ -98,6 +137,169 @@ import { renderNavigationUi } from './ui.js';
     clear();
     say("Log gelöscht.", appTtsOpts({interrupt:true, source:"app.logCleared", category:"STATUS"}));
   });
+
+  // ---- Produktions-Schritt-Detektor (siehe step-detector.js) ----
+  // Feste Schwelle (motionThreshold), einziges geteiltes Detektor-Objekt --
+  // frueher nur ueber eine manuelle Test-und-Diagnose-Kalibrierung nutzbar,
+  // jetzt ausschliesslich automatisch fuer den Tag4->9-Fluss verdrahtet
+  // (siehe ensureTag9DetectorActive()/onTag9FlowEnded() weiter unten). Sein
+  // Sample-Tap (4. start()-Parameter) speist weiterhin den experimentellen
+  // adaptiven Detektor darunter.
+  var stepDetector = createStepDetector();
+
+  function onStepDetected(stepCount, deviation){
+    var roundedDeviation = Math.round(deviation * 100) / 100;
+    record("STEP_DETECTED", {
+      stepCount: stepCount,
+      deviation: roundedDeviation,
+      timestamp: Date.now()
+    });
+  }
+
+  // Kalibrierungs-Diagnostik (siehe diagnosticPeakThreshold in
+  // step-detector.js): bedeutsame Bewegungs-Peaks, die KEINEN gezaehlten
+  // Schritt ausgeloest haben -- Feldtest-Beleg dafuer, ob vorsichtige/
+  // schlurfende Schritte an der aktuellen motionThreshold scheitern. Der
+  // Callback wird nur uebergeben, waehrend der Detektor tatsaechlich laeuft
+  // (automatisch fuer Tag4->9, siehe ensureTag9DetectorActive() weiter
+  // unten) -- ausserhalb dessen entsteht kein Diagnose-Rauschen im
+  // Navigations-Log. Genau EIN Ereignis pro Bewegungs-Exkursion
+  // (Peak-Verfolgung im Detektor-Modul), NIE pro Sensor-Rohwert.
+  function onMotionPeak(peak){
+    record("STEP_MOTION_PEAK", {
+      deviation: Math.round(peak.deviation * 100) / 100,
+      motionThreshold: peak.motionThreshold,
+      diagnosticPeakThreshold: peak.diagnosticPeakThreshold,
+      crossedStepThreshold: peak.crossedStepThreshold,
+      timestamp: Date.now()
+    });
+  }
+
+  // ---- Experimenteller adaptiver Detektor (NUR Diagnose, siehe
+  // adaptive-step-detector.js) ----
+  // Laeuft parallel am SELBEN Sensorstrom (Sample-Tap des Produktions-
+  // Detektors, 4. start()-Parameter unten) -- der Produktions-Detektor mit
+  // seiner festen Schwelle bleibt die einzige Quelle fuer STEP_DETECTED;
+  // saemtliche ADAPTIVE_*-Ereignisse sind reine Vergleichsdaten fuer die
+  // Feldauswertung (fest 1,5 vs. adaptiv) und beeinflussen weder Zaehlung
+  // noch Navigation. Rundung nur hier (Log-Kompaktheit), nie im Modul.
+  function r2(v){ return v == null ? null : Math.round(v * 100) / 100; }
+
+  var adaptiveDetector = createAdaptiveStepDetector(null, {
+    onPeak: function(p){
+      record("ADAPTIVE_STEP_PEAK", {
+        amplitude: r2(p.amplitude), threshold: r2(p.threshold),
+        mean: r2(p.mean), std: r2(p.std),
+        intervalFromPreviousPeak: p.intervalFromPreviousPeak != null ? Math.round(p.intervalFromPreviousPeak) : null,
+        consecutivePeaks: p.consecutivePeaks, classification: p.classification,
+        peakDurationMs: p.peakDurationMs != null ? Math.round(p.peakDurationMs) : null,
+        // Richtungs-Diagnose (Scan-vs-Gehen, siehe adaptive-step-detector.js):
+        // Antwortdaten fuer die naechste Feldrunde, KEINE Klassifikation.
+        verticalRatio: r2(p.verticalRatio),
+        rotationRateMean: r2(p.rotationRateMean),
+        timestamp: Date.now()
+      });
+    },
+    onStep: function(s){
+      record("ADAPTIVE_STEP_DETECTED", {
+        timestamp: Date.now(), t: Math.round(s.t),
+        amplitude: r2(s.amplitude), threshold: r2(s.threshold),
+        backfilled: s.backfilled
+      });
+      // Tag 4 -> Tag 9 lokaler Schritt-Fluss (siehe nav.js): s.t ist die
+      // ORIGINALE Kandidaten-Zeit (live und nachgemeldet gleichermassen), nie
+      // der Zeitpunkt dieses Callback-Aufrufs -- nav.js filtert selbst gegen
+      // seinen eigenen Phasen-Beginn. Ohne Wirkung auf jeder anderen Kante.
+      notifyTag9FlowAdaptiveStep(s.t);
+    },
+    onWalkingStart: function(w){
+      record("ADAPTIVE_WALKING_STARTED", { consecutivePeaks: w.consecutivePeaks, timestamp: Date.now() });
+    },
+    onWalkingStop: function(w){
+      record("ADAPTIVE_WALKING_STOPPED", { reason: w.reason,
+        adaptiveStepCount: w.adaptiveStepCount, timestamp: Date.now() });
+    }
+  });
+
+  function onMotionSample(x, y, z, atTime, reportedIntervalMs, rotation){
+    adaptiveDetector.addSample(x, y, z, atTime, reportedIntervalMs, rotation);
+  }
+
+  // Deliberately SILENT (no TTS) warmup-ready callback for the
+  // navigation-auto-started detector below -- a spoken "Bereit. Gehen Sie
+  // jetzt." would be correct for an explicit calibration session but wrong
+  // mid-navigation. onStepDetected/onMotionPeak are reused as-is (they only
+  // call record(), no speech), keeping STEP_DETECTED/STEP_MOTION_PEAK
+  // diagnostics available during real navigation too.
+  function silentOnWarmupReady(){}
+
+  // ---- Tag 4 -> Tag 9: automatischer Detektor-Lebenszyklus (naechste Ausbaustufe) ----
+  // Registriert bei nav.js (siehe setTag9DetectorHooks()) -- nav.js kennt
+  // weiterhin nichts vom Detektor selbst, ruft nur diese beiden Funktionen
+  // synchron auf. ensureActive() wird AUSSCHLIESSLICH beim Betreten von GENAU
+  // der Kante 4->9 aufgerufen (siehe beginSegment() in nav.js) -- nie fuer
+  // irgendeine andere Kante.
+  function ensureTag9DetectorActive(){
+    if(detectorOwner === "manual" || detectorOwner === "navigation"){
+      // Bereits eine laufende Sitzung (manuell ODER schon automatisch
+      // gestartet) -- adaptiveDetectorActive spiegelt deren echten Zustand
+      // bereits korrekt wider. NIEMALS eine manuelle Entwickler-Sitzung hier
+      // anfassen/zuruecksetzen.
+      return;
+    }
+    if(motionPermissionState !== "granted"){
+      record("ADAPTIVE_NAV_AUTO_START_FAILED", { reason: "permission-not-granted", state: motionPermissionState });
+      return;
+    }
+    stepDetector.stop();
+    stepDetector.reset();
+    adaptiveDetector.reset();
+    var started = stepDetector.start(onStepDetected, silentOnWarmupReady, onMotionPeak, onMotionSample);
+    if(!started){
+      record("ADAPTIVE_NAV_AUTO_START_FAILED", { reason: "start-failed" });
+      return;
+    }
+    detectorOwner = "navigation";
+    setAdaptiveDetectorActive(true);
+    record("ADAPTIVE_NAV_AUTO_START", { reason: "edge-4-9" });
+  }
+
+  // Aufgerufen von nav.js, sobald der Tag4->9-Fluss (aus JEDEM Grund: Ankunft,
+  // Routen-Abbruch/-Neustart, Kanten-Wechsel) wieder INACTIVE wird. Stoppt NUR
+  // eine selbst automatisch gestartete Sitzung -- eine zwischenzeitlich vom
+  // Entwickler manuell uebernommene Sitzung (detectorOwner "manual") bleibt
+  // unangetastet.
+  function onTag9FlowEnded(reason){
+    if(detectorOwner !== "navigation") return;
+    var finalCount = stepDetector.getStepCount();
+    stepDetector.stop();
+    // GENAU EIN kompaktes Pro-Lauf-Ereignis statt Dauerprotokollierung
+    // einzelner Sensor-Samples: echte Abtastrate (gemessen + vom Browser
+    // gemeldet), adaptive Zaehler und letzte adaptive Statistik -- direkt
+    // "fest 1,5 vs. adaptiv" vergleichbar. Frueher nur beim manuellen
+    // Kalibrierungs-Stopp erreichbar; jetzt bei jedem automatischen
+    // Tag4->9-Stopp, seit die manuelle UI entfernt wurde (siehe UI-Bereinigung).
+    var adaptiveSummary = adaptiveDetector.getSummary();
+    record("ADAPTIVE_RUN_SUMMARY", {
+      sampleCount: adaptiveSummary.sampleCount,
+      avgSampleIntervalMs: r2(adaptiveSummary.avgSampleIntervalMs),
+      minSampleIntervalMs: r2(adaptiveSummary.minSampleIntervalMs),
+      maxSampleIntervalMs: r2(adaptiveSummary.maxSampleIntervalMs),
+      reportedEventIntervalMs: r2(adaptiveSummary.reportedEventIntervalMs),
+      adaptiveStepCount: adaptiveSummary.adaptiveStepCount,
+      peakCount: adaptiveSummary.peakCount,
+      walking: adaptiveSummary.walking,
+      lastThreshold: r2(adaptiveSummary.lastThreshold),
+      lastMean: r2(adaptiveSummary.lastMean),
+      lastStd: r2(adaptiveSummary.lastStd),
+      productionStepCount: finalCount
+    });
+    detectorOwner = "none";
+    setAdaptiveDetectorActive(false);
+    record("ADAPTIVE_NAV_AUTO_STOP", { reason: reason });
+  }
+
+  setTag9DetectorHooks({ ensureActive: ensureTag9DetectorActive, notifyFlowEnded: onTag9FlowEnded });
 
   // ---- Zielauswahl aus NODES (destination:true) ----
   Object.keys(NODES).map(Number).sort(function(a,b){ return a - b; }).forEach(function(id){
