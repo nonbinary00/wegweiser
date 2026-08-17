@@ -6,7 +6,7 @@
 
 import {
   gate, retryBtn, navStartBtn, navEndBtn, whereBtn, muteBtn, destSel,
-  logExportBtn, logClearBtn, stepCalStartBtn, stepCalStopBtn, stepCalCounter
+  logExportBtn, logClearBtn
 } from './dom.js';
 import { NODES } from './graph-data.js';
 import { markerName } from './graph.js';
@@ -37,16 +37,17 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
   // Drei bewusst GETRENNTE Zustaende (siehe Aufgabenstellung "Architectural
   // rule"), keiner davon steuert einen anderen implizit mit:
   //   motionPermissionState -- "unknown"/"granted"/"denied"/"unsupported":
-  //     Ergebnis von requestMotionPermission(), zuletzt gesetzt beim
-  //     Routenstart-Klick (navStartBtn) ODER manuell (stepCalStartBtn) --
-  //     beide rufen dieselbe requestMotionPermission() auf und aktualisieren
-  //     denselben Zustand.
+  //     Ergebnis von requestMotionPermission(), gesetzt beim
+  //     Routenstart-Klick (navStartBtn) -- der einzige verbleibende Aufrufer,
+  //     seit die manuelle Schritt-Kalibrierungs-UI entfernt wurde (siehe
+  //     unten).
   //   detectorOwner -- "none"/"manual"/"navigation": WER den (einzigen,
-  //     geteilten) stepDetector/adaptiveDetector gerade betreibt. Verhindert,
-  //     dass die automatische Tag4->9-Logik eine manuell vom Entwickler
-  //     gestartete Test-und-Diagnose-Sitzung uebernimmt/stoppt, und
-  //     umgekehrt, dass ein spaeterer manueller Klick von der Navigation als
-  //     "eigene" Sitzung missverstanden wird.
+  //     geteilten) stepDetector/adaptiveDetector gerade betreibt. "manual"
+  //     wird aktuell von keiner UI mehr gesetzt (die Test-und-Diagnose-
+  //     Kalibrierungsknoepfe existieren nicht mehr), bleibt aber als
+  //     Schutzmechanismus bestehen, falls ein spaeterer Entwickler-Zugang den
+  //     Detektor je wieder manuell startet -- verhindert dann, dass die
+  //     automatische Tag4->9-Logik eine solche Sitzung uebernimmt/stoppt.
   //   nav.js's adaptiveDetectorActive (siehe dort) bleibt unveraendert die
   //     einzige Groesse, die den Tag4->9-Fluss tatsaechlich gated -- sowohl
   //     manuelles ALS AUCH automatisches Starten setzen sie am Ende gleich.
@@ -137,19 +138,14 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
     say("Log gelöscht.", appTtsOpts({interrupt:true, source:"app.logCleared", category:"STATUS"}));
   });
 
-  // ---- Schritt-Kalibrierung (neu, experimentell, siehe step-detector.js) ----
-  // Rein diagnostisch: erkennt Gehschritte ueber Bewegungssensordaten, um die
-  // spaetere Tag 4 -> Tag 9-Strecke kalibrieren zu koennen -- NOCH NICHT mit
-  // dieser oder irgendeiner anderen Route/TTS-Ansage verbunden. Ein einziges
-  // geteiltes Detektor-Objekt reicht fuer diese rein manuelle Bedienung; jeder
-  // Start-Tastendruck stoppt zuerst (idempotent, falls schon aktiv) und setzt
-  // dann sauber zurueck, statt einen halb-laufenden Zustand fortzusetzen.
+  // ---- Produktions-Schritt-Detektor (siehe step-detector.js) ----
+  // Feste Schwelle (motionThreshold), einziges geteiltes Detektor-Objekt --
+  // frueher nur ueber eine manuelle Test-und-Diagnose-Kalibrierung nutzbar,
+  // jetzt ausschliesslich automatisch fuer den Tag4->9-Fluss verdrahtet
+  // (siehe ensureTag9DetectorActive()/onTag9FlowEnded() weiter unten). Sein
+  // Sample-Tap (4. start()-Parameter) speist weiterhin den experimentellen
+  // adaptiven Detektor darunter.
   var stepDetector = createStepDetector();
-
-  function updateStepCalUi(count, statusText){
-    if(!stepCalCounter) return;
-    stepCalCounter.textContent = count + " Schritte" + (statusText ? " (" + statusText + ")" : "");
-  }
 
   function onStepDetected(stepCount, deviation){
     var roundedDeviation = Math.round(deviation * 100) / 100;
@@ -158,27 +154,17 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
       deviation: roundedDeviation,
       timestamp: Date.now()
     });
-    updateStepCalUi(stepCount, "läuft …");
   }
 
-  function onWarmupReady(){
-    // Rein informativ (kein eigenes Log-Ereignis) -- signalisiert, dass die
-    // kurze Einschwingphase (siehe warmupMs in step-detector.js) vorbei ist
-    // und das eigentliche Gehen jetzt beginnen sollte.
-    updateStepCalUi(stepDetector.getStepCount(), "bereit – jetzt gehen");
-    say("Bereit. Gehen Sie jetzt.",
-      appTtsOpts({interrupt:true, source:"app.stepCalReady", category:"STATUS"}));
-  }
-
-  // TEMPORAERE Kalibrierungs-Diagnostik (siehe diagnosticPeakThreshold in
+  // Kalibrierungs-Diagnostik (siehe diagnosticPeakThreshold in
   // step-detector.js): bedeutsame Bewegungs-Peaks, die KEINEN gezaehlten
   // Schritt ausgeloest haben -- Feldtest-Beleg dafuer, ob vorsichtige/
   // schlurfende Schritte an der aktuellen motionThreshold scheitern. Der
-  // Callback wird NUR im Kalibrierungs-Start unten uebergeben; ausserhalb
-  // der manuellen Kalibrierung laeuft der Detektor gar nicht, es entsteht
-  // also nie Diagnose-Rauschen im normalen Navigations-Log. Genau EIN
-  // Ereignis pro Bewegungs-Exkursion (Peak-Verfolgung im Detektor-Modul),
-  // NIE pro Sensor-Rohwert.
+  // Callback wird nur uebergeben, waehrend der Detektor tatsaechlich laeuft
+  // (automatisch fuer Tag4->9, siehe ensureTag9DetectorActive() weiter
+  // unten) -- ausserhalb dessen entsteht kein Diagnose-Rauschen im
+  // Navigations-Log. Genau EIN Ereignis pro Bewegungs-Exkursion
+  // (Peak-Verfolgung im Detektor-Modul), NIE pro Sensor-Rohwert.
   function onMotionPeak(peak){
     record("STEP_MOTION_PEAK", {
       deviation: Math.round(peak.deviation * 100) / 100,
@@ -239,13 +225,11 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
     adaptiveDetector.addSample(x, y, z, atTime, reportedIntervalMs, rotation);
   }
 
-  // Deliberately SILENT (no TTS): reused only for the navigation-auto-started
-  // production detector below. The manual calibration path's own
-  // onWarmupReady (further down) speaks "Bereit. Gehen Sie jetzt." -- correct
-  // during an explicit calibration session, but wrong mid-navigation (see task
-  // constraint: "do not add a permission interaction at Tag 4" / "do not
-  // redesign TTS"). onStepDetected/onMotionPeak are reused as-is below (they
-  // only call record(), no speech), keeping STEP_DETECTED/STEP_MOTION_PEAK
+  // Deliberately SILENT (no TTS) warmup-ready callback for the
+  // navigation-auto-started detector below -- a spoken "Bereit. Gehen Sie
+  // jetzt." would be correct for an explicit calibration session but wrong
+  // mid-navigation. onStepDetected/onMotionPeak are reused as-is (they only
+  // call record(), no speech), keeping STEP_DETECTED/STEP_MOTION_PEAK
   // diagnostics available during real navigation too.
   function silentOnWarmupReady(){}
 
@@ -287,68 +271,14 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
   // unangetastet.
   function onTag9FlowEnded(reason){
     if(detectorOwner !== "navigation") return;
-    stepDetector.stop();
-    detectorOwner = "none";
-    setAdaptiveDetectorActive(false);
-    record("ADAPTIVE_NAV_AUTO_STOP", { reason: reason });
-  }
-
-  setTag9DetectorHooks({ ensureActive: ensureTag9DetectorActive, notifyFlowEnded: onTag9FlowEnded });
-
-  stepCalStartBtn.addEventListener("click", function(){
-    // Direkte, explizite Nutzer-Geste -- der richtige Ort fuer
-    // DeviceMotionEvent.requestPermission() (iOS verlangt das synchron/nah an
-    // einem Tap, siehe step-detector.js). Unabhaengig vom gate-Klick/
-    // unlockSpeech(), da die Kalibrierung ohne laufende Kamera nutzbar sein soll.
-    requestMotionPermission().then(function(state){
-      motionPermissionState = state; // shared with the route-start request -- same underlying permission
-      if(state !== "granted"){
-        record("STEP_PERMISSION_DENIED", { state: state });
-        if(state === "unsupported"){
-          record("STEP_DETECTOR_UNAVAILABLE", { reason: "no-devicemotion-api" });
-        }
-        updateStepCalUi(0, "nicht verfügbar");
-        say("Bewegungssensor nicht verfügbar.",
-          appTtsOpts({interrupt:true, source:"app.stepCalUnavailable", category:"STATUS"}));
-        return;
-      }
-      record("STEP_PERMISSION_GRANTED", { state: state });
-      stepDetector.stop();
-      stepDetector.reset();
-      adaptiveDetector.reset();
-      record("STEP_DETECTOR_RESET", {});
-      var started = stepDetector.start(onStepDetected, onWarmupReady, onMotionPeak, onMotionSample);
-      if(!started){
-        record("STEP_DETECTOR_UNAVAILABLE", { reason: "start-failed-after-permission-granted" });
-        updateStepCalUi(0, "nicht verfügbar");
-        say("Bewegungssensor nicht verfügbar.",
-          appTtsOpts({interrupt:true, source:"app.stepCalUnavailable", category:"STATUS"}));
-        return;
-      }
-      record("STEP_DETECTOR_STARTED", { stepCount: stepDetector.getStepCount() });
-      // Reine Diagnose-Markierung fuer den Tag4->9-Schritt-Fluss (nav.js) --
-      // steuert dort NIE den Ablauf selbst, nur das detectorActive-Log-Feld.
-      setAdaptiveDetectorActive(true);
-      // Diese explizite manuelle Geste besitzt die Sitzung jetzt -- verhindert,
-      // dass eine spaetere automatische Tag4->9-Uebernahme/-Beendigung diese
-      // Entwickler-Sitzung anfasst (siehe ensureTag9DetectorActive()/onTag9FlowEnded() oben).
-      detectorOwner = "manual";
-      updateStepCalUi(0, "einschwingen …");
-      say("Schritt-Kalibrierung gestartet. Halten Sie das Smartphone ruhig.",
-        appTtsOpts({interrupt:true, source:"app.stepCalStarted", category:"STATUS"}));
-    });
-  });
-
-  stepCalStopBtn.addEventListener("click", function(){
     var finalCount = stepDetector.getStepCount();
     stepDetector.stop();
-    record("STEP_DETECTOR_STOPPED", { stepCount: finalCount });
-    setAdaptiveDetectorActive(false);
-    detectorOwner = "none";
     // GENAU EIN kompaktes Pro-Lauf-Ereignis statt Dauerprotokollierung
     // einzelner Sensor-Samples: echte Abtastrate (gemessen + vom Browser
-    // gemeldet), adaptive Zaehler und letzte adaptive Statistik -- damit ist
-    // jeder Kalibrierungslauf direkt "fest 1,5 vs. adaptiv" vergleichbar.
+    // gemeldet), adaptive Zaehler und letzte adaptive Statistik -- direkt
+    // "fest 1,5 vs. adaptiv" vergleichbar. Frueher nur beim manuellen
+    // Kalibrierungs-Stopp erreichbar; jetzt bei jedem automatischen
+    // Tag4->9-Stopp, seit die manuelle UI entfernt wurde (siehe UI-Bereinigung).
     var adaptiveSummary = adaptiveDetector.getSummary();
     record("ADAPTIVE_RUN_SUMMARY", {
       sampleCount: adaptiveSummary.sampleCount,
@@ -364,10 +294,12 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
       lastStd: r2(adaptiveSummary.lastStd),
       productionStepCount: finalCount
     });
-    updateStepCalUi(finalCount, "gestoppt");
-    say("Schritt-Kalibrierung gestoppt. " + finalCount + " Schritte erkannt.",
-      appTtsOpts({interrupt:true, source:"app.stepCalStopped", category:"STATUS"}));
-  });
+    detectorOwner = "none";
+    setAdaptiveDetectorActive(false);
+    record("ADAPTIVE_NAV_AUTO_STOP", { reason: reason });
+  }
+
+  setTag9DetectorHooks({ ensureActive: ensureTag9DetectorActive, notifyFlowEnded: onTag9FlowEnded });
 
   // ---- Zielauswahl aus NODES (destination:true) ----
   Object.keys(NODES).map(Number).sort(function(a,b){ return a - b; }).forEach(function(id){
