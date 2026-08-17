@@ -309,6 +309,11 @@ test('a tag behind the current position keeps the existing behind-position warni
 
 function walkToTag9Segment(advance){
   resetState();
+  // The local flow only activates when the adaptive detector is already
+  // active as edge 4->9 begins (see nav.js beginSegment()) -- explicit here
+  // (not relying on a previous test's leftover state) so every test using
+  // this helper deterministically exercises the "detector on" path.
+  nav.setAdaptiveDetectorActive(true);
   selectDestination(9);
   nav.startNavigation();
   nav.onStartTagConfirmed(6);
@@ -554,6 +559,7 @@ test('ending navigation clears the Tag 9 flow state', () => {
 
 test('a different edge through Tag 4 (not 4->9) never activates the local step flow', () => {
   withFakeClock(400000, (advance) => {
+    nav.setAdaptiveDetectorActive(true); // even WITH an active detector, only edge 4->9 may activate
     walkToTag4Expected(advance); // real path [1,2,3,6,4,7,8,10,11] -- next edge is 4->7, not 4->9
     spokenTexts.length = 0;
     var closeDist = 0.5;
@@ -573,7 +579,7 @@ test('a different edge through Tag 4 (not 4->9) never activates the local step f
   });
 });
 
-test('the first-phase fallback timeout advances to SEARCH_TAG9 without ever announcing arrival, and logs a fallback reason', () => {
+test('the first-phase fallback timeout advances to SEARCH_TAG9 without ever announcing arrival, and logs a fallback reason (detector active but silent -- weak/no steps counted)', () => {
   withFakeClock(410000, (advance) => {
     walkToTag9Segment(advance);
     spokenTexts.length = 0;
@@ -582,5 +588,129 @@ test('the first-phase fallback timeout advances to SEARCH_TAG9 without ever anno
     assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.SEARCH_TAG9,
       'the fallback must still advance the flow even with no detector signal at all');
     assert.equal(nav.destinationReached, false, 'the fallback must never itself announce arrival');
+  });
+});
+
+// ==================== Field-failure fix: detector inactive at edge entry ====================
+// Real field log wegweiser-v13-log-20260817-140404(31).json: 4/4 real Tag 4->9
+// attempts had detectorActive:false the whole time (STEP_PERMISSION_DENIED),
+// stepCount stayed 0, yet the local flow still activated and the ~11s
+// phase-1-timeout became the de-facto (unsafe) trigger for the "Stopp..."
+// instruction -- confirmed by the log to fire well after the user had already
+// walked past the intended search point. Fix: the flow may only activate if
+// the adaptive detector is ALREADY active the moment edge 4->9 begins.
+
+test('detector inactive when edge 4->9 begins: the local flow stays fully INACTIVE and generic visual navigation behaves exactly as before (reproduces the real field failure structurally)', () => {
+  withFakeClock(420000, (advance) => {
+    resetState();
+    nav.setAdaptiveDetectorActive(false); // explicit -- reproduces STEP_PERMISSION_DENIED / detector never started
+    selectDestination(9);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(6);
+    var closeDist = 0.5;
+    nav.onNextTagFound(closeDist);
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(closeDist);
+      nav.handleTracking(performance.now(), true, closeDist);
+      advance(50);
+    }
+    assert.equal(nav.currentTagId, 4);
+    assert.equal(nav.expectedNextTagId, 9);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE,
+      'the local flow must never enter WALK_AFTER_TAG4 when the detector is inactive');
+    spokenTexts.length = 0;
+
+    // Even letting far more than the old ~11s phase-1 timeout elapse, with
+    // scanHint() (main-loop.js's real per-frame call) driven repeatedly, must
+    // never produce the local flow's instruction or transition -- there is no
+    // local phase to time out at all.
+    for(var f = 0; f < 5; f++){
+      advance(3000);
+      nav.scanHint();
+    }
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE, 'no local phase timeout can fire if the flow never started');
+    assert.ok(
+      !spokenTexts.includes('Stopp. Drehen Sie das Smartphone leicht nach links und suchen Sie die Markierung.'),
+      `the local "Stopp..." instruction must never be generated when the detector is inactive, got: ${JSON.stringify(spokenTexts)}`
+    );
+    assert.ok(
+      !spokenTexts.includes('Gehen Sie geradeaus.'),
+      'the local phase-1 instruction must never be spoken when the detector is inactive'
+    );
+    // Existing generic visual navigation must be fully intact: the untouched
+    // scanHint() search hint fires normally...
+    assert.ok(
+      spokenTexts.some((t) => t.includes('suchen Sie die Markierung')),
+      `expected the existing generic search hint to still fire normally, got: ${JSON.stringify(spokenTexts)}`
+    );
+
+    // ...and visual reachedM (3.0m) remains immediately active (undeferred) --
+    // exactly the pre-existing, previously field-validated behavior for this
+    // edge.
+    nav.onNextTagFound(3.3);
+    for(var j = 0; j < 3; j++){
+      nav.setEmaDist(1.0);
+      nav.handleTracking(performance.now(), true, 1.0);
+      advance(50);
+    }
+    assert.equal(nav.destinationReached, true,
+      'visual reachedM must arrive immediately, undeferred, exactly as on any other edge');
+  });
+});
+
+test('detector active at edge entry, but stopped again before Tag 4 is reached: the local flow does not activate for that segment', () => {
+  withFakeClock(430000, (advance) => {
+    resetState();
+    nav.setAdaptiveDetectorActive(true);
+    nav.setAdaptiveDetectorActive(false); // e.g. STEP_PERMISSION_DENIED after a retry, before Tag 4 is reached
+    selectDestination(9);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(6);
+    var closeDist = 0.5;
+    nav.onNextTagFound(closeDist);
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(closeDist);
+      nav.handleTracking(performance.now(), true, closeDist);
+      advance(50);
+    }
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE,
+      'only the detector state AT THE MOMENT Tag 4 is reached matters, not any earlier state');
+  });
+});
+
+test('the generic time-based scanHint() is suppressed while the local flow is in WALK_AFTER_TAG4, but resumes normally once SEARCH_TAG9 is reached', () => {
+  withFakeClock(440000, (advance) => {
+    walkToTag9Segment(advance); // detector active, enters WALK_AFTER_TAG4
+    spokenTexts.length = 0;
+
+    // Advance well past the generic scanHint's own scanHintAfterMs (8000ms)
+    // while still inside WALK_AFTER_TAG4 (no qualifying steps counted) --
+    // the real field failure showed this firing here and overlapping/
+    // conflicting with the local flow's own instructions.
+    advance(9000);
+    nav.scanHint();
+    assert.ok(
+      !spokenTexts.some((t) => t.includes('Gehen Sie noch etwa zwei Meter geradeaus')),
+      `the generic time-based scan hint must not speak during WALK_AFTER_TAG4, got: ${JSON.stringify(spokenTexts)}`
+    );
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4, 'must not have been force-advanced by scanHint() itself');
+
+    // Now genuinely advance the local flow to SEARCH_TAG9 via 3 qualifying steps.
+    var enteredAt = performance.now();
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 100);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 700);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 1300);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.SEARCH_TAG9);
+    spokenTexts.length = 0;
+
+    // The existing generic search-retry mechanism may continue once in
+    // SEARCH_TAG9 -- it must not be permanently suppressed for the rest of
+    // the edge.
+    advance(13000);
+    nav.scanHint();
+    assert.ok(
+      spokenTexts.length > 0,
+      'the generic search-retry mechanism must still be able to speak once SEARCH_TAG9 is reached'
+    );
   });
 });

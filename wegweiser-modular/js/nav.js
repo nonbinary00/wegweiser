@@ -774,10 +774,21 @@ import { record, getTestName } from './logger.js';
     // ---- Instrumentierung ----
     navLog("SEGMENT_START", { segIndex: segIndex, fromTag: fromTag, toTag: expectedNextTagId });
     // ---- Tag 4 -> Tag 9 lokaler Schritt-Fluss: siehe Block oben ----
-    if(fromTag === 4 && expectedNextTagId === 9){
+    // Feldtest-Korrektur (siehe adaptiveDetectorActive-Kommentar oben): OHNE
+    // laufenden Detektor kann kein einziger Schritt jemals gezaehlt werden --
+    // der ~11s Phase-1-Timeout wurde dann faktisch zur einzigen Ausloese-
+    // quelle und wich real vom physischen Suchpunkt ab (Feldlog, mehrfach
+    // reproduziert). Der Fluss darf sich daher NUR aktivieren, wenn der
+    // Detektor JETZT, beim Betreten der Kante, bereits laeuft -- laeuft er
+    // nicht, bleibt diese Kante vollstaendig beim bestehenden, bereits vorher
+    // feldgetesteten visuellen Verhalten (generischer scanHint() + sofort
+    // aktives reachedM, wie auf jeder anderen Kante).
+    if(fromTag === 4 && expectedNextTagId === 9 && adaptiveDetectorActive){
       startTag9Flow();
     } else if(tag9FlowPhase !== Tag9Flow.INACTIVE){
       resetTag9Flow("segment-changed");
+    } else if(fromTag === 4 && expectedNextTagId === 9){
+      navLog("TAG9_STEP_FLOW_SKIPPED", { reason: "detector-inactive" });
     }
   }
 
@@ -1703,6 +1714,15 @@ import { record, getTestName } from './logger.js';
     var now = performance.now();
     // ---- Tag 4 -> Tag 9 lokaler Schritt-Fluss: siehe Block oben ----
     checkTag9FlowPhase1Timeout(now);
+    // Feldtest-Korrektur: der generische Suchhinweis unten ist zeit- (nicht
+    // schritt-) basiert und lief im Feld unabhaengig von diesem Fluss weiter,
+    // was waehrend WALK_AFTER_TAG4 zu einer ueberlappenden/widerspruechlichen
+    // Zweitansage fuehrte ("Gehen Sie weiter..." kurz vor "Stopp..."). Nur in
+    // GENAU dieser Phase unterdrueckt -- ab SEARCH_TAG9 (z.B. nach dem eigenen
+    // Suchhinweis oben) darf der bestehende Wiederholungs-Mechanismus wie
+    // gewohnt weiterlaufen. Ohne Wirkung, wenn der Fluss inaktiv ist (Detektor
+    // aus, siehe beginSegment()) -- dann bleibt scanHint() unveraendert.
+    if(tag9FlowPhase === Tag9Flow.WALK_AFTER_TAG4) return;
     var idleSince = Math.max(expectedLastSeenAt, searchStartedAt, lastScanHintAt);
     var delay = (scanHintCount === 0) ? currentScanDelayMs : SETTINGS.scanHintRepeatMs;
     if(now - idleSince < delay) return;
