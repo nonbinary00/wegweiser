@@ -293,3 +293,294 @@ test('a tag behind the current position keeps the existing behind-position warni
     assert.notEqual(nav.expectedNextTagId, 3, 'a behind-position tag must not become a forward candidate');
   });
 });
+
+// ==================== Tag 4 -> Tag 9 local 3+2 step flow ====================
+// Narrow, edge-specific overlay: on the real route [6, 4, 9] (destination
+// Essbereich = Tag 9, exactly the field-tested scenario), Tag 4's own arrival
+// is unchanged, but the 4->9 edge additionally counts 3 genuine adaptive steps
+// after Tag 4, then (after Tag 9 is reliably acquired) 2 more, before the
+// destination is announced -- see the large comment block in nav.js for the
+// two correctness fixes this design embodies:
+//   (1) counts individual onStep candidates filtered by their OWN timestamp
+//       (s.t >= phaseEnteredAt), never ADAPTIVE_WALKING_STARTED (which does
+//       not re-fire if walking was already confirmed before Tag 4);
+//   (2) defers the existing visual reachedM (3.0m) arrival check during the
+//       final 2-step window instead of letting it race immediately.
+
+function walkToTag9Segment(advance){
+  resetState();
+  selectDestination(9);
+  nav.startNavigation();
+  nav.onStartTagConfirmed(6);
+  assert.deepEqual(nav.pathTagIds, [6, 4, 9], 'expected the real field-tested path 6->4->9');
+  assert.equal(nav.currentTagId, 6);
+  assert.equal(nav.expectedNextTagId, 4);
+
+  var closeDist = 0.5; // well under the default reachedM (1.8) used by edge 6->4
+  nav.onNextTagFound(closeDist);
+  for(var i = 0; i < 3; i++){
+    nav.setEmaDist(closeDist);
+    nav.handleTracking(performance.now(), true, closeDist);
+    advance(50);
+  }
+  assert.equal(nav.currentTagId, 4, 'Tag 4 must have been genuinely reached');
+  assert.equal(nav.expectedNextTagId, 9, 'the next edge must be exactly 4->9');
+  assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4);
+}
+
+// Drives Tag 9 through TRACKING_CONFIRMED at a distance just above the edge's
+// own reachedM (3.0m) -- matches the real field logs (TRACKING_CONFIRMED was
+// observed at 3.16-3.68m across all 5 real runs, i.e. always just outside the
+// visual arrival threshold at that exact moment).
+function acquireTag9(advance, dist){
+  var d = dist != null ? dist : 3.3;
+  nav.onNextTagFound(d);
+  for(var i = 0; i < 3; i++){
+    nav.setEmaDist(d);
+    nav.handleTracking(performance.now(), true, d);
+    advance(50);
+  }
+}
+
+test('continuous walking through Tag 4 (no fresh ADAPTIVE_WALKING_STARTED) still advances via 3 qualifying onStep events', () => {
+  withFakeClock(300000, (advance) => {
+    walkToTag9Segment(advance);
+    spokenTexts.length = 0;
+    var enteredAt = performance.now();
+    // Simulates steps from a detector whose walking state was ALREADY
+    // confirmed before Tag 4 -- these are exactly the kind of individual,
+    // already-live onStep candidates that would occur with no new
+    // ADAPTIVE_WALKING_STARTED in between (see nav.js comment).
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 100);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4, 'must not advance on 1 step');
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 700);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4, 'must not advance on 2 steps');
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 1300);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.SEARCH_TAG9, 'must advance on the 3rd qualifying step');
+    assert.ok(
+      spokenTexts.includes('Stopp. Drehen Sie das Smartphone leicht nach links und suchen Sie die Markierung.'),
+      `expected the search instruction, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('a step candidate timestamped BEFORE the phase entry (a stale pre-Tag4 backfilled step delivered late) is not counted', () => {
+  withFakeClock(310000, (advance) => {
+    walkToTag9Segment(advance);
+    var enteredAt = performance.now();
+    // Candidate physically occurred before Tag 4 was reached, but its onStep
+    // callback happens to fire only now (backfill delivered late).
+    nav.notifyTag9FlowAdaptiveStep(enteredAt - 500);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt - 10);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4,
+      'pre-phase candidate timestamps must never count toward this phase');
+    // Only a genuinely post-entry step should be able to count from here on.
+    nav.notifyTag9FlowAdaptiveStep(enteredAt);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 600);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 1200);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.SEARCH_TAG9,
+      'exactly 3 genuinely post-entry steps must still be sufficient');
+  });
+});
+
+test('adaptive steps/peaks during SEARCH_TAG9 never advance progress', () => {
+  withFakeClock(320000, (advance) => {
+    walkToTag9Segment(advance);
+    var enteredAt = performance.now();
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 100);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 700);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 1300);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.SEARCH_TAG9);
+
+    // Simulated scanning motion while standing still and searching.
+    var scanAt = performance.now();
+    for(var i = 0; i < 5; i++){
+      nav.notifyTag9FlowAdaptiveStep(scanAt + i * 100);
+    }
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.SEARCH_TAG9,
+      'scan-phase motion must never advance or leak into a later phase');
+
+    // Tag 9 acquisition must still require exactly 2 FRESH steps afterward --
+    // if scan-phase motion had silently pre-seeded the counter, fewer than 2
+    // new steps would suffice, which must not happen.
+    acquireTag9(advance);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_INTO_ESSBEREICH);
+    var finalEnteredAt = performance.now();
+    nav.notifyTag9FlowAdaptiveStep(finalEnteredAt + 100);
+    assert.equal(nav.destinationReached, false, 'one step must never be enough');
+    nav.notifyTag9FlowAdaptiveStep(finalEnteredAt + 700);
+    assert.equal(nav.destinationReached, true, 'exactly 2 fresh post-acquisition steps must arrive');
+  });
+});
+
+test('early TRACKING_CONFIRMED(Tag 9) during WALK_AFTER_TAG4 discards the remaining first-phase count and jumps straight to WALK_INTO_ESSBEREICH', () => {
+  withFakeClock(330000, (advance) => {
+    walkToTag9Segment(advance);
+    spokenTexts.length = 0;
+    var enteredAt = performance.now();
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 100); // only 1 of 3 -- still WALK_AFTER_TAG4
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4);
+
+    acquireTag9(advance); // Tag 9 found early, before the 3-step phase completed
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_INTO_ESSBEREICH,
+      'early acquisition must skip SEARCH_TAG9 entirely');
+    assert.ok(
+      spokenTexts.includes('Gehen Sie noch etwa zwei Schritte geradeaus.'),
+      `expected the final-phase instruction, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('the final phase requires exactly 2 fresh post-acquisition steps -- not 1, and not stale pre-acquisition ones', () => {
+  withFakeClock(340000, (advance) => {
+    walkToTag9Segment(advance);
+    var enteredAt = performance.now();
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 100);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 700);
+    nav.notifyTag9FlowAdaptiveStep(enteredAt + 1300);
+    acquireTag9(advance);
+    var finalEnteredAt = performance.now();
+
+    nav.notifyTag9FlowAdaptiveStep(finalEnteredAt - 200); // stale, from before acquisition
+    assert.equal(nav.destinationReached, false, 'a pre-acquisition step must never count');
+
+    nav.notifyTag9FlowAdaptiveStep(finalEnteredAt + 100);
+    assert.equal(nav.destinationReached, false, 'exactly 1 fresh step must never arrive');
+
+    nav.notifyTag9FlowAdaptiveStep(finalEnteredAt + 700);
+    assert.equal(nav.destinationReached, true, 'exactly 2 fresh steps must arrive');
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE, 'the flow must disarm itself after arrival');
+  });
+});
+
+test('the existing visual reachedM(3.0) arrival is deferred during the protected final 2-step window', () => {
+  withFakeClock(350000, (advance) => {
+    walkToTag9Segment(advance);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 100);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 700);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 1300);
+    acquireTag9(advance);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_INTO_ESSBEREICH);
+
+    // A distance well within the edge's own reachedM (3.0m), fed for many more
+    // frames than arrivalConfirmFrames would normally need -- must NOT arrive
+    // while still inside the deferral window (well under 4-5s elapsed).
+    for(var i = 0; i < 5; i++){
+      nav.setEmaDist(1.0);
+      nav.handleTracking(performance.now(), true, 1.0);
+      advance(200);
+    }
+    assert.equal(nav.destinationReached, false,
+      'visual reachedM must not be allowed to race ahead of the 2-step phase');
+    assert.equal(nav.navState, nav.NavState.TRACKING);
+  });
+});
+
+test('the phase-2 fallback timeout re-enables the existing visual arrival, and the timeout itself never announces destination', () => {
+  withFakeClock(360000, (advance) => {
+    walkToTag9Segment(advance);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 100);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 700);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 1300);
+    acquireTag9(advance);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_INTO_ESSBEREICH);
+
+    // Let the ~4-5s phase-2 timeout elapse with NO qualifying steps counted.
+    advance(5000);
+    assert.equal(nav.destinationReached, false,
+      'merely letting the timeout elapse must never itself announce arrival');
+
+    // Visual arrival must now be fully re-enabled, exactly like any other edge.
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(1.0);
+      nav.handleTracking(performance.now(), true, 1.0);
+      advance(200);
+    }
+    assert.equal(nav.destinationReached, true,
+      'the existing visual reachedM arrival must work as the safety fallback after the timeout');
+  });
+});
+
+test('visual arrival winning the race first prevents a duplicate step-based arrival', () => {
+  withFakeClock(370000, (advance) => {
+    walkToTag9Segment(advance);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 100);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 700);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 1300);
+    acquireTag9(advance);
+    advance(5000); // let the phase-2 timeout re-enable visual arrival
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(1.0);
+      nav.handleTracking(performance.now(), true, 1.0);
+      advance(200);
+    }
+    assert.equal(nav.destinationReached, true);
+    var spokenCountAfterVisualArrival = spokenTexts.length;
+
+    // A step-confirmation callback arriving after visual already won must be a
+    // harmless no-op -- no second arrival announcement, no crash.
+    assert.doesNotThrow(() => {
+      nav.notifyTag9FlowAdaptiveStep(performance.now() + 100);
+      nav.notifyTag9FlowAdaptiveStep(performance.now() + 700);
+    });
+    assert.equal(spokenTexts.length, spokenCountAfterVisualArrival,
+      'no additional speech may be produced once the destination is already reached');
+  });
+});
+
+test('restarting the route clears the Tag 9 flow state', () => {
+  withFakeClock(380000, (advance) => {
+    walkToTag9Segment(advance);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 100);
+    assert.notEqual(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE);
+
+    selectDestination(9);
+    nav.startNavigation();
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE, 'a fresh route start must clear any prior flow state');
+  });
+});
+
+test('ending navigation clears the Tag 9 flow state', () => {
+  withFakeClock(390000, (advance) => {
+    walkToTag9Segment(advance);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 100);
+    nav.notifyTag9FlowAdaptiveStep(performance.now() + 700);
+    assert.notEqual(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE);
+
+    nav.endNavigation(false);
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE, 'ending navigation must clear any prior flow state');
+  });
+});
+
+test('a different edge through Tag 4 (not 4->9) never activates the local step flow', () => {
+  withFakeClock(400000, (advance) => {
+    walkToTag4Expected(advance); // real path [1,2,3,6,4,7,8,10,11] -- next edge is 4->7, not 4->9
+    spokenTexts.length = 0;
+    var closeDist = 0.5;
+    nav.onNextTagFound(closeDist);
+    for(var i = 0; i < 3; i++){
+      nav.setEmaDist(closeDist);
+      nav.handleTracking(performance.now(), true, closeDist);
+      advance(50);
+    }
+    assert.equal(nav.currentTagId, 4);
+    assert.equal(nav.expectedNextTagId, 7, 'this route continues 4->7, not 4->9');
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.INACTIVE, 'the local flow must never activate on a different edge');
+    assert.ok(
+      !spokenTexts.includes('Gehen Sie geradeaus.'),
+      'the flow-specific phase-1 instruction must never be spoken on a different edge'
+    );
+  });
+});
+
+test('the first-phase fallback timeout advances to SEARCH_TAG9 without ever announcing arrival, and logs a fallback reason', () => {
+  withFakeClock(410000, (advance) => {
+    walkToTag9Segment(advance);
+    spokenTexts.length = 0;
+    advance(12000); // past the ~10-12s phase-1 timeout, with zero qualifying steps
+    nav.scanHint(); // main-loop.js calls this every frame while SEARCHING_NEXT_TAG
+    assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.SEARCH_TAG9,
+      'the fallback must still advance the flow even with no detector signal at all');
+    assert.equal(nav.destinationReached, false, 'the fallback must never itself announce arrival');
+  });
+});

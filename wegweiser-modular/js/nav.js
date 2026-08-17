@@ -479,6 +479,196 @@ import { record, getTestName } from './logger.js';
     return o;
   }
 
+  // ==================== Tag 4 -> Tag 9: lokaler 3+2-Schritt-Fluss (Prototyp) ====================
+  // Eng auf GENAU diese Kante begrenzt (fromTag===4 && expectedNextTagId===9).
+  // Produkt-Hintergrund: Tag 9 haengt an der Wand und ist eher ein
+  // Bestaetigungs-Leuchtfeuer fuer den Essbereich als ein Punkt, dem man bis auf
+  // reachedM (3,0 m, siehe graph-data.js) visuell folgen muss.
+  //
+  // Zwei bereits im Vorfeld gepruefte Korrekturen sind hier eingearbeitet:
+  //
+  // (1) NICHT auf ADAPTIVE_WALKING_STARTED verlassen: dieses Ereignis feuert nur
+  //     beim Uebergang nicht-gehend -> gehend (siehe processCandidatePeak() in
+  //     adaptive-step-detector.js). Wird der adaptive Detektor schon VOR Tag 4
+  //     gestartet und laeuft "gehend" durchgehend ueber Tag 4 hinaus weiter,
+  //     feuert danach KEIN neues ADAPTIVE_WALKING_STARTED mehr. Stattdessen
+  //     zaehlt notifyTag9FlowAdaptiveStep() unten JEDEN einzelnen onStep()-Aufruf
+  //     (live und nachgemeldet gleichermassen), gefiltert auf die EIGENE
+  //     Kandidaten-Zeit s.t >= phaseEnteredAt -- nicht auf den Zeitpunkt, zu dem
+  //     der Callback geliefert wird. Das erkennt sowohl durchgehendes Gehen
+  //     (einzelne, sofortige Live-Schritte) als auch frisch nach Tag 4
+  //     bestaetigtes Gehen (ein nachgemeldeter Block, dessen einzelne
+  //     Original-Zeitstempel weiterhin einzeln gefiltert werden) korrekt.
+  //
+  // (2) NICHT die bestehende visuelle reachedM-Ankunft sofort gegen die
+  //     Zwei-Schritt-Phase antreten lassen: TRACKING_CONFIRMED und die
+  //     reachedM-Pruefung laufen im selben handleTracking()-Aufruf; waere die
+  //     gemessene Distanz zu diesem Zeitpunkt bereits <= reachedM, koennte die
+  //     visuelle Ankunft sofort gewinnen, bevor ueberhaupt neue Schritte
+  //     gezaehlt werden. isTag9VisualArrivalDeferred() unten haelt die
+  //     reachedM-Pruefung fuer GENAU diese Kante waehrend WALK_INTO_ESSBEREICH
+  //     bis zum Phase-2-Timeout zurueck (siehe dort) -- alle anderen Kanten
+  //     bleiben davon vollstaendig unberuehrt.
+  //
+  // WICHTIG (diese Implementierungsstufe): der adaptive Schritt-Detektor bleibt
+  // vollstaendig manuell gesteuert (app.js, Start/Stop-Kalibrierungsknoepfe).
+  // Dieser Block ruft NIEMALS reset()/start()/stop() auf dem Detektor auf und
+  // fordert keine DeviceMotion-Berechtigung an. Laeuft der Detektor nicht (aus,
+  // keine Berechtigung, nie gestartet), liefert notifyTag9FlowAdaptiveStep()
+  // schlicht nie Aufrufe -- die Timeouts unten sind dann der EINZIGE
+  // Fortschrittsmechanismus, identisch zum Fall "schlurfender Gang bestaetigt
+  // nie 3 in Folge". setAdaptiveDetectorActive() dient AUSSCHLIESSLICH der
+  // Log-Diagnose (Feld detectorActive) und wird nie zur Steuerung gelesen.
+  var Tag9Flow = {
+    INACTIVE: "INACTIVE",
+    WALK_AFTER_TAG4: "WALK_AFTER_TAG4",
+    SEARCH_TAG9: "SEARCH_TAG9",
+    WALK_INTO_ESSBEREICH: "WALK_INTO_ESSBEREICH"
+  };
+  var tag9FlowPhase = Tag9Flow.INACTIVE;
+  var tag9FlowPhaseEnteredAt = 0;
+  var tag9FlowStepCount = 0;
+  var tag9FlowPhase2FallbackLogged = false;
+  var adaptiveDetectorActive = false;   // nur fuer Log-Diagnose, siehe oben
+
+  // ~10-12s: Sicherheitsnetz, falls der Detektor aus ist ODER ein schlurfender
+  // Gang nie 3 qualifizierende Schritte bildet. Loest NIEMALS eine Ankunft aus,
+  // nur den Uebergang in die Suchphase.
+  var TAG9_FLOW_PHASE1_TIMEOUT_MS = 11000;
+  var TAG9_FLOW_PHASE1_STEPS_NEEDED = 3;
+  // ~4-5s: haelt die visuelle reachedM-Ankunft waehrend der Zwei-Schritt-Phase
+  // zurueck (siehe isTag9VisualArrivalDeferred()); danach entscheidet wieder
+  // ausschliesslich reachedM.
+  var TAG9_FLOW_PHASE2_TIMEOUT_MS = 4500;
+  var TAG9_FLOW_PHASE2_STEPS_NEEDED = 2;
+
+  function setAdaptiveDetectorActive(active){
+    adaptiveDetectorActive = !!active;
+  }
+
+  function resetTag9Flow(reason){
+    if(tag9FlowPhase === Tag9Flow.INACTIVE) return;
+    navLog("TAG9_STEP_FLOW_ENDED", { phase: tag9FlowPhase, reason: reason,
+      stepCount: tag9FlowStepCount, detectorActive: adaptiveDetectorActive });
+    tag9FlowPhase = Tag9Flow.INACTIVE;
+    tag9FlowPhaseEnteredAt = 0;
+    tag9FlowStepCount = 0;
+    tag9FlowPhase2FallbackLogged = false;
+  }
+
+  function enterTag9FlowPhase(phase){
+    tag9FlowPhase = phase;
+    tag9FlowPhaseEnteredAt = performance.now();
+    tag9FlowStepCount = 0;
+    tag9FlowPhase2FallbackLogged = false;
+    navLog("TAG9_STEP_FLOW_PHASE", { phase: phase, phaseEnteredAt: r1(tag9FlowPhaseEnteredAt),
+      detectorActive: adaptiveDetectorActive });
+  }
+
+  // Von beginSegment() aufgerufen, sobald genau die Kante 4->9 beginnt.
+  function startTag9Flow(){
+    enterTag9FlowPhase(Tag9Flow.WALK_AFTER_TAG4);
+    navLog("TAG9_STEP_FLOW_STARTED", { phase: tag9FlowPhase, detectorActive: adaptiveDetectorActive });
+    say("Gehen Sie geradeaus.",
+      ttsOpts({interrupt:true, source:"nav.tag9FlowWalkAfterTag4", category:"ACTION_REQUIRED"}));
+  }
+
+  function enterSearchTag9Phase(){
+    enterTag9FlowPhase(Tag9Flow.SEARCH_TAG9);
+    say("Stopp. Drehen Sie das Smartphone leicht nach links und suchen Sie die Markierung.",
+      ttsOpts({interrupt:true, source:"nav.tag9FlowSearch", category:"ACTION_REQUIRED"}));
+  }
+
+  // app.js ruft dies bei JEDEM emittierten adaptiven Schritt auf (onStep-
+  // Callback, live UND nachgemeldet gleichermassen) -- s.t ist die ORIGINALE
+  // Kandidaten-Zeit (performance.now()-Basis, siehe adaptive-step-detector.js),
+  // NIEMALS der Zeitpunkt der Callback-Zustellung. Ohne Wirkung ausserhalb von
+  // WALK_AFTER_TAG4/WALK_INTO_ESSBEREICH: waehrend SEARCH_TAG9 (und INACTIVE)
+  // faellt dieser Aufruf strukturell durch, ohne irgendeinen Zaehler zu
+  // beruehren -- Scan-Bewegungen aus der Suchphase koennen daher grundsaetzlich
+  // nie zaehlen, unabhaengig davon, ob spaeter nachgemeldete Schritte aus einer
+  // waehrend des Scannens begonnenen Sequenz eintreffen (die Zeitstempel-Pruefung
+  // unten filtert diese ohnehin einzeln heraus).
+  function notifyTag9FlowAdaptiveStep(stepT){
+    if(expectedNextTagId !== 9) return;
+    if(tag9FlowPhase !== Tag9Flow.WALK_AFTER_TAG4 && tag9FlowPhase !== Tag9Flow.WALK_INTO_ESSBEREICH) return;
+    if(stepT < tag9FlowPhaseEnteredAt) return;  // Kandidat stammt von VOR dieser Phase -- nicht zaehlen
+    tag9FlowStepCount++;
+    navLog("TAG9_STEP_PROGRESS", { phase: tag9FlowPhase, stepCount: tag9FlowStepCount,
+      candidateT: r1(stepT), phaseEnteredAt: r1(tag9FlowPhaseEnteredAt),
+      detectorActive: adaptiveDetectorActive });
+    if(tag9FlowPhase === Tag9Flow.WALK_AFTER_TAG4 && tag9FlowStepCount >= TAG9_FLOW_PHASE1_STEPS_NEEDED){
+      enterSearchTag9Phase();
+    } else if(tag9FlowPhase === Tag9Flow.WALK_INTO_ESSBEREICH && tag9FlowStepCount >= TAG9_FLOW_PHASE2_STEPS_NEEDED){
+      completeTag9FlowArrival("step-count");
+    }
+  }
+
+  // Von handleTracking() bei TRACKING_CONFIRMED(Tag 9) aufgerufen (siehe dort) --
+  // bewusst NICHT bei der ersten Einzel-Erkennung. Deckt sowohl den normalen Fall
+  // (Bestaetigung waehrend SEARCH_TAG9) als auch die vorzeitige Erkennung (Tag 9
+  // schon waehrend WALK_AFTER_TAG4 gefunden) ab -- in beiden Faellen wird die
+  // laufende Phase samt Zaehler verworfen (enterTag9FlowPhase() setzt den
+  // Zaehler auf 0 zurueck) und OHNE Umweg direkt WALK_INTO_ESSBEREICH betreten.
+  function notifyTag9Acquired(){
+    if(expectedNextTagId !== 9) return;
+    if(tag9FlowPhase !== Tag9Flow.WALK_AFTER_TAG4 && tag9FlowPhase !== Tag9Flow.SEARCH_TAG9) return;
+    navLog("TAG9_STEP_PROGRESS", { phase: tag9FlowPhase, trigger: "tag9-acquired",
+      early: tag9FlowPhase === Tag9Flow.WALK_AFTER_TAG4, stepCount: tag9FlowStepCount,
+      detectorActive: adaptiveDetectorActive });
+    enterTag9FlowPhase(Tag9Flow.WALK_INTO_ESSBEREICH);
+    say("Gehen Sie noch etwa zwei Schritte geradeaus.",
+      ttsOpts({interrupt:true, source:"nav.tag9FlowFinal", category:"ACTION_REQUIRED"}));
+  }
+
+  function completeTag9FlowArrival(reason){
+    // Der Wettlauf kann bereits durch die visuelle Ankunft entschieden sein --
+    // arriveAtDestination() ein zweites Mal aufzurufen wuerde eine doppelte
+    // ROUTE_END/TTS_DESTINATION erzeugen.
+    if(navState === NavState.DESTINATION_REACHED) return;
+    navLog("TAG9_STEP_FLOW_ENDED", { phase: tag9FlowPhase, reason: reason,
+      stepCount: tag9FlowStepCount, detectorActive: adaptiveDetectorActive });
+    tag9FlowPhase = Tag9Flow.INACTIVE;
+    arriveAtDestination();
+  }
+
+  // Pro Frame waehrend SEARCHING_NEXT_TAG aufgerufen (ueber scanHint(), das
+  // main-loop.js bereits jeden Frame in genau diesem Zustand aufruft) -- KEIN
+  // neuer main-loop.js-Aufrufpunkt noetig. Nur in WALK_AFTER_TAG4 aktiv; loest
+  // NIEMALS eine Ankunft aus, nur den Uebergang in die Suchphase. Tastet weder
+  // Detektor-Zustand noch Rhythmus an.
+  function checkTag9FlowPhase1Timeout(now){
+    if(tag9FlowPhase !== Tag9Flow.WALK_AFTER_TAG4) return;
+    if(now - tag9FlowPhaseEnteredAt < TAG9_FLOW_PHASE1_TIMEOUT_MS) return;
+    navLog("TAG9_STEP_FLOW_FALLBACK", { phase: tag9FlowPhase, reason: "phase1-timeout",
+      stepCount: tag9FlowStepCount, detectorActive: adaptiveDetectorActive });
+    enterSearchTag9Phase();
+  }
+
+  // Reiner Praedikat (keine Nebenwirkung): waehrend dieses Fensters haelt
+  // handleTracking() die generische reachedM-Ankunft fuer Tag 9 zurueck (siehe
+  // dortiger Aufrufpunkt). Ausserhalb von WALK_INTO_ESSBEREICH oder nach Ablauf
+  // von TAG9_FLOW_PHASE2_TIMEOUT_MS liefert dies wieder false -- die visuelle
+  // Ankunft ist dann ungehindert aktiv, genau wie auf jeder anderen Kante.
+  function isTag9VisualArrivalDeferred(now){
+    return expectedNextTagId === 9 && tag9FlowPhase === Tag9Flow.WALK_INTO_ESSBEREICH &&
+      (now - tag9FlowPhaseEnteredAt) < TAG9_FLOW_PHASE2_TIMEOUT_MS;
+  }
+
+  // Pro Frame waehrend TRACKING aufgerufen (ueber handleTracking(), siehe dort).
+  // Loest NIEMALS selbst eine Ankunft aus -- protokolliert nur EINMALIG, dass ab
+  // jetzt wieder ausschliesslich die bestehende visuelle reachedM-Schwelle
+  // (siehe graph-data.js, 3,0 m) ueber die Ankunft entscheidet. tag9FlowPhase
+  // bleibt WALK_INTO_ESSBEREICH (kein Reset), damit ein spaeter doch noch
+  // eintreffender qualifizierender Schritt weiterhin zaehlen kann.
+  function checkTag9FlowPhase2Timeout(now){
+    if(tag9FlowPhase !== Tag9Flow.WALK_INTO_ESSBEREICH || tag9FlowPhase2FallbackLogged) return;
+    if(now - tag9FlowPhaseEnteredAt < TAG9_FLOW_PHASE2_TIMEOUT_MS) return;
+    tag9FlowPhase2FallbackLogged = true;
+    navLog("TAG9_STEP_FLOW_FALLBACK", { phase: tag9FlowPhase, reason: "phase2-timeout-incomplete",
+      stepCount: tag9FlowStepCount, detectorActive: adaptiveDetectorActive });
+  }
+
   function startNavigation(){
     var destId = destSel.value ? parseInt(destSel.value, 10) : null;
     if(destId == null || !NODES[destId] || !NODES[destId].destination){
@@ -491,6 +681,7 @@ import { record, getTestName } from './logger.js';
     segIndex = -1;
     currentTagId = null;
     expectedNextTagId = null;
+    resetTag9Flow("route-start");
     navigationActive = true;
     destinationReached = false;
     lastRouteInstruction = "";
@@ -535,6 +726,7 @@ import { record, getTestName } from './logger.js';
     segIndex = -1;
     currentTagId = null;
     expectedNextTagId = null;
+    resetTag9Flow("route-end:" + effectiveReason);
     destinationId = null;
     destinationReached = false;
     resetSegmentState();
@@ -581,6 +773,12 @@ import { record, getTestName } from './logger.js';
     updatePanel(null);
     // ---- Instrumentierung ----
     navLog("SEGMENT_START", { segIndex: segIndex, fromTag: fromTag, toTag: expectedNextTagId });
+    // ---- Tag 4 -> Tag 9 lokaler Schritt-Fluss: siehe Block oben ----
+    if(fromTag === 4 && expectedNextTagId === 9){
+      startTag9Flow();
+    } else if(tag9FlowPhase !== Tag9Flow.INACTIVE){
+      resetTag9Flow("segment-changed");
+    }
   }
 
   // Startknoten bestätigt: Route berechnen und ersten Abschnitt beginnen.
@@ -897,6 +1095,8 @@ import { record, getTestName } from './logger.js';
     // pending — it does not touch any of the distance/EMA/REACHED/loss calculations
     // below.
     tryPostTurnConfirmation();
+    // ---- Tag 4 -> Tag 9 lokaler Schritt-Fluss: siehe Block oben ----
+    checkTag9FlowPhase2Timeout(now);
 
     var edge = currentEdge();
     // While in the TRACKING_START_TAG phase, its own, tighter arrival threshold
@@ -921,6 +1121,7 @@ import { record, getTestName } from './logger.js';
         trackingConfirmed = true;
         navLog("TRACKING_CONFIRMED", { expectedTag: expectedNextTagId,
           detections: trackDetCount, raw: r1(rawDist), ema: r1(emaDist) });
+        if(expectedNextTagId === 9) notifyTag9Acquired();
       }
     }
     var recentMin = rawRecent.length ? Math.min.apply(null, rawRecent) : null;
@@ -942,7 +1143,7 @@ import { record, getTestName } from './logger.js';
           lastSeenMsAgo: Math.round(now - expectedLastSeenAt) });
       }
 
-      if(rawDist != null && arrival <= reachedM){
+      if(rawDist != null && arrival <= reachedM && !isTag9VisualArrivalDeferred(now)){
         arrivalBelowCount++;
         if(arrivalBelowCount >= SETTINGS.arrivalConfirmFrames){
           navLog("REACHED reason=distance-threshold", { expectedTag: expectedNextTagId,
@@ -1383,6 +1584,14 @@ import { record, getTestName } from './logger.js';
 
     segIndex = targetIdx - 1;
     expectedNextTagId = confirmedTagId;
+    // ---- Tag 4 -> Tag 9 lokaler Schritt-Fluss: dieser Pfad umgeht
+    // beginSegment() (siehe dort) -- verwaist einen laufenden Fluss defensiv,
+    // falls expectedNextTagId hierdurch von 9 wegwechselt. Kann unter der
+    // aktuellen Graph-Topologie (Tag 9 ist Ziel, nichts liegt dahinter) nicht
+    // vorkommen, ist aber ein guenstiger, einfacher Schutz.
+    if(tag9FlowPhase !== Tag9Flow.INACTIVE && expectedNextTagId !== 9){
+      resetTag9Flow("forward-candidate-retarget");
+    }
     resetSegmentState();     // frische EMA/Tracking-Zustaende — keine Reste vom
                               // abgebrochenen Verfolgen des uebersprungenen Tags
     onNextTagFound(dist);    // identischer Uebergang wie bei normalem Fund: TRACKING
@@ -1492,6 +1701,8 @@ import { record, getTestName } from './logger.js';
   // Suchhinweise (vor dem ersten Kontakt mit dem Kanten-Tag). Wiederholen sich.
   function scanHint(){
     var now = performance.now();
+    // ---- Tag 4 -> Tag 9 lokaler Schritt-Fluss: siehe Block oben ----
+    checkTag9FlowPhase1Timeout(now);
     var idleSince = Math.max(expectedLastSeenAt, searchStartedAt, lastScanHintAt);
     var delay = (scanHintCount === 0) ? currentScanDelayMs : SETTINGS.scanHintRepeatMs;
     if(now - idleSince < delay) return;
@@ -1618,5 +1829,9 @@ export {
   setLastExpectedVisual,
   setWrongCandidate,
   setCandidate,
-  setEmaDist
+  setEmaDist,
+  Tag9Flow,
+  tag9FlowPhase,
+  notifyTag9FlowAdaptiveStep,
+  setAdaptiveDetectorActive
 };

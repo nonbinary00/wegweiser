@@ -13,7 +13,8 @@ import { markerName } from './graph.js';
 import {
   startNavigation, endNavigation, destinationReached, currentTagId,
   navigationActive, expectedNextTagId,
-  destinationId, routeRunId, navState, whereAmIResponse
+  destinationId, routeRunId, navState, whereAmIResponse,
+  notifyTag9FlowAdaptiveStep, setAdaptiveDetectorActive
 } from './nav.js';
 import { startCamera, showError, running } from './camera.js';
 import { say, toggleSound, soundOn, cancelSpeech, unlockSpeech } from './speech.js';
@@ -184,6 +185,11 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
         amplitude: r2(s.amplitude), threshold: r2(s.threshold),
         backfilled: s.backfilled
       });
+      // Tag 4 -> Tag 9 lokaler Schritt-Fluss (siehe nav.js): s.t ist die
+      // ORIGINALE Kandidaten-Zeit (live und nachgemeldet gleichermassen), nie
+      // der Zeitpunkt dieses Callback-Aufrufs -- nav.js filtert selbst gegen
+      // seinen eigenen Phasen-Beginn. Ohne Wirkung auf jeder anderen Kante.
+      notifyTag9FlowAdaptiveStep(s.t);
     },
     onWalkingStart: function(w){
       record("ADAPTIVE_WALKING_STARTED", { consecutivePeaks: w.consecutivePeaks, timestamp: Date.now() });
@@ -228,6 +234,9 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
         return;
       }
       record("STEP_DETECTOR_STARTED", { stepCount: stepDetector.getStepCount() });
+      // Reine Diagnose-Markierung fuer den Tag4->9-Schritt-Fluss (nav.js) --
+      // steuert dort NIE den Ablauf selbst, nur das detectorActive-Log-Feld.
+      setAdaptiveDetectorActive(true);
       updateStepCalUi(0, "einschwingen …");
       say("Schritt-Kalibrierung gestartet. Halten Sie das Smartphone ruhig.",
         appTtsOpts({interrupt:true, source:"app.stepCalStarted", category:"STATUS"}));
@@ -238,6 +247,7 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
     var finalCount = stepDetector.getStepCount();
     stepDetector.stop();
     record("STEP_DETECTOR_STOPPED", { stepCount: finalCount });
+    setAdaptiveDetectorActive(false);
     // GENAU EIN kompaktes Pro-Lauf-Ereignis statt Dauerprotokollierung
     // einzelner Sensor-Samples: echte Abtastrate (gemessen + vom Browser
     // gemeldet), adaptive Zaehler und letzte adaptive Statistik -- damit ist
