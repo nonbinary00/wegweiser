@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 
 // Must be imported before nav.js's dependency chain so its globals exist by
 // the time dom.js/logger.js run their module-load-time DOM/window calls.
-import { spokenTexts } from './browser-stubs.js';
+import { spokenTexts, withManualSpeechCompletion } from './browser-stubs.js';
 import { destSel } from '../js/dom.js';
 import { EDGE_MAP } from '../js/graph.js';
 import { SETTINGS } from '../js/config.js';
@@ -396,24 +396,152 @@ test('destination arrival is unaffected by the REACHED-speech fix', () => {
   assert.equal(nav.destinationReached, true);
 });
 
-test('duplicate suppression still applies to forward-skip confirmation (secondary path, unchanged)', () => {
+// ==================== Forward-skip confirmation: always spoken, but not doubled ====================
+// Field evidence: expected Tag 10, camera confirmed Tag 11 as a forward skip, Tag 11
+// was then physically REACHED only ~0.7s later. Two requirements, both proven below:
+// (1) the forward-skip confirmation itself must never be suppressed as a duplicate of
+//     an already-active "Gehen Sie weiter geradeaus." (previously it could be, via
+//     speakDirectionIfNew()); (2) an almost-immediate REACHED of that SAME skip-target
+//     tag must not speak (or cancel/restart) a second, redundant identical utterance
+//     while the skip confirmation is still the active speech (isSpeechActive(),
+//     speech.js) -- but once that speech has genuinely ended, or a different tag/
+//     segment is involved, REACHED speaks completely normally, as always.
+
+test('confirmed forward skip always speaks "Gehen Sie weiter geradeaus." even when activeDirectionText already contains the same text', () => {
   withFakeClock(600000, (advance) => {
-    walkToTag4Expected(advance); // Tag 6 reached -> just spoke "Gehen Sie weiter geradeaus."
+    walkToTag4Expected(advance); // Tag 6 reached -> activeDirectionText already "Gehen Sie weiter geradeaus."
     var countBefore = spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length;
     assert.equal(countBefore, 2, 'sanity check: Tag 3 and Tag 6 already spoke the straight instruction');
     // Forward-skip candidate Tag 7 (path index 5, reachable from Tag 4 -- index 4 --
-    // without an intervening maneuver via edge 4->7). Its own confirmation speech
-    // would repeat the identical phrase just spoken at Tag 6 -- this must still be
-    // suppressed as a duplicate (unchanged secondary-path dedup).
+    // without an intervening maneuver via edge 4->7).
     for(var f = 0; f < SETTINGS.otherTagFrames; f++){
       nav.updateSkipCandidate([{ id: 7, dist: 5 }], performance.now());
       advance(100);
     }
     assert.equal(nav.expectedNextTagId, 7, 'forward skip must have retargeted tracking to Tag 7');
-    var countAfter = spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length;
     assert.equal(
-      countAfter, countBefore,
-      `forward-skip confirmation must still be suppressed as a duplicate of the just-spoken REACHED instruction, got: ${JSON.stringify(spokenTexts)}`
+      spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length,
+      countBefore + 1,
+      `forward-skip confirmation must always speak, even though the identical phrase was already active, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('REACHED of the skip-target tag does not speak a second identical utterance while the forward-skip confirmation is still active, and does not cancel/restart it', () => {
+  withFakeClock(610000, (advance) => {
+    withManualSpeechCompletion((completeSpeech) => {
+      walkToTag4Expected(advance);
+      for(var f = 0; f < SETTINGS.otherTagFrames; f++){
+        nav.updateSkipCandidate([{ id: 7, dist: 5 }], performance.now());
+        advance(100);
+      }
+      assert.equal(nav.expectedNextTagId, 7);
+      var lengthAfterSkip = spokenTexts.length;
+      assert.ok(spokenTexts[lengthAfterSkip - 1] === 'Gehen Sie weiter geradeaus.');
+
+      // Tag 7 becomes REACHED ~0.7s later (field-evidence timing), while the skip
+      // confirmation utterance is still active -- withManualSpeechCompletion holds
+      // it "speaking" until completeSpeech() is called below.
+      nav.setEmaDist(0.1);
+      nav.handleTracking(performance.now(), true, 0.1);
+      advance(50);
+      nav.handleTracking(performance.now(), true, 0.1); // Tag 7 REACHED
+
+      assert.equal(
+        spokenTexts.length, lengthAfterSkip,
+        `REACHED must not speak a second identical utterance while the skip confirmation is still active, got: ${JSON.stringify(spokenTexts)}`
+      );
+
+      // The original utterance was never cancelled/restarted: completing it now
+      // (its first and only completion) adds no new spoken entry.
+      completeSpeech();
+      assert.equal(
+        spokenTexts.length, lengthAfterSkip,
+        'completing the original, never-restarted utterance must not add a new spoken entry'
+      );
+    });
+  });
+});
+
+test('if the forward-skip utterance has already ended before the same tag becomes REACHED, REACHED speaks normally', () => {
+  withFakeClock(620000, (advance) => {
+    walkToTag4Expected(advance);
+    for(var f = 0; f < SETTINGS.otherTagFrames; f++){
+      nav.updateSkipCandidate([{ id: 7, dist: 5 }], performance.now());
+      advance(100);
+    }
+    assert.equal(nav.expectedNextTagId, 7);
+    var countAfterSkip = spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length;
+
+    // Default stub completes every utterance instantly -- the skip confirmation has
+    // therefore already ended well before Tag 7 becomes REACHED below.
+    nav.setEmaDist(0.1);
+    nav.handleTracking(performance.now(), true, 0.1);
+    advance(50);
+    nav.handleTracking(performance.now(), true, 0.1); // Tag 7 REACHED
+
+    assert.equal(
+      spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length,
+      countAfterSkip + 1,
+      `REACHED must speak normally once the earlier skip confirmation has already ended, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('a later different straight tag still speaks normally on REACHED after an earlier forward-skip confirmation', () => {
+  withFakeClock(630000, (advance) => {
+    walkToTag4Expected(advance);
+    for(var f = 0; f < SETTINGS.otherTagFrames; f++){
+      nav.updateSkipCandidate([{ id: 7, dist: 5 }], performance.now());
+      advance(100);
+    }
+    nav.setEmaDist(0.1);
+    nav.handleTracking(performance.now(), true, 0.1);
+    advance(50);
+    nav.handleTracking(performance.now(), true, 0.1); // Tag 7 REACHED -> segment 7->8 begins
+    advance(50);
+    var countAfterTag7 = spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length;
+
+    nav.onNextTagFound(0.1);
+    nav.setEmaDist(0.1);
+    nav.handleTracking(performance.now(), true, 0.1);
+    advance(50);
+    nav.handleTracking(performance.now(), true, 0.1); // Tag 8 REACHED, unrelated to the earlier skip
+
+    assert.equal(nav.currentTagId, 8);
+    assert.equal(
+      spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length,
+      countAfterTag7 + 1,
+      `a later, unrelated straight tag must still speak normally on REACHED, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('skip across a turn remains blocked exactly as before', () => {
+  withFakeClock(640000, (advance) => {
+    resetState();
+    selectDestination(11);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(1);
+    var dist = 0.1;
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 1 reached -> expected becomes 2
+    advance(50);
+    assert.equal(nav.expectedNextTagId, 2);
+    spokenTexts.length = 0;
+
+    // Tag 3 lies beyond the required turn at Tag 2 (edge 2->3 is turn-right) -- must
+    // never be accepted as a forward-skip candidate from expected=2.
+    for(var f = 0; f < SETTINGS.otherTagFrames; f++){
+      nav.updateSkipCandidate([{ id: 3, dist: 5 }], performance.now());
+      advance(100);
+    }
+    assert.equal(nav.expectedNextTagId, 2, 'must not retarget across the required turn at Tag 2');
+    assert.ok(
+      !spokenTexts.includes('Gehen Sie weiter geradeaus.'),
+      'a blocked forward-skip attempt must never speak the skip confirmation'
     );
   });
 });

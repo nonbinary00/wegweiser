@@ -106,3 +106,31 @@ globalThis.speechSynthesis = {
   },
   cancel(){},
 };
+
+// Opt-in, test-scoped override: while `run` executes, speak() starts an
+// utterance but does NOT complete it immediately -- it stays "active/pending"
+// (speech.js's isSpeechActive() sees it as not yet terminal) until the test
+// explicitly calls the `completeSpeech()` function handed to `run`. Needed
+// only for tests proving lifecycle-based behavior (a speech still in
+// progress vs. one that has already ended) -- every other test keeps the
+// default instant-completion stub above, restored here in `finally`.
+export function withManualSpeechCompletion(run){
+  var realSpeak = globalThis.speechSynthesis.speak;
+  var pending = null;
+  function completeSpeech(){
+    if (!pending) return;
+    var u = pending;
+    pending = null;
+    if (typeof u.onend === 'function') u.onend();
+  }
+  globalThis.speechSynthesis.speak = function(utterance){
+    spokenTexts.push(utterance.text);
+    if (typeof utterance.onstart === 'function') utterance.onstart();
+    pending = utterance;
+  };
+  try {
+    return run(completeSpeech);
+  } finally {
+    globalThis.speechSynthesis.speak = realSpeak;
+  }
+}

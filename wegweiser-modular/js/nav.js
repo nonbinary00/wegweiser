@@ -8,7 +8,7 @@ import { SETTINGS, NAV_DEBUG } from './config.js';
 import { NODES, START_TEXTS, ARRIVALS, OFF_ROUTE_HINTS } from './graph-data.js';
 import { EDGE_MAP, findPath, markerName, pathToText, isTurnAction, departureActionSpeech } from './graph.js';
 import { destSel, uiState } from './dom.js';
-import { say, speaking, buzz } from './speech.js';
+import { say, speaking, buzz, isSpeechActive } from './speech.js';
 import { updatePanel, renderNavigationUi } from './ui.js';
 import { W, H } from './frame-state.js';
 import { record, getTestName } from './logger.js';
@@ -119,6 +119,19 @@ import { record, getTestName } from './logger.js';
   function resetActiveDirectionState(){
     activeDirectionText = null;
   }
+
+  // ---- Vorgriffs-Bestaetigung vs. unmittelbar folgendes REACHED desselben Tags ----
+  // Merkt sich AUSSCHLIESSLICH, welcher Tag und welche speechId (speech.js) die
+  // zuletzt gesprochene Vorgriffs-Bestaetigung ("Gehen Sie weiter geradeaus.",
+  // siehe beginTrackingForwardCandidate()) betrifft. reachPoint() prueft beim
+  // REACHED desselben Tags ueber isSpeechActive(forwardSkipSpeechId) (speech.js),
+  // ob genau diese Ansage noch aktiv/anstehend ist -- rein sprachzustandsbasiert,
+  // KEIN neuer Zeit-/Distanz-Schwellenwert. Wird bei jedem neuen Segment ueber
+  // resetSegmentState() zurueckgesetzt (siehe dort), damit ein spaeteres,
+  // unabhaengiges REACHED niemals einen laengst abgeschlossenen Vorgriff
+  // faelschlich wiederverwendet.
+  var forwardSkipConfirmedTagId = null;
+  var forwardSkipSpeechId = null;
 
   // ---- "Straight ahead" confirmation after a real turn ----
   // Purely additive state: remembers that a real turn was just announced
@@ -442,6 +455,8 @@ import { record, getTestName } from './logger.js';
     segLostMs = 0;
     segLostSince = null;
     segTrackingStartedAt = null;
+    forwardSkipConfirmedTagId = null;
+    forwardSkipSpeechId = null;
     resetSkipCandidate();
   }
 
@@ -1071,24 +1086,44 @@ import { record, getTestName } from './logger.js';
       // unmittelbar zuvor bereits dieselbe Formulierung aktiv war (z.B. zwei
       // aufeinanderfolgende Zwischen-Tags auf derselben Geradeaus-Strecke). Die
       // Dedup-Logik selbst bleibt fuer ALLE ANDEREN Aufrufer unveraendert bestehen
-      // (Wiederfindung nach Verlust, Vorgriffs-Bestaetigung, Nach-Abbiege-
-      // Bestaetigung, Korridor-Rueckversicherung) — nur diese eine, durch REACHED
-      // ausgeloeste Ansage ist davon ausgenommen. activeDirectionText wird
-      // trotzdem unconditional aktualisiert (wie beim Abbiegen oben), damit
-      // diese anderen Aufrufer weiterhin korrekt gegen die zuletzt tatsaechlich
-      // angesagte Formulierung abgleichen.
-      var straightResult = say(t, ttsOpts({interrupt:true, source:"nav.reachPointStraight",
-        category:"NAVIGATION_CONTEXT"}));
-      activeDirectionText = t;
-      navLog("TTS_STRAIGHT", { reachedTag: reachedTagId, action: nextEdge.departureAction,
-        trigger: "reached-tag", text: t, speechId: straightResult.speechId });
-      if(straightResult.accepted){
-        corridorLastReassuranceAtM = corridorProgressM;
+      // (Wiederfindung nach Verlust, Nach-Abbiege-Bestaetigung, Korridor-
+      // Rueckversicherung) — nur diese, durch REACHED ausgeloeste Ansage ist
+      // davon ausgenommen.
+      //
+      // EINE Ausnahme (Feldtest: Vorgriff auf Tag 11 bei ~1,99 m, REACHED
+      // desselben Tags ~0,7s spaeter bei ~1,62 m): wurde GENAU dieser Tag
+      // Sekundenbruchteile zuvor bereits als bestaetigter Vorgriff angesagt
+      // (forwardSkipConfirmedTagId, siehe beginTrackingForwardCandidate()) UND
+      // ist diese Ansage laut speech.js noch aktiv/anstehend
+      // (isSpeechActive(forwardSkipSpeechId) — rein sprachzustandsbasiert, KEIN
+      // neuer Zeit-/Distanz-Schwellenwert), waere ein zweites identisches say()
+      // hier nur ein unnoetiges, sofortiges Duplikat derselben laufenden Ansage
+      // -- weder stornieren noch neu starten, nur explizit protokollieren. Ist
+      // die Vorgriffs-Ansage bereits beendet/storniert ODER betrifft ein
+      // ANDERER Tag dieses REACHED (oder wurde zwischenzeitlich ein neues
+      // Segment begonnen, siehe resetSegmentState()), greift die normale,
+      // unconditionale REACHED-Ansage unten unveraendert.
+      if(reachedTagId === forwardSkipConfirmedTagId && isSpeechActive(forwardSkipSpeechId)){
+        activeDirectionText = t;
+        navLog("TTS_REACHED_STRAIGHT_SUPPRESSED_ACTIVE_SKIP_CONFIRMATION", {
+          reachedTag: reachedTagId, action: nextEdge.departureAction, trigger: "reached-tag",
+          text: t, activeSkipSpeechId: forwardSkipSpeechId });
+        maybeTriggerCorridorReassurance();
+      } else {
+        var straightResult = say(t, ttsOpts({interrupt:true, source:"nav.reachPointStraight",
+          category:"NAVIGATION_CONTEXT"}));
+        activeDirectionText = t;
+        navLog("TTS_STRAIGHT", { reachedTag: reachedTagId, action: nextEdge.departureAction,
+          trigger: "reached-tag", text: t, speechId: straightResult.speechId });
+        if(straightResult.accepted){
+          corridorLastReassuranceAtM = corridorProgressM;
+        }
+        // Bleibt bestehen, jetzt strukturell fast immer ein No-op (die REACHED-
+        // Ansage oben spricht bereits bei jedem Aufruf) — greift nur noch,
+        // falls say() oben aus einem anderen Grund (busy/muted) nicht
+        // angenommen wurde.
+        maybeTriggerCorridorReassurance();
       }
-      // Bleibt bestehen, jetzt strukturell fast immer ein No-op (die REACHED-
-      // Ansage oben spricht bereits bei jedem Aufruf) — greift nur noch, falls
-      // say() oben aus einem anderen Grund (busy/muted) nicht angenommen wurde.
-      maybeTriggerCorridorReassurance();
     }
     segIndex++;
     // beginSegment() setzt expectedNextTagId SOFORT auf den naechsten Tag und
@@ -1637,18 +1672,31 @@ import { record, getTestName } from './logger.js';
                               // beginnt, optionale Vibration, KEINE Ankunftsansage hier
 
     if(wasLostPending) resetActiveDirectionState();
-    // Always passes interrupt:true, like every other direction confirmation --
-    // otherwise a busy TTS channel could silently drop the request and corrupt the
-    // dedup state for the next announcement. When actually spoken, this
-    // confirmation also takes over the role of the corridor reassurance for this
-    // stretch, updating the same "last straight-ahead instruction" state -- this
-    // prevents the 15-meter reassurance from also firing shortly after an audible
-    // forward retarget, even though the user just heard an equivalent confirmation.
-    var skipResult = speakDirectionIfNew("Gehen Sie weiter geradeaus.",
-      ttsOpts({interrupt:true, source:"nav.forwardSkipConfirmation", category:"NAVIGATION_CONTEXT"}),
-      "TTS_STRAIGHT",
-      { confirmedTag: confirmedTagId,
-        trigger: wasLostPending ? "forward-retarget-after-lost" : "forward-retarget" });
+    // Audit-Fix: ein bestaetigter Vorgriff ist eine eigenstaendige, wichtige
+    // Navigations-Bestaetigung und MUSS IMMER hoerbar sein — genau wie die
+    // REACHED-Geradeaus-Ansage (siehe reachPoint()), direkt ueber say() statt
+    // ueber die gemeinsame Dedup-Logik (speakDirectionIfNew()), damit sie NIE
+    // als TTS_STRAIGHT_SUPPRESSED_DUPLICATE unterdrueckt werden kann.
+    // activeDirectionText wird trotzdem unconditional aktualisiert, damit
+    // ANDERE Aufrufer (Wiederfindung, Nach-Abbiege-Bestaetigung, Korridor-
+    // Rueckversicherung) weiterhin korrekt dagegen abgleichen.
+    // forwardSkipConfirmedTagId/forwardSkipSpeechId merken sich, WELCHER Tag
+    // und WELCHE speechId diese Ansage betrifft -- reachPoint() prueft dies
+    // (isSpeechActive(), rein sprachzustandsbasiert), um ein unmittelbar
+    // folgendes REACHED DESSELBEN Tags nicht doppelt anzusagen (siehe dort).
+    var skipResult = say("Gehen Sie weiter geradeaus.",
+      ttsOpts({interrupt:true, source:"nav.forwardSkipConfirmation", category:"NAVIGATION_CONTEXT"}));
+    activeDirectionText = "Gehen Sie weiter geradeaus.";
+    forwardSkipConfirmedTagId = confirmedTagId;
+    forwardSkipSpeechId = skipResult.speechId;
+    navLog("TTS_STRAIGHT", { confirmedTag: confirmedTagId,
+      trigger: wasLostPending ? "forward-retarget-after-lost" : "forward-retarget",
+      text: "Gehen Sie weiter geradeaus.", speechId: skipResult.speechId });
+    // When actually spoken, this confirmation also takes over the role of the
+    // corridor reassurance for this stretch, updating the same "last
+    // straight-ahead instruction" state -- this prevents the 15-meter
+    // reassurance from also firing shortly after an audible forward retarget,
+    // even though the user just heard an equivalent confirmation.
     if(skipResult.accepted){
       corridorLastReassuranceAtM = corridorProgressM;
     }

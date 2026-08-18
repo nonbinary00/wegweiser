@@ -188,9 +188,19 @@ import { record } from './logger.js';
     return ("speechSynthesis" in window) && (speechSynthesis.speaking || speechSynthesis.pending);
   }
 
+  // Reine Lebensdauer-Abfrage: ist GENAU diese speechId noch die aktive, nicht
+  // terminierte Anfrage? false sobald sie geendet/storniert/fehlgeschlagen ist
+  // (entry.terminalLogged), von einer neueren Anfrage verdraengt wurde
+  // (activeEntry zeigt dann auf die neuere) oder nie akzeptiert wurde (kein
+  // activeEntry). Reiner Lesezugriff auf ohnehin vorhandenen Zustand --
+  // veraendert nichts an say()/activeEntry/finishEntry().
+  function isSpeechActive(speechId){
+    return !!(speechId && activeEntry && activeEntry.base.speechId === speechId && !activeEntry.terminalLogged);
+  }
+
   function toggleSound(){
     soundOn = !soundOn;
     return soundOn;
   }
 
-export { say, speaking, buzz, toggleSound, soundOn, cancelSpeech, unlockSpeech };
+export { say, speaking, buzz, toggleSound, soundOn, cancelSpeech, unlockSpeech, isSpeechActive };
