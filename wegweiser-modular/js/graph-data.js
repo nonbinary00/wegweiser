@@ -386,9 +386,12 @@
     // Tag 1, Tag 2 und die Tischtennis-Verzweigung (7->5, s.o.) sind bewusst
     // NICHT gespiegelt.
     //
-    // Rueckweg 14->13->12->11 (neu, physisch begangen und verifiziert):
-    // verifizierte Handlungen 14->13 geradeaus, 13->12 links abbiegen,
-    // 12->11 geradeaus (exaktes Spiegelbild von 11->12/12->13/13->14 oben).
+    // Rueckweg 14->13->12->11 (physisch begangen und verifiziert):
+    // verifizierte Handlungen 14->13 geradeaus, 13->12 geradeaus, 12->11 links
+    // abbiegen -- exaktes Spiegelbild von 11->12/12->13/13->14 oben, deren
+    // Abbiegen ebenfalls bei Tag 12 haengt (12->13, turn-right). Siehe die
+    // Feldtest-Korrektur direkt bei den Kanten 13->12/12->11 unten (die Ecke
+    // liegt bei Tag 12, nicht bei Tag 13).
     // Ab Tag 11 setzt sich der Rueckweg unveraendert ueber die bereits
     // bestehende Kante 11->10 fort -- keine weitere neue Kante noetig.
     { from:14, to:13,
@@ -401,23 +404,30 @@
       locationDescription:
         "Sie befinden sich zwischen dem Ende des Büros und Müggelsee." },
 
+    // Feldtest-Korrektur (neu): die Ecke liegt bei Tag 12 (Buero Malte), nicht bei
+    // Tag 13 -- die urspruengliche Zuordnung haengte das Abbiegen eine Kante zu
+    // frueh (13->12) ein. Exakter Spiegel der Vorwaertsrichtung, in der das
+    // Abbiegen ebenfalls bei Tag 12 haengt (12->13, turn-right): 13->12 ist
+    // tatsaechlich geradeaus, 12->11 ist die Ecke (links abbiegen). Nur
+    // departureAction + found/reached dieser beiden Kanten sind getauscht;
+    // from/to/locationDescription bleiben unveraendert (weiterhin korrekt).
     { from:13, to:12,
-      found: "Nächster Punkt gefunden.",
-      reached: "Biegen Sie links ab.",
-      searchHint:
-        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
-        "die nächste Markierung.",
-      departureAction: "turn-left",
-      locationDescription:
-        "Sie befinden sich zwischen Müggelsee und dem Büro von Malte." },
-
-    { from:12, to:11,
       found: "Gehen Sie weiter geradeaus.",
       reached: "Gehen Sie weiter geradeaus.",
       searchHint:
         "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
         "die nächste Markierung.",
       departureAction: "continue-straight",
+      locationDescription:
+        "Sie befinden sich zwischen Müggelsee und dem Büro von Malte." },
+
+    { from:12, to:11,
+      found: "Nächster Punkt gefunden.",
+      reached: "Biegen Sie links ab.",
+      searchHint:
+        "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie " +
+        "die nächste Markierung.",
+      departureAction: "turn-left",
       locationDescription:
         "Sie befinden sich zwischen dem Büro von Malte und dem Ende des Korridors." },
 

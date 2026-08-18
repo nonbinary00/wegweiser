@@ -451,8 +451,10 @@ test('the six new Büro-Erweiterung edges use exactly the physically verified de
     '12->13': 'turn-right',
     '13->14': 'continue-straight',
     '14->13': 'continue-straight',
-    '13->12': 'turn-left',
-    '12->11': 'continue-straight',
+    // Feldtest-Korrektur: die Ecke liegt bei Tag 12, nicht bei Tag 13 -- siehe
+    // graph-data.js.
+    '13->12': 'continue-straight',
+    '12->11': 'turn-left',
   };
   for (const key of Object.keys(EXPECTED_ACTIONS)) {
     const edge = EDGE_MAP[key];
