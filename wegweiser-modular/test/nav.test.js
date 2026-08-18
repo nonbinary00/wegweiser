@@ -299,6 +299,125 @@ test('a tag behind the current position keeps the existing behind-position warni
   });
 });
 
+// ==================== REACHED must always speak the next action (audit fix) ====================
+// A physically REACHED tag must always produce a spoken next-action instruction --
+// turn or straight -- even if the immediately preceding corridor already spoke the
+// identical "Gehen Sie weiter geradeaus." phrase (previously suppressed via
+// speakDirectionIfNew()'s activeDirectionText dedup, see reachPoint()). Secondary
+// speech paths (forward-skip confirmation, reacquisition recovery, post-turn
+// confirmation, corridor reassurance, scan hints) must keep their existing
+// duplicate suppression unchanged -- only the REACHED-triggered straight
+// instruction itself is exempted from it.
+
+test('first straight REACHED instruction after a turn is spoken', () => {
+  withFakeClock(400000, (advance) => {
+    resetState();
+    selectDestination(11);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(1);
+    var dist = 0.1;
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 1 reached -> turn
+    advance(50);
+    nav.onNextTagFound(dist);
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 2 reached -> turn (edge 2->3)
+    advance(50);
+    spokenTexts.length = 0;
+    nav.onNextTagFound(dist);
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 3 reached -> straight (edge 3->6)
+    assert.equal(
+      spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length,
+      1,
+      `expected exactly one straight instruction at Tag 3, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('a second consecutive straight REACHED instruction is also spoken, not suppressed as a duplicate', () => {
+  withFakeClock(500000, (advance) => {
+    walkToTag4Expected(advance); // reaches Tag 3 (straight) then Tag 6 (straight) back-to-back
+    assert.equal(nav.currentTagId, 6);
+    assert.equal(
+      spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length,
+      2,
+      `expected the straight instruction spoken at BOTH Tag 3 and Tag 6, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('REACHED + turn still speaks the turn instruction unconditionally (unchanged)', () => {
+  withFakeClock(550000, (advance) => {
+    resetState();
+    selectDestination(11);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(1);
+    var dist = 0.1;
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 1 reached -> turn
+    advance(50);
+    spokenTexts.length = 0;
+    nav.onNextTagFound(dist);
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 2 reached -> turn (edge 2->3)
+    assert.ok(
+      spokenTexts.includes('Stopp. Biegen Sie rechts ab.'),
+      `expected the turn instruction at Tag 2, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('destination arrival is unaffected by the REACHED-speech fix', () => {
+  resetState();
+  selectDestination(3);
+  nav.startNavigation();
+  nav.onStartTagConfirmed(6); // findPath(6,3) = [6,3]
+  spokenTexts.length = 0;
+  var dist = 0.1;
+  nav.onNextTagFound(dist);
+  nav.setEmaDist(dist);
+  nav.handleTracking(performance.now(), true, dist);
+  nav.handleTracking(performance.now(), true, dist); // Tag 3 reached == destination
+  assert.ok(
+    spokenTexts.includes('Ziel erreicht. Sie sind am Eingang Flex. Die Tür befindet sich links.'),
+    `expected the unchanged arrival text, got: ${JSON.stringify(spokenTexts)}`
+  );
+  assert.equal(nav.destinationReached, true);
+});
+
+test('duplicate suppression still applies to forward-skip confirmation (secondary path, unchanged)', () => {
+  withFakeClock(600000, (advance) => {
+    walkToTag4Expected(advance); // Tag 6 reached -> just spoke "Gehen Sie weiter geradeaus."
+    var countBefore = spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length;
+    assert.equal(countBefore, 2, 'sanity check: Tag 3 and Tag 6 already spoke the straight instruction');
+    // Forward-skip candidate Tag 7 (path index 5, reachable from Tag 4 -- index 4 --
+    // without an intervening maneuver via edge 4->7). Its own confirmation speech
+    // would repeat the identical phrase just spoken at Tag 6 -- this must still be
+    // suppressed as a duplicate (unchanged secondary-path dedup).
+    for(var f = 0; f < SETTINGS.otherTagFrames; f++){
+      nav.updateSkipCandidate([{ id: 7, dist: 5 }], performance.now());
+      advance(100);
+    }
+    assert.equal(nav.expectedNextTagId, 7, 'forward skip must have retargeted tracking to Tag 7');
+    var countAfter = spokenTexts.filter((t) => t === 'Gehen Sie weiter geradeaus.').length;
+    assert.equal(
+      countAfter, countBefore,
+      `forward-skip confirmation must still be suppressed as a duplicate of the just-spoken REACHED instruction, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
 // ==================== Tag 4 -> Tag 9 local 3+2 step flow ====================
 // Narrow, edge-specific overlay: on the real route [6, 4, 9] (destination
 // Essbereich = Tag 9, exactly the field-tested scenario), Tag 4's own arrival

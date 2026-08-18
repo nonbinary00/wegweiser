@@ -1063,22 +1063,31 @@ import { record, getTestName } from './logger.js';
       // it is actually walked, see above at the next reachPoint() call).
       resetCorridorState("turn");
     } else {
-      // Kein Abbiegen: ueber die gemeinsame Dedup-Logik ansagen — auf einem langen
-      // geraden Korridor mit mehreren Zwischen-Tags wird dies nur beim ERSTEN
-      // Zwischen-Tag nach dem letzten Abbiegen tatsaechlich gesprochen; jeder weitere
-      // Zwischen-Tag auf DERSELBEN Geradeaus-Strecke wird als Duplikat unterdrueckt
-      // (TTS_STRAIGHT_SUPPRESSED_DUPLICATE) — genau EINE Ansage pro Korridor.
-      var straightResult = speakDirectionIfNew(t, ttsOpts({interrupt:true, source:"nav.reachPointStraight",
-        category:"NAVIGATION_CONTEXT"}), "TTS_STRAIGHT",
-        { reachedTag: reachedTagId, action: nextEdge.departureAction, trigger: "reached-tag" });
+      // Kein Abbiegen, aber trotzdem ein TATSAECHLICH ERREICHTER Navigations-Tag:
+      // MUSS IMMER hoerbar sein (Audit-Fix) — genau wie beim echten Abbiegen oben
+      // direkt ueber say() statt ueber die gemeinsame Dedup-Logik
+      // (speakDirectionIfNew()), damit diese REACHED-Ansage NIE als
+      // TTS_STRAIGHT_SUPPRESSED_DUPLICATE unterdrueckt werden kann, auch wenn
+      // unmittelbar zuvor bereits dieselbe Formulierung aktiv war (z.B. zwei
+      // aufeinanderfolgende Zwischen-Tags auf derselben Geradeaus-Strecke). Die
+      // Dedup-Logik selbst bleibt fuer ALLE ANDEREN Aufrufer unveraendert bestehen
+      // (Wiederfindung nach Verlust, Vorgriffs-Bestaetigung, Nach-Abbiege-
+      // Bestaetigung, Korridor-Rueckversicherung) — nur diese eine, durch REACHED
+      // ausgeloeste Ansage ist davon ausgenommen. activeDirectionText wird
+      // trotzdem unconditional aktualisiert (wie beim Abbiegen oben), damit
+      // diese anderen Aufrufer weiterhin korrekt gegen die zuletzt tatsaechlich
+      // angesagte Formulierung abgleichen.
+      var straightResult = say(t, ttsOpts({interrupt:true, source:"nav.reachPointStraight",
+        category:"NAVIGATION_CONTEXT"}));
+      activeDirectionText = t;
+      navLog("TTS_STRAIGHT", { reachedTag: reachedTagId, action: nextEdge.departureAction,
+        trigger: "reached-tag", text: t, speechId: straightResult.speechId });
       if(straightResult.accepted){
         corridorLastReassuranceAtM = corridorProgressM;
       }
-      // If the announcement above was (correctly) suppressed as a duplicate, but
-      // enough corridor distance has accumulated in the meantime, this provides the
-      // occasional reassurance on long, otherwise silent straight stretches — a
-      // no-op if straightResult.accepted was true (sinceLast is then 0) or the
-      // 15-meter threshold has not yet been reached.
+      // Bleibt bestehen, jetzt strukturell fast immer ein No-op (die REACHED-
+      // Ansage oben spricht bereits bei jedem Aufruf) — greift nur noch, falls
+      // say() oben aus einem anderen Grund (busy/muted) nicht angenommen wurde.
       maybeTriggerCorridorReassurance();
     }
     segIndex++;
