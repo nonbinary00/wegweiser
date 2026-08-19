@@ -4,7 +4,7 @@
 // though it conceptually describes tracking distance rather than navigation state.
 // The circular dependency between nav.js and ui.js (updatePanel) is intentional.
 
-import { SETTINGS, NAV_DEBUG } from './config.js';
+import { SETTINGS } from './config.js';
 import { NODES, START_TEXTS, ARRIVALS, OFF_ROUTE_HINTS } from './graph-data.js';
 import { EDGE_MAP, findPath, markerName, pathToText, isTurnAction, departureActionSpeech } from './graph.js';
 import { destSel, uiState } from './dom.js';
@@ -476,9 +476,6 @@ import { record, getTestName } from './logger.js';
 
   function navLog(msg, data){
     record(msg, mergeRouteRunId(data));
-    if(!NAV_DEBUG) return;
-    try{ console.log("[NavDbg " + Math.round(performance.now()) + "ms] " + msg,
-                     data ? JSON.stringify(data) : ""); }catch(e){}
   }
   function r1(v){ return v == null ? null : Math.round(v * 100) / 100; }
 
@@ -844,7 +841,6 @@ import { record, getTestName } from './logger.js';
     pathTagIds = p;
     segIndex = 0;
     currentTagId = tagId;
-    console.log("[Route] " + pathToText(p));
 
     // Tag 1 (Eingang) is special-cased: it is a physically remote start point -- the
     // route is already computed at this point, but the first segment (1->2) may

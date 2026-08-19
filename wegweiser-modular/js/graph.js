@@ -132,19 +132,11 @@ import { FLOOR_GEOMETRY, NODES, EDGES } from './graph-data.js';
         console.error("[Graph] Kante " + e.from + "->" + e.to + ": departureAction fehlt oder unbekannt ("
                        + e.departureAction + ").");
     });
-    var rows = [];
     Object.keys(NODES).map(Number).forEach(function(id){
       if(!NODES[id].destination) return;
       var p = findPath(1, id);
       if(!p) console.error("[Graph] Ziel " + markerName(id) + " (Tag " + id + ") ist vom Eingang aus NICHT erreichbar.");
-      else rows.push({ ziel: markerName(id), pfad: p.join(" -> "),
-                       distanzM: +p.reduce(function(s, n, i){
-                         if(i === 0) return 0;
-                         var e = EDGE_MAP[p[i-1] + "->" + n];
-                         return s + (e && e.distanceM || 0);
-                       }, 0).toFixed(1) });
     });
-    console.table(rows);
   })();
 
 export {
