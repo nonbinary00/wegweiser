@@ -23,7 +23,21 @@
       // siehe "markers (newTags_16).json"). Der Korridor endet NICHT bei Tag 11 --
       // er setzt sich geradeaus zu Tag 12 fort. dir_deg fehlt fuer Tag 13/14 im
       // Messexport (nicht erfasst) und wird NICHT geschaetzt/ergaenzt.
-      { tag_id:12, label:"Büro Malte",  type:"office",   x_m:48.852,  y_m:42.294, dir_deg:355.1 },
+      // Tag 12 / Büro Malte ist physisch ZWEIMAL montiert: der urspruengliche
+      // Print (Werte unten, dir_deg 355.1, sichtbar aus Richtung 11->12) und ein
+      // zweiter, rueckwaerts ausgerichteter Print fuer die Anflugrichtung 13->12
+      // (dir_deg 94). Der zweite Print wurde im Vermessungs-Export
+      // ("markers (newTags_16).json") faelschlich als eigenstaendiges tag_id:17
+      // gefuehrt; tatsaechlich ist er als AprilTag-ID 12 bedruckt/montiert.
+      // Es gibt daher weiterhin nur EINEN logischen Knoten (12/Malte) -- KEIN
+      // eigener MARKERS-Eintrag/Node fuer die alte "17"-Bezeichnung. reverseMount
+      // uebernimmt die Rohwerte aus dem Survey-Export fuer diesen zweiten Print
+      // unveraendert als reines Dokumentations-Feld (wie dir_deg wird es von
+      // keinem Code zur Laufzeit gelesen). x_m/y_m/dir_deg oben bleiben der
+      // unveraenderte urspruengliche Vermessungswert -- weiterhin die einzige
+      // Koordinate, die graph.js fuer edge.distanceM verwendet.
+      { tag_id:12, label:"Büro Malte",  type:"office",   x_m:48.852,  y_m:42.294, dir_deg:355.1,
+        reverseMount: { label:"backTag_Malte", x_m:49.073, y_m:40.585, dir_deg:94 } },
       { tag_id:13, label:"Müggelsee",   type:"office",   x_m:51.103,  y_m:47.561 },
       { tag_id:14, label:"end",         type:"office",   x_m:49.111,  y_m:49.867 },
       // Rueckwaerts-Route-Erweiterung 3->15->16 (neu). Label wie im
