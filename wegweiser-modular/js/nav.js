@@ -56,6 +56,24 @@ import { record, getTestName } from './logger.js';
   var candId = null, candCount = 0;
   var lastAimZone = null, lastAimAt = 0;
 
+  // ---- Option C: SEARCHING_START_TAG-Vergleichsfenster ----
+  // Vollstaendig getrennt vom obigen candId/candCount (das weiterhin unveraendert
+  // die bestehende CONFIRM_FRAMES-Bestaetigung EINES Tags pro main-loop.js-Frame
+  // treibt). Sobald main-loop.js meldet, dass ein Tag CONFIRM_FRAMES erreicht hat
+  // (waehrend startPhase), ruft main-loop.js NICHT mehr onStartTagConfirmed()
+  // direkt auf, sondern noteStartCandidateConfirmed() -- das oeffnet bei Bedarf ein
+  // kurzes Vergleichsfenster (SETTINGS.startCandidateWindowMs) und merkt sich den
+  // Kandidaten. Erst wenn das Fenster ueber checkStartCandidateWindow() ablaeuft,
+  // wird GENAU EINMAL onStartTagConfirmed() mit dem Gewinner aufgerufen. Kurzlebig
+  // und bewusst NICHT im mid-route rawRecent/emaDist wiederverwendet: jener Zustand
+  // gehoert zu genau EINEM bereits bestaetigten expectedNextTagId und wird pro
+  // Segment zurueckgesetzt, waehrend hier mehrere gleichzeitig konkurrierende Tag-
+  // IDs vor jeder Bestaetigung beobachtet werden muessen.
+  var startCandWindowOpen = false;
+  var startCandWindowOpenedAt = 0;
+  var startCandSamples = {};      // tagId -> [rohe Distanzwerte, kleines rollierendes Fenster]
+  var startCandConfirmed = {};    // tagId -> stabilisierte (Median-)Distanz, nur bestaetigte Kandidaten
+
   // Tracking-Zustand
 
   var emaDist = null;
@@ -422,6 +440,97 @@ import { record, getTestName } from './logger.js';
   function setCandidate(id, count){ candId = id; candCount = count; }
   function setEmaDist(v){ emaDist = v; }
 
+  // ---- Option C: SEARCHING_START_TAG-Vergleichsfenster ----
+  function medianOf(values){
+    var sorted = values.slice().sort(function(a, b){ return a - b; });
+    var mid = Math.floor(sorted.length / 2);
+    return (sorted.length % 2) ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  // Von main-loop.js fuer JEDEN bekannten, in diesem Frame erkannten Tag waehrend
+  // startPhase aufgerufen -- unabhaengig davon, ob dieser Tag gerade der ueber
+  // candId/candCount verfolgte Kandidat ist. Reines rollierendes Roh-Distanz-
+  // Fenster pro Tag-ID (kein EMA, kein Minimum): der Median ueber dieses Fenster
+  // wird erst bei der Gewinnerwahl gebildet (siehe checkStartCandidateWindow()) --
+  // absichtlich NICHT das bestehende rawRecent/emaDist (das ist an genau einen
+  // bereits bestaetigten expectedNextTagId gebunden und pro Segment zurueckgesetzt).
+  function recordStartCandidateSample(id, dist){
+    if(dist == null) return;
+    var buf = startCandSamples[id];
+    if(!buf){ buf = []; startCandSamples[id] = buf; }
+    buf.push(dist);
+    if(buf.length > SETTINGS.startCandidateSampleWindow) buf.shift();
+  }
+
+  // Von main-loop.js aufgerufen, wenn ein Tag waehrend startPhase soeben
+  // CONFIRM_FRAMES erreicht hat (bisheriger Bestaetigungsmechanismus unveraendert).
+  // Ruft NICHT onStartTagConfirmed() auf -- oeffnet stattdessen (falls noch nicht
+  // offen) ein kurzes Vergleichsfenster und merkt sich diesen Kandidaten mit seiner
+  // stabilisierten (Median-)Distanz. Ein bereits bestaetigter Kandidat, der erneut
+  // bestaetigt wird, aktualisiert lediglich seine Distanz aus dem inzwischen
+  // gewachsenen Sample-Fenster.
+  function noteStartCandidateConfirmed(id, now){
+    var samples = startCandSamples[id];
+    var stableDist = (samples && samples.length) ? medianOf(samples) : null;
+    var opening = !startCandWindowOpen;
+    if(opening){
+      startCandWindowOpen = true;
+      startCandWindowOpenedAt = now;
+    }
+    var reconfirmed = Object.prototype.hasOwnProperty.call(startCandConfirmed, id);
+    startCandConfirmed[id] = stableDist;
+    navLog("START_CANDIDATE_CONFIRMED", { candidate: id, stableDist: r1(stableDist),
+      sampleCount: samples ? samples.length : 0, opensWindow: opening, reconfirmed: reconfirmed });
+    if(opening){
+      navLog("START_COMPARE_WINDOW_OPENED", { firstCandidate: id, stableDist: r1(stableDist),
+        windowMs: SETTINGS.startCandidateWindowMs });
+    }
+  }
+
+  // Von main-loop.js jeden Frame waehrend startPhase aufgerufen. Liefert false,
+  // solange kein Fenster offen ist oder es noch laeuft (keine Seiteneffekte). Ist
+  // das Fenster abgelaufen, waehlt sie GENAU EINMAL den Gewinner (kleinste
+  // stabilisierte Distanz; deterministischer Fallback bei Gleichstand oder
+  // fehlender Distanz: die kleinere Tag-ID -- siehe Schleife unten, ids ist
+  // aufsteigend sortiert und wird nur bei einer STRIKT kleineren Distanz
+  // gewechselt), loescht den gesamten temporaeren Zustand SOFORT und ruft dann
+  // einmalig onStartTagConfirmed() auf -- das bleibt der einzige Ort, an dem eine
+  // Route tatsaechlich committet wird. Rueckgabewert true bedeutet main-loop.js
+  // muss die uebrige Frame-Verarbeitung fuer diesen Tick auslassen (siehe dort).
+  function checkStartCandidateWindow(now){
+    if(!startCandWindowOpen) return false;
+    if(now - startCandWindowOpenedAt < SETTINGS.startCandidateWindowMs) return false;
+
+    var ids = Object.keys(startCandConfirmed).map(Number).sort(function(a, b){ return a - b; });
+    var winnerId = ids[0], winnerDist = startCandConfirmed[winnerId];
+    for(var i = 1; i < ids.length; i++){
+      var id = ids[i], dist = startCandConfirmed[id];
+      if(dist != null && (winnerDist == null || dist < winnerDist)){
+        winnerId = id; winnerDist = dist;
+      }
+      // Gleichstand (dist === winnerDist) oder dist==null: winnerId bleibt die
+      // kleinere ID, da ids aufsteigend sortiert ist -- deterministischer Fallback.
+    }
+
+    navLog("START_COMPARE_WINDOW_CLOSED", { candidates: startCandConfirmed, winner: winnerId,
+      winnerStableDist: r1(winnerDist), candidateCount: ids.length });
+
+    startCandWindowOpen = false;
+    startCandWindowOpenedAt = 0;
+    startCandConfirmed = {};
+    startCandSamples = {};
+
+    onStartTagConfirmed(winnerId);
+    return true;
+  }
+
+  function resetStartCandidateState(){
+    startCandWindowOpen = false;
+    startCandWindowOpenedAt = 0;
+    startCandSamples = {};
+    startCandConfirmed = {};
+  }
+
   // ==================== NAVIGATION ====================
   function resetSegmentState(){
     searchStartedAt = performance.now();
@@ -458,6 +567,14 @@ import { record, getTestName } from './logger.js';
     forwardSkipConfirmedTagId = null;
     forwardSkipSpeechId = null;
     resetSkipCandidate();
+    // Defensive: by construction the Option-C window/candidate state is already
+    // cleared by the time any of resetSegmentState()'s call sites run (a winner is
+    // committed and its own state cleared synchronously inside
+    // checkStartCandidateWindow(), before onStartTagConfirmed() -> beginSegment()
+    // ever reaches this point) -- kept here too so route start/end, every new
+    // segment, and a forward-skip retarget all independently guarantee no
+    // start-candidate state can leak into the next route.
+    resetStartCandidateState();
   }
 
 
@@ -1922,6 +2039,9 @@ export {
   setWrongCandidate,
   setCandidate,
   setEmaDist,
+  recordStartCandidateSample,
+  noteStartCandidateConfirmed,
+  checkStartCandidateWindow,
   Tag9Flow,
   tag9FlowPhase,
   notifyTag9FlowAdaptiveStep,

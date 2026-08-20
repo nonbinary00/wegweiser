@@ -19,10 +19,11 @@ import {
   navState, NavState, navigationActive, pathTagIds, destinationReached, destinationId,
   currentTagId, expectedNextTagId, segIndex, emaDist, candId, candCount, wrongCandId,
   wrongCandCount, lastExpectedVis, candLastSeenAt, trackingStartTagActive,
-  setNavState, handleTracking, handleLostStopped, onStartTagConfirmed, onNextTagFound,
+  setNavState, handleTracking, handleLostStopped, onNextTagFound,
   onOtherTagConfirmed, updateSkipCandidate, scanHint, aimGuidance,
   touchExpectedSeen, touchCandidateSeen, setLastExpectedVisual, setWrongCandidate,
-  setCandidate, setEmaDist
+  setCandidate, setEmaDist, recordStartCandidateSample, noteStartCandidateConfirmed,
+  checkStartCandidateWindow
 } from './nav.js';
 import { running } from './camera.js';
 
@@ -133,7 +134,28 @@ import { running } from './camera.js';
 
       // --- Navigationslogik ---
       if(navigationActive && !destinationReached){
-        if(navState === NavState.TRACKING || navState === NavState.TRACKING_START_TAG){
+        // Option C (Start-Tag-Auswahl): waehrend startPhase jeden bekannten,
+        // erkannten Tag unabhaengig von expectedDet/bestKnown in sein eigenes kurzes
+        // Distanz-Fenster einspeisen (detectedWithDist enthaelt ohnehin ALLE
+        // Erkennungen dieses Frames), und ein bereits offenes Vergleichsfenster auf
+        // Ablauf pruefen. checkStartCandidateWindow() macht bei geschlossenem
+        // Fenster nichts (billiger No-op); laeuft es gerade ab, committet sie GENAU
+        // EINMAL ueber das bestehende onStartTagConfirmed() und liefert true --
+        // dann darf die uebrige, auf einen frischen expectedDet dieses Frames
+        // ausgelegte Zustandsmaschine unten fuer diesen Tick nicht mehr laufen
+        // (pathTagIds ist jetzt gesetzt, startPhase waere fuer den Rest dieses
+        // Ticks veraltet).
+        var startWindowResolved = false;
+        if(startPhase){
+          for(var sci = 0; sci < detectedWithDist.length; sci++){
+            var scDet = detectedWithDist[sci];
+            if(MARKERS[scDet.id]) recordStartCandidateSample(scDet.id, scDet.dist);
+          }
+          startWindowResolved = checkStartCandidateWindow(now);
+        }
+        if(startWindowResolved){
+          // committed this frame -- fall through to updatePanel()/scheduleNext() below
+        } else if(navState === NavState.TRACKING || navState === NavState.TRACKING_START_TAG){
           if(expectedDet) touchExpectedSeen(now);
           // supplies this frame's fresh raw distance (arrival logic)
           handleTracking(now, expectedVisual, expectedDet ? expectedDet.dist : null);
@@ -175,7 +197,7 @@ import { running } from './camera.js';
             aimGuidance(expectedDet.corners);
           } else {
             setCandidate(null, 0);
-            if(startPhase) onStartTagConfirmed(expectedDet.id);
+            if(startPhase) noteStartCandidateConfirmed(expectedDet.id, now);
             else onNextTagFound(expectedDet.dist != null ? expectedDet.dist : emaDist);
           }
         } else {

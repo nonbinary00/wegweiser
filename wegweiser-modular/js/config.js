@@ -49,11 +49,22 @@
     lostReminderRepeatMs: 18000,   // interval between short "Suchen Sie weiter." reminders
                                   // during LOST_STOPPED -- deliberately far less frequent
                                   // than the scan-hint repeat interval, so it doesn't nag
-    longCorridorReassuranceM: 15   // after this many accumulated meters without a turn
+    longCorridorReassuranceM: 15,  // after this many accumulated meters without a turn
                                   // (see corridor progress in nav.js), "Gehen Sie weiter
                                   // geradeaus." may be spoken again, even if the same
                                   // phrase was already active once for this corridor --
                                   // purely distance-based, no new time-based timer
+    startCandidateWindowMs: 500,     // Option C (start-tag selection): once the first known
+                                  // tag reaches CONFIRM_FRAMES during SEARCHING_START_TAG,
+                                  // wait this long before committing, so a nearer tag that
+                                  // confirms shortly after can still win. Deliberately short
+                                  // relative to scanHintAfterMs -- adds only a small, bounded
+                                  // delay to every route start, not just contested ones.
+    startCandidateSampleWindow: 5   // rolling raw-distance sample count kept per start
+                                  // candidate (mirrors rawWindowN's window-of-recent-values
+                                  // idea, but kept separate/short-lived -- see nav.js) --
+                                  // used to compute a MEDIAN, not a minimum: a minimum would
+                                  // let a single spuriously-close outlier frame win outright.
   };
 
   var SAFETY_SPEECH = "Der Wegweiser unterstützt die Orientierung anhand von Markierungen, " +
