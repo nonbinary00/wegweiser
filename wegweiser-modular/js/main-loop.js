@@ -19,7 +19,7 @@ import {
   navState, NavState, navigationActive, pathTagIds, destinationReached, destinationId,
   currentTagId, expectedNextTagId, segIndex, emaDist, candId, candCount, wrongCandId,
   wrongCandCount, lastExpectedVis, candLastSeenAt, trackingStartTagActive,
-  setNavState, handleTracking, handleLostStopped, onNextTagFound,
+  setNavState, handleTracking, handleLostStopped, onExpectedTagFound,
   onOtherTagConfirmed, updateSkipCandidate, scanHint, aimGuidance,
   touchExpectedSeen, touchCandidateSeen, setLastExpectedVisual, setWrongCandidate,
   setCandidate, setEmaDist, recordStartCandidateSample, noteStartCandidateConfirmed,
@@ -198,7 +198,7 @@ import { running } from './camera.js';
           } else {
             setCandidate(null, 0);
             if(startPhase) noteStartCandidateConfirmed(expectedDet.id, now);
-            else onNextTagFound(expectedDet.dist != null ? expectedDet.dist : emaDist);
+            else onExpectedTagFound(expectedDet.dist != null ? expectedDet.dist : emaDist);
           }
         } else {
           if(candId != null && (now - candLastSeenAt) > SETTINGS.candMemoryMs){

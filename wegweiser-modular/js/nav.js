@@ -151,6 +151,18 @@ import { record, getTestName } from './logger.js';
   var forwardSkipConfirmedTagId = null;
   var forwardSkipSpeechId = null;
 
+  // ---- Generic "expected tag confirmed on a continue-straight edge" confirmation ----
+  // Remembers ONLY the tag ID for which onExpectedTagFound() below has already spoken
+  // the straight confirmation this segment -- so reachPoint()'s later REACHED for the
+  // SAME tag does not repeat it. Deliberately its own variable, not shared with
+  // forwardSkipConfirmedTagId: that one guards a narrower, speech-state-based case
+  // (is the exact forward-skip utterance still literally playing right now); this one
+  // is a plain per-tag "already given for this tag in this segment" fact, independent
+  // of whether the speech has since finished. Reset every segment via
+  // resetSegmentState() (route start/end, every new segment, forward-skip retarget),
+  // so it can never leak into a different tag or a later route run.
+  var straightConfirmedTagId = null;
+
   // ---- "Straight ahead" confirmation after a real turn ----
   // Purely additive state: remembers that a real turn was just announced
   // (isTurn===true in reachPoint(), see there) and that the follow-up confirmation
@@ -566,6 +578,7 @@ import { record, getTestName } from './logger.js';
     segTrackingStartedAt = null;
     forwardSkipConfirmedTagId = null;
     forwardSkipSpeechId = null;
+    straightConfirmedTagId = null;
     resetSkipCandidate();
     // Defensive: by construction the Option-C window/candidate state is already
     // cleared by the time any of resetSegmentState()'s call sites run (a winner is
@@ -1109,6 +1122,70 @@ import { record, getTestName } from './logger.js';
     tryPostTurnConfirmation();
   }
 
+  // Generic "expected tag confirmed on a continue-straight edge" rule -- called ONLY
+  // from main-loop.js's single genuine confirmation site (the normal, non-startPhase
+  // expectedDet branch), never from beginTrackingForwardCandidate() (which continues
+  // to call the plain onNextTagFound() above, unchanged, and speaks its own
+  // unconditional forward-skip confirmation). Delegates to onNextTagFound() FIRST, so
+  // every existing side effect (TRACKING state, buzz, TTS_SUPPRESSED_MARKER_FOUND,
+  // the immediate post-turn-confirmation attempt) is completely unchanged.
+  //
+  // The confirmed tag and its outgoing edge are captured only AFTER onNextTagFound()
+  // returns (expectedNextTagId itself is never changed by it), except for
+  // wasPostTurnPendingForThisTag, which is captured BEFORE the delegate call --
+  // tryPostTurnConfirmation() (called from inside onNextTagFound()) may synchronously
+  // clear postTurnPending on success, so checking it afterward would miss exactly the
+  // case this guards: if a post-turn confirmation ("Gehen Sie geradeaus.") was already
+  // due for this same tag, that already fills the "you're continuing correctly" role --
+  // do not also add a near-duplicate "Gehen Sie weiter geradeaus." right behind it.
+  function onExpectedTagFound(dist){
+    var tagId = expectedNextTagId;
+    var wasPostTurnPendingForThisTag = postTurnPending && postTurnExpectedTag === tagId;
+
+    onNextTagFound(dist);
+
+    if(wasPostTurnPendingForThisTag) return;
+    if(tagId == null || tagId === destinationId || !pathTagIds) return;
+
+    // Same lookup reachPoint() already uses for the OUTGOING edge from a just-reached
+    // tag (there: reachedTagId + "->" + pathTagIds[segIndex+2]) -- here segIndex still
+    // points at the not-yet-completed current segment, so pathTagIds[segIndex+1] is
+    // this same tagId and pathTagIds[segIndex+2] is the tag after it. No new edge
+    // logic: isTurnAction()/departureActionSpeech() are the existing, generic
+    // departureAction-derived helpers (graph.js), unaware of any specific tag ID.
+    var nextEdge = EDGE_MAP[tagId + "->" + pathTagIds[segIndex + 2]];
+    if(!nextEdge || isTurnAction(nextEdge)) return;
+
+    var text = departureActionSpeech(nextEdge);
+    // Deliberately NOT routed through speakDirectionIfNew()'s text-equality dedup:
+    // every continue-straight edge speaks the exact same phrase, so consecutive
+    // DIFFERENT tags on a long straight corridor would otherwise silently suppress
+    // every confirmation after the first (activeDirectionText already equals the
+    // text). Bypassing dedup here mirrors the same "must remain audible" reasoning
+    // reachPoint()/beginTrackingForwardCandidate() already apply for their own
+    // straight announcements -- duplicate suppression for THIS mechanism is handled
+    // entirely by straightConfirmedTagId (a per-tag fact, not a text comparison) and
+    // by the wasPostTurnPendingForThisTag guard above, not by activeDirectionText.
+    // interrupt:false so this best-effort early reassurance can never talk over a
+    // turn/stop/arrival/lost announcement already playing at this exact instant.
+    var result = say(text, ttsOpts({interrupt:false,
+      source:"nav.expectedTagStraightConfirmation", category:"NAVIGATION_CONTEXT", expectedTag: tagId}));
+
+    if(result.accepted){
+      activeDirectionText = text;
+      straightConfirmedTagId = tagId;
+      navLog("TTS_STRAIGHT", { expectedTag: tagId, action: nextEdge.departureAction,
+        trigger: "expected-tag-confirmed", text: text, speechId: result.speechId });
+      // Same "last heard straight guidance" baseline update every other straight
+      // announcement performs on success (reachPoint(), beginTrackingForwardCandidate())
+      // -- moves the corridor-reassurance reference point forward to reflect that the
+      // user just heard something, WITHOUT crediting any new distance (no edge has
+      // actually been completed yet at confirmation time; creditCorridorProgress() is
+      // deliberately not called here).
+      corridorLastReassuranceAtM = corridorProgressM;
+    }
+  }
+
   // Punkt erreicht (Distanz <= Schwelle, Near-Loss-Fallback oder kontrollierter Skip).
   function reachPoint(reason){
     var edge = currentEdge();
@@ -1221,6 +1298,20 @@ import { record, getTestName } from './logger.js';
         navLog("TTS_REACHED_STRAIGHT_SUPPRESSED_ACTIVE_SKIP_CONFIRMATION", {
           reachedTag: reachedTagId, action: nextEdge.departureAction, trigger: "reached-tag",
           text: t, activeSkipSpeechId: forwardSkipSpeechId });
+        maybeTriggerCorridorReassurance();
+      } else if(reachedTagId === straightConfirmedTagId){
+        // The generic expected-tag-confirmed rule (onExpectedTagFound()) already
+        // spoke this exact straight instruction for this exact tag earlier in this
+        // segment -- unlike the forwardSkipConfirmedTagId exception above, this is
+        // NOT time/speech-state-bounded (straightConfirmedTagId is a plain per-tag
+        // fact, reset only by resetSegmentState()), so it suppresses regardless of
+        // how much time has passed since. All other bookkeeping below (segIndex++,
+        // beginSegment(), postTurnPending) is unaffected -- only this one say() is
+        // skipped.
+        activeDirectionText = t;
+        navLog("TTS_REACHED_STRAIGHT_SUPPRESSED_EXPECTED_TAG_CONFIRMATION", {
+          reachedTag: reachedTagId, action: nextEdge.departureAction, trigger: "reached-tag",
+          text: t });
         maybeTriggerCorridorReassurance();
       } else {
         var straightResult = say(t, ttsOpts({interrupt:true, source:"nav.reachPointStraight",
@@ -2028,6 +2119,7 @@ export {
   handleLostStopped,
   onStartTagConfirmed,
   onNextTagFound,
+  onExpectedTagFound,
   onOtherTagConfirmed,
   updateSkipCandidate,
   aimGuidance,
