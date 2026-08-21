@@ -188,6 +188,14 @@ import { record } from './logger.js';
     return ("speechSynthesis" in window) && (speechSynthesis.speaking || speechSynthesis.pending);
   }
 
+  // source (opts.source passed to say()) of the currently active, not-yet-terminal
+  // speech request, or null if none. Read-only query on the same activeEntry state
+  // say() already maintains -- lets a caller decide whether it is safe to interrupt
+  // (e.g. cancel an obsolete nav.scanHint) without guessing from text content.
+  function activeSpeechSource(){
+    return (activeEntry && !activeEntry.terminalLogged) ? activeEntry.base.source : null;
+  }
+
   // Reine Lebensdauer-Abfrage: ist GENAU diese speechId noch die aktive, nicht
   // terminierte Anfrage? false sobald sie geendet/storniert/fehlgeschlagen ist
   // (entry.terminalLogged), von einer neueren Anfrage verdraengt wurde
@@ -203,4 +211,5 @@ import { record } from './logger.js';
     return soundOn;
   }
 
-export { say, speaking, buzz, toggleSound, soundOn, cancelSpeech, unlockSpeech, isSpeechActive };
+export { say, speaking, buzz, toggleSound, soundOn, cancelSpeech, unlockSpeech, isSpeechActive,
+         activeSpeechSource };

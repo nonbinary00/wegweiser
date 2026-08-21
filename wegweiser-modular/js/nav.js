@@ -8,7 +8,7 @@ import { SETTINGS } from './config.js';
 import { NODES, START_TEXTS, ARRIVALS, OFF_ROUTE_HINTS } from './graph-data.js';
 import { EDGE_MAP, findPath, markerName, pathToText, isTurnAction, departureActionSpeech } from './graph.js';
 import { destSel, uiState } from './dom.js';
-import { say, speaking, buzz, isSpeechActive } from './speech.js';
+import { say, speaking, buzz, isSpeechActive, activeSpeechSource } from './speech.js';
 import { updatePanel, renderNavigationUi } from './ui.js';
 import { W, H } from './frame-state.js';
 import { record, getTestName } from './logger.js';
@@ -1167,8 +1167,17 @@ import { record, getTestName } from './logger.js';
     // entirely by straightConfirmedTagId (a per-tag fact, not a text comparison) and
     // by the wasPostTurnPendingForThisTag guard above, not by activeDirectionText.
     // interrupt:false so this best-effort early reassurance can never talk over a
-    // turn/stop/arrival/lost announcement already playing at this exact instant.
-    var result = say(text, ttsOpts({interrupt:false,
+    // turn/stop/arrival/lost announcement already playing at this exact instant --
+    // EXCEPT when the active speech is nav.scanHint's own "search for the marker"
+    // hint, which is obsolete BY DEFINITION the moment the expected tag is confirmed
+    // (field evidence: the old hint kept the user waiting through a delayed/suppressed
+    // "Gehen Sie weiter geradeaus."). activeSpeechSource() (speech.js) already returns
+    // null once that hint's own utterance has ended/been cancelled, so this only ever
+    // preempts a hint that is genuinely still active. Narrowly scoped to that one
+    // source -- any other active speech (turn/stop/arrival/lost/etc.) still blocks
+    // this call exactly as before.
+    var preemptObsoleteScanHint = activeSpeechSource() === "nav.scanHint";
+    var result = say(text, ttsOpts({interrupt: preemptObsoleteScanHint,
       source:"nav.expectedTagStraightConfirmation", category:"NAVIGATION_CONTEXT", expectedTag: tagId}));
 
     if(result.accepted){
