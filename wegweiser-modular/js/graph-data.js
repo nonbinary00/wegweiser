@@ -287,19 +287,33 @@
     // bestehende Kante 7->8 (Ecke) direkt oberhalb ist davon vollstaendig
     // unberuehrt.
     //
-    // allowedPredecessors: [4] -- dieselbe generische Richtungs-Sperre wie bei
-    // 3->15 (siehe dort): diese Kante ist NUR begehbar, wenn Tag 7 gerade ueber
-    // Tag 4 erreicht wurde (Weg zu Tischtennis), NICHT ueber Tag 8 (Rueckweg
-    // 11->10->8->7->4->6->3 s.u.) -- das hier verifizierte "Biegen Sie rechts
-    // ab." gilt ausschliesslich fuer die Ankunft ueber Tag 4, nicht fuer eine
-    // Ankunft aus der Gegenrichtung. Ein frischer Navigationsstart direkt bei
-    // Tag 7 hat keinen widersprechenden Vorgaenger und bleibt daher erlaubt
-    // (findPath(7,5) liefert [7,5]).
+    // allowedPredecessors: [4, 8] -- dieselbe generische Richtungs-Sperre wie bei
+    // 3->15 (siehe dort), aber mit ZWEI erlaubten Vorgaengern statt einem: diese
+    // Kante ist begehbar, wenn Tag 7 ueber Tag 4 ODER ueber Tag 8 erreicht wurde.
+    // Ein frischer Navigationsstart direkt bei Tag 7 hat keinen widersprechenden
+    // Vorgaenger und bleibt ebenfalls erlaubt (findPath(7,5) liefert [7,5]).
+    //
+    // WICHTIG: departureAction/found/reached/searchHint unten beschreiben
+    // AUSSCHLIESSLICH die verifizierte Ankunft ueber Tag 4 ("Biegen Sie rechts
+    // ab.", sofortiger Abbiege-Text bei Tag 7) -- unveraendert seit der
+    // urspruenglichen Feldtest-Korrektur. Fuer die Ankunft ueber Tag 8
+    // (Rueckweg 11->10->8->7, physisch verifiziert: erst ein paar Schritte
+    // geradeaus, DANN links abbiegen) sind diese Textfelder NICHT die Quelle --
+    // reachPoint() (nav.js) erkennt genau diesen Uebergang (reachedTagId===7 &&
+    // Vorgaenger===8 && naechster Tag===5) und unterdrueckt die generische
+    // Abbiege-Ansage vollstaendig; die gesamte Sprachausgabe fuer diese
+    // Anflugrichtung uebernimmt der eigenstaendige Tag7Via8Flow (siehe nav.js),
+    // der reale Schritte zaehlt, bevor "Stopp. Biegen Sie links ab...."
+    // gesprochen wird. Kein zweiter Kanteneintrag, keine Text-Variante hier --
+    // die vorhandenen Feldwerte bleiben ausschliesslich fuer die Tag-4-Anflugrichtung
+    // gueltig.
     //
     // reachedM: 1,0 -- eigene, kleinere Ankunftsschwelle (Standard 1,8 m) statt
     // einer Aenderung an SETTINGS.reachedM: die Strecke von Tag 7 zu Tag 5 ist
     // kurz, und unmittelbar links neben Tag 5 befindet sich eine Tuer -- eine
-    // zu grosszuegige Schwelle koennte die Ankunft zu frueh ausloesen.
+    // zu grosszuegige Schwelle koennte die Ankunft zu frueh ausloesen. Gilt fuer
+    // beide Anflugrichtungen (die Ankunft am Tag-5-Marker selbst ist unveraendert
+    // visuell/distanzbasiert, siehe Tag7Via8Flow-Kommentar in nav.js).
     { from:7, to:5,
       found:
         "Orientierungspunkt gefunden: Tischtennis. Die Strecke ist kurz.",
@@ -310,7 +324,7 @@
         "bewegen Sie es langsam nach links und rechts, bis die nächste Markierung " +
         "erkannt wird.",
       departureAction: "turn-right",
-      allowedPredecessors: [4],
+      allowedPredecessors: [4, 8],
       reachedM: 1.0,
       locationDescription:
         "Sie befinden sich zwischen dem Büro von Leonie und Tischtennis." },
@@ -591,11 +605,55 @@
     9:  "Erkannt: Essbereich."
   };
 
+  // ==================== Alternative Ankunfts-Markierung pro logischem Ziel ====================
+  // Patrik (Tag 2) hat vom Eingang aus nur EINE eingehende Kante (1->2); von der
+  // Rueckwaerts-Korridorseite (...->6->3->15) gibt es KEINE begehbare Kante zu Tag 2 --
+  // Tag 2 ist von dort aus nicht sichtbar/erreichbar (Feldbefund). Statt einer
+  // physisch falschen Kante 15->2 beschreibt diese Tabelle, dass das logische Ziel 2
+  // (destinationId) ERSATZWEISE auch am physischen Tag 15 als erreicht gelten darf,
+  // wenn der direkte Weg zu Tag 2 nicht existiert. findPathToDestination()/
+  // isArrivalTag() (graph.js) sind die einzigen Konsumenten. Tag 15 bleibt dadurch
+  // NICHT global gleichwertig zu Tag 2: die Tabelle wird ausschliesslich fuer
+  // destinationId===2 konsultiert, niemals fuer einen Start-Tag oder ein anderes Ziel.
+  var ARRIVAL_ALIASES = {
+    2: 15
+  };
+  // ARRIVALS[15] (feldverifizierter Ankunftstext fuer diese Rueckwaerts-Anflugrichtung)
+  // fehlt noch bewusst -- arriveAtDestination() (nav.js) faellt bis dahin automatisch
+  // auf ARRIVALS[destinationId] (also ARRIVALS[2]) zurueck. Nicht raten: "Die Tür ist
+  // links" (ARRIVALS[2]) ist fuer die Tag-15-Anflugrichtung nicht bestaetigt.
+
+  // ==================== Start-nur-Routen-Override (kein echter Graph-Pfad) ====================
+  // Fuer bestimmte (Start-Tag, Ziel)-Paare existiert PHYSISCH keine begehbare Kante --
+  // die einzige Handlung ist "umdrehen und die Zielmarkierung direkt suchen", nicht
+  // "von A nach B gehen". Das als EDGES-Eintrag zu modellieren wuerde eine nicht
+  // existierende Korridorstrecke behaupten (siehe 1->2->16 -- das darf NIEMALS gueltig
+  // werden). Tag 2 (Patrik) liegt nur ~2 m von Tag 16 (Ausgang) entfernt, aber mit
+  // unbekannter Ausgangsorientierung -- exakt das gleiche Problem wie beim
+  // Rueckwaerts-Start bei Tag 11 (siehe START_TEXTS[11]), nur ohne echte Kante.
+  // onStartTagConfirmed() (nav.js) konsultiert diese Tabelle GENERISCH (kein
+  // Tag-2/16-spezifischer Code in nav.js) NUR beim Bestaetigen des START-Tags, NIEMALS
+  // ueber findPath()/EDGE_MAP -- das synthetische path-Array wird direkt uebernommen.
+  // postTurnConfirmationText wird erst gesprochen, sobald das Ziel ueber die normale
+  // Erkennung (onNextTagFound()/tryPostTurnConfirmation()) tatsaechlich bestaetigt wird
+  // -- keine synthetische Ankunft.
+  var START_ROUTE_OVERRIDES = {
+    2: {
+      16: {
+        path: [2, 16],
+        startText: "Drehen Sie sich um und halten Sie das Smartphone gerade vor sich.",
+        postTurnConfirmationText: "Die Richtung stimmt. Halten Sie das Smartphone gerade vor sich."
+      }
+    }
+  };
+
 export {
   FLOOR_GEOMETRY,
   NODES,
   START_TEXTS,
   EDGES,
   ARRIVALS,
-  OFF_ROUTE_HINTS
+  OFF_ROUTE_HINTS,
+  ARRIVAL_ALIASES,
+  START_ROUTE_OVERRIDES
 };

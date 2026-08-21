@@ -14,7 +14,8 @@ import {
   startNavigation, endNavigation, destinationReached, currentTagId,
   navigationActive, expectedNextTagId,
   destinationId, routeRunId, navState, whereAmIResponse,
-  notifyTag9FlowAdaptiveStep, setAdaptiveDetectorActive, setTag9DetectorHooks
+  notifyTag9FlowAdaptiveStep, setAdaptiveDetectorActive, setTag9DetectorHooks,
+  notifyTag7Via8FlowStep
 } from './nav.js';
 import { startCamera, showError, running } from './camera.js';
 import { say, toggleSound, soundOn, cancelSpeech, unlockSpeech } from './speech.js';
@@ -211,6 +212,10 @@ import { createAdaptiveStepDetector } from './adaptive-step-detector.js';
       // der Zeitpunkt dieses Callback-Aufrufs -- nav.js filtert selbst gegen
       // seinen eigenen Phasen-Beginn. Ohne Wirkung auf jeder anderen Kante.
       notifyTag9FlowAdaptiveStep(s.t);
+      // Tag 8 -> Tag 7 -> Tag 5 Rueckwaerts-Anflug (siehe nav.js): derselbe
+      // Rohschritt-Strom, unabhaengig gefiltert von nav.js gegen seine eigene
+      // Phase -- ohne Wirkung, solange dieser Fluss nicht aktiv ist.
+      notifyTag7Via8FlowStep(s.t);
     },
     onWalkingStart: function(w){
       record("ADAPTIVE_WALKING_STARTED", { consecutivePeaks: w.consecutivePeaks, timestamp: Date.now() });

@@ -8,8 +8,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { NODES, EDGES, ARRIVALS } from '../js/graph-data.js';
-import { EDGE_MAP, findPath, isTurnAction, departureActionSpeech } from '../js/graph.js';
+import { NODES, EDGES, ARRIVALS, ARRIVAL_ALIASES, START_ROUTE_OVERRIDES } from '../js/graph-data.js';
+import { EDGE_MAP, ADJ, findPath, isTurnAction, departureActionSpeech,
+         isArrivalTag, findPathToDestination } from '../js/graph.js';
 import { SETTINGS } from '../js/config.js';
 
 const ALLOWED_DEPARTURE_ACTIONS = ['turn-left', 'turn-right', 'continue-straight'];
@@ -291,7 +292,7 @@ test('reverse-experiment route 11->3: every segment has valid edge metadata', ()
 });
 
 // ==================== Tischtennis-Korrektur: the former Tag-4 reconnection ====================
-// ==================== side effect is now closed by allowedPredecessors ====================
+// ==================== side effect, and the later approved Tag-8 reverse approach ====================
 // This section previously documented an OPEN, unfixed side effect: the six
 // reverse edges above reconnect Tag 4 from the reverse direction, and since
 // findPath()/ADJ had no concept of "arrival direction", the old direct edge
@@ -300,17 +301,20 @@ test('reverse-experiment route 11->3: every segment has valid edge metadata', ()
 //
 // The field test that produced the 7->5 correction above resolved this at
 // the root: edge 4->5 no longer exists at all (it was physically invalid --
-// see the 7->5 comment), and its replacement, 7->5, carries
-// allowedPredecessors: [4] -- the exact same generic mechanism as 3->15 --
-// so it is walkable only when Tag 7 is reached via Tag 4 (the verified
-// Tischtennis approach), never via Tag 8 (the reverse-experiment direction).
-// The former "mathematically reachable but unapproved" paths are therefore
-// no longer reachable at all, rather than merely staying undocumented.
+// see the 7->5 comment), and its replacement, 7->5, originally carried
+// allowedPredecessors: [4] only. A later, separately field-verified and
+// approved requirement (free-corridor-routing) explicitly added Tag 8 as a
+// second allowed predecessor -- the office-extension reverse chain
+// (11->10->8->7) now DOES reach Tag 5, but with different, physically
+// verified guidance ("walk a few steps straight, THEN turn left") owned
+// entirely by nav.js's Tag7Via8Flow, not by this edge's own
+// departureAction/searchHint text (unchanged, Tag-4-approach only -- see
+// nav.js tests for the staged-flow speech sequence).
 
-test('findPath(11, 5), findPath(10, 5), findPath(8, 5): no longer reachable -- the old unverified 4->5 path is gone and 7->5 is gated to arrival via Tag 4 only', () => {
-  assert.equal(findPath(11, 5), null);
-  assert.equal(findPath(10, 5), null);
-  assert.equal(findPath(8, 5), null);
+test('findPath(11, 5), findPath(10, 5), findPath(8, 5): reachable via the approved Tag-8 reverse approach (staged flow, see nav.js tests for its speech)', () => {
+  assert.deepEqual(findPath(11, 5), [11, 10, 8, 7, 5]);
+  assert.deepEqual(findPath(10, 5), [10, 8, 7, 5]);
+  assert.deepEqual(findPath(8, 5), [8, 7, 5]);
 });
 
 test('findPath(7, 5): a fresh start at Tag 7 has no contradicting predecessor, so the verified 7->5 turn remains available', () => {
@@ -475,12 +479,12 @@ test('a route starting at Tag 14 travels back through Tags 13/12/11 and then the
   assert.deepEqual(findPath(14, 16), [14, 13, 12, 11, 10, 8, 7, 4, 6, 3, 15, 16]);
 });
 
-// Tischtennis-Korrektur (neu): this previously-reachable side-effect path no
-// longer exists -- edge 4->5 was removed (physically invalid) and its
-// replacement 7->5 is gated to arrival via Tag 4 only (allowedPredecessors),
-// which never happens on this reverse chain (Tag 7 is reached via Tag 8 here).
-test('findPath(14, 5): no longer reachable -- 4->5 is gone and 7->5 is gated to arrival via Tag 4 only', () => {
-  assert.equal(findPath(14, 5), null);
+// Tischtennis-Korrektur / free-corridor-routing: this path was unreachable
+// after 4->5 was removed (7->5 was gated to arrival via Tag 4 only), and was
+// later, separately, explicitly approved and re-enabled for the Tag-8 reverse
+// approach (see the 7->5 edge comment and nav.js's Tag7Via8Flow).
+test('findPath(14, 5): reachable via the approved Tag-8 reverse approach (office-extension chain)', () => {
+  assert.deepEqual(findPath(14, 5), [14, 13, 12, 11, 10, 8, 7, 5]);
 });
 
 test('office-extension route (11->12->13->14): every segment has valid edge metadata', () => {
@@ -648,3 +652,66 @@ for (const { from, to, expected: path } of FORWARD_ROUTES) {
     }
   });
 }
+
+// ==================== free-corridor-routing: Tag 2 / Tag 15 start area ====================
+// No graph edge changes were made for this feature (no 2->16 edge, no 3->15
+// allowedPredecessors relaxation) -- these tests guard that invariant directly,
+// plus the two new small mechanisms added in graph.js/graph-data.js:
+// ARRIVAL_ALIASES/isArrivalTag/findPathToDestination (Patrik's alternate physical
+// arrival marker) and START_ROUTE_OVERRIDES (a start-only, non-graph route,
+// consumed exclusively by nav.js's onStartTagConfirmed(), never by findPath()).
+
+test('Tag 2 already reaches every main-office destination directly, with no graph change needed', () => {
+  assert.deepEqual(findPath(2, 7), [2, 3, 6, 4, 7]);
+  assert.deepEqual(findPath(2, 14), [2, 3, 6, 4, 7, 8, 10, 11, 12, 13, 14]);
+});
+
+test('no graph edge 2->16 exists, and 1->16/2->16 remain unreachable via findPath()', () => {
+  assert.equal(EDGE_MAP['2->16'], undefined, 'must not have added a 2->16 edge');
+  assert.ok(!(ADJ[2] || []).includes(16), 'ADJ[2] must not include 16');
+  assert.equal(findPath(1, 16), null, 'must remain unreachable -- no 3->15 allowedPredecessors relaxation');
+  assert.equal(findPath(2, 16), null, 'must remain unreachable via the graph -- Tag2->16 is a start-only override, not an edge');
+});
+
+test('EDGE_MAP[3->15] is still gated to arrival via Tag 6 only (not relaxed to include Tag 2)', () => {
+  const edge = EDGE_MAP['3->15'];
+  assert.deepEqual(edge.allowedPredecessors, [6]);
+});
+
+test('isArrivalTag: plain identity match and the Patrik alias (Tag 15 for destination 2)', () => {
+  assert.equal(isArrivalTag(2, 2), true);
+  assert.equal(isArrivalTag(15, 2), true);
+  assert.equal(isArrivalTag(15, 7), false, 'the alias must never match a non-Patrik destination');
+  assert.equal(isArrivalTag(2, 16), false);
+});
+
+test('findPathToDestination: direct hit for Patrik from the entrance side', () => {
+  const result = findPathToDestination(1, 2);
+  assert.deepEqual(result, { path: [1, 2], arrivalTagId: 2 });
+});
+
+test('findPathToDestination: alias fallback to Tag 15 for every reverse-side start toward Patrik', () => {
+  for (const start of [14, 13, 12, 11, 10, 8, 7, 6, 4, 3]) {
+    const result = findPathToDestination(start, 2);
+    assert.ok(result, `expected an alias-fallback path for start ${start}`);
+    assert.equal(result.arrivalTagId, 15, `start ${start}: expected the path to terminate at the alias (15)`);
+    assert.equal(result.path[result.path.length - 1], 15);
+  }
+});
+
+test('findPathToDestination: returns null when neither the direct destination nor its alias is reachable', () => {
+  assert.equal(findPathToDestination(9, 2), null, 'Tag 9 (dead-end office) cannot reach 2 or its alias 15');
+});
+
+test('ARRIVAL_ALIASES has exactly one entry (Patrik only) -- no unintended overreach', () => {
+  assert.deepEqual(ARRIVAL_ALIASES, { 2: 15 });
+});
+
+test('START_ROUTE_OVERRIDES has exactly the approved Tag2->16 entry, with the approved wording', () => {
+  assert.deepEqual(Object.keys(START_ROUTE_OVERRIDES), ['2']);
+  assert.deepEqual(Object.keys(START_ROUTE_OVERRIDES[2]), ['16']);
+  const override = START_ROUTE_OVERRIDES[2][16];
+  assert.deepEqual(override.path, [2, 16]);
+  assert.equal(override.startText, 'Drehen Sie sich um und halten Sie das Smartphone gerade vor sich.');
+  assert.equal(override.postTurnConfirmationText, 'Die Richtung stimmt. Halten Sie das Smartphone gerade vor sich.');
+});

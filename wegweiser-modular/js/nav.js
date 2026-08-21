@@ -5,8 +5,9 @@
 // The circular dependency between nav.js and ui.js (updatePanel) is intentional.
 
 import { SETTINGS } from './config.js';
-import { NODES, START_TEXTS, ARRIVALS, OFF_ROUTE_HINTS } from './graph-data.js';
-import { EDGE_MAP, findPath, markerName, pathToText, isTurnAction, departureActionSpeech } from './graph.js';
+import { NODES, START_TEXTS, ARRIVALS, OFF_ROUTE_HINTS, START_ROUTE_OVERRIDES } from './graph-data.js';
+import { EDGE_MAP, findPath, markerName, pathToText, isTurnAction, departureActionSpeech,
+         isArrivalTag, findPathToDestination } from './graph.js';
 import { destSel, uiState } from './dom.js';
 import { say, speaking, buzz, isSpeechActive, activeSpeechSource } from './speech.js';
 import { updatePanel, renderNavigationUi } from './ui.js';
@@ -821,6 +822,122 @@ import { record, getTestName } from './logger.js';
       stepCount: tag9FlowStepCount, detectorActive: adaptiveDetectorActive });
   }
 
+  // ==================== Tag 8 -> Tag 7 -> Tag 5: kurzer Schritt-Fluss (Rueckwaerts-Anflug) ====================
+  // Eng auf GENAU diesen Uebergang begrenzt (fromTag===7 && expectedNextTagId===5 &&
+  // Vorgaenger von Tag 7 === 8). Anders als der Tag-4->9-Fluss oben hat Tag 5 eine
+  // eigene, unveraenderte, sichtbare Markierung als echtes Ankunftsziel -- es gibt
+  // hier KEINE "Zonen-Ankunft" und daher auch keine zweite Phase/kein deferred-
+  // reachedM-Praedikat wie isTag9VisualArrivalDeferred(). Nur EINE aktive Phase:
+  // "geradeaus gehen, bis genug Schritte gezaehlt sind", danach normales, voellig
+  // unveraendertes SEARCHING_NEXT_TAG/reachedM fuer Tag 5. Nutzt denselben,
+  // bereits ueber setTag9DetectorHooks() registrierten Hook (tag9DetectorHooks) --
+  // dessen Verhalten (Detektor bereitstellen/freigeben) ist unabhaengig davon,
+  // WELCHER Fluss ihn braucht; ein zweites, dupliziertes Hook-Objekt waere hier
+  // reine Wiederholung ohne Nutzen.
+  var Tag7Via8Flow = { INACTIVE: "INACTIVE", WALKING: "WALKING" };
+  var tag7Via8FlowPhase = Tag7Via8Flow.INACTIVE;
+  var tag7Via8FlowStepCount = 0;
+  var tag7Via8FlowPhaseEnteredAt = 0;
+  var tag7Via8FlowLastPromptAt = 0;
+  var TAG7_VIA8_FLOW_STEPS_NEEDED = 3;
+  // Sicherheitsnetz-Intervall: gilt sowohl fuer die erste Wartezeit nach Betreten der
+  // Phase als auch fuer jede spaetere Wiederholung (siehe checkTag7Via8FlowReminder()).
+  var TAG7_VIA8_FLOW_REMINDER_MS = 6000;
+
+  function resetTag7Via8Flow(reason){
+    if(tag7Via8FlowPhase === Tag7Via8Flow.INACTIVE) return;
+    navLog("TAG7_VIA8_STEP_FLOW_ENDED", { phase: tag7Via8FlowPhase, reason: reason,
+      stepCount: tag7Via8FlowStepCount, detectorActive: adaptiveDetectorActive });
+    tag7Via8FlowPhase = Tag7Via8Flow.INACTIVE;
+    tag7Via8FlowStepCount = 0;
+    tag7Via8FlowPhaseEnteredAt = 0;
+    tag7Via8FlowLastPromptAt = 0;
+    if(tag9DetectorHooks && tag9DetectorHooks.notifyFlowEnded) tag9DetectorHooks.notifyFlowEnded(reason);
+  }
+
+  // Von beginSegment() aufgerufen, sobald genau die Kante 7->5 mit Vorgaenger 8
+  // beginnt. Spricht "Gehen Sie geradeaus." UNBEDINGT, unabhaengig davon, ob der
+  // Detektor tatsaechlich anlaeuft -- die Anweisung selbst ist immer richtig und
+  // sicher; NUR ob spaeter automatisch auf die Abbiege-Anweisung weitergeschaltet
+  // wird, haengt vom Detektor ab (siehe checkTag7Via8FlowReminder()).
+  function startTag7Via8Flow(){
+    if(tag9DetectorHooks && tag9DetectorHooks.ensureActive) tag9DetectorHooks.ensureActive();
+    tag7Via8FlowPhase = Tag7Via8Flow.WALKING;
+    tag7Via8FlowStepCount = 0;
+    var now = performance.now();
+    tag7Via8FlowPhaseEnteredAt = now;
+    tag7Via8FlowLastPromptAt = now;
+    navLog("TAG7_VIA8_STEP_FLOW_STARTED", { detectorActive: adaptiveDetectorActive });
+    say("Gehen Sie geradeaus.",
+      ttsOpts({interrupt:true, source:"nav.tag7Via8FlowWalk", category:"ACTION_REQUIRED"}));
+  }
+
+  // Speaks the deferred turn instruction and ends the flow, whether triggered by a
+  // genuine step count or (never automatically for a MISSING step count -- see
+  // checkTag7Via8FlowReminder(), which explicitly does NOT call this) some future
+  // legitimate completion path.
+  function completeTag7Via8FlowWalk(reason){
+    tag7Via8FlowPhase = Tag7Via8Flow.INACTIVE;
+    if(tag9DetectorHooks && tag9DetectorHooks.notifyFlowEnded) tag9DetectorHooks.notifyFlowEnded(reason);
+    var t = "Stopp. Biegen Sie links ab. Gehen Sie danach geradeaus und halten Sie das Smartphone gerade vor sich.";
+    var result = say(t, ttsOpts({interrupt:true, source:"nav.tag7Via8FlowTurn", category:"ACTION_REQUIRED"}));
+    activeDirectionText = t;
+    navLog("TAG7_VIA8_STEP_FLOW_ENDED", { phase: "WALKING", reason: reason,
+      stepCount: tag7Via8FlowStepCount, detectorActive: adaptiveDetectorActive,
+      speechId: result.speechId });
+  }
+
+  // Von app.js fuer JEDEN emittierten adaptiven Schritt aufgerufen (onStep-Callback,
+  // wie notifyTag9FlowAdaptiveStep() daneben) -- s.t ist die ORIGINALE Kandidaten-Zeit,
+  // niemals der Zeitpunkt der Callback-Zustellung. Ohne Wirkung ausserhalb von
+  // WALKING (kein Zaehler wird beruehrt).
+  function notifyTag7Via8FlowStep(stepT){
+    if(expectedNextTagId !== 5) return;
+    if(tag7Via8FlowPhase !== Tag7Via8Flow.WALKING) return;
+    if(stepT < tag7Via8FlowPhaseEnteredAt) return;
+    tag7Via8FlowStepCount++;
+    navLog("TAG7_VIA8_STEP_PROGRESS", { stepCount: tag7Via8FlowStepCount,
+      candidateT: r1(stepT), detectorActive: adaptiveDetectorActive });
+    if(tag7Via8FlowStepCount >= TAG7_VIA8_FLOW_STEPS_NEEDED){
+      completeTag7Via8FlowWalk("step-count");
+    }
+  }
+
+  // Von handleTracking() bei TRACKING_CONFIRMED(Tag 5) aufgerufen -- deckt den Fall
+  // ab, dass der Nutzer sich frueher als erwartet dreht (oder der Detektor gar keine
+  // Schritte liefert) und Tag 5 dennoch bereits sichtbar/bestaetigt wird. Beendet die
+  // Phase STUMM (KEINE Abbiege-Ansage) -- nach der Bestaetigung ist "Stopp. Biegen
+  // Sie links ab." nicht mehr sinnvoll, der Nutzer hat die Markierung bereits
+  // gefunden; ab hier laeuft die voellig normale REACHED/Tracking-Logik fuer Tag 5.
+  function notifyTag7Via8Acquired(){
+    if(expectedNextTagId !== 5) return;
+    if(tag7Via8FlowPhase !== Tag7Via8Flow.WALKING) return;
+    navLog("TAG7_VIA8_STEP_PROGRESS", { trigger: "tag5-acquired-early",
+      stepCount: tag7Via8FlowStepCount, detectorActive: adaptiveDetectorActive });
+    tag7Via8FlowPhase = Tag7Via8Flow.INACTIVE;
+    if(tag9DetectorHooks && tag9DetectorHooks.notifyFlowEnded) tag9DetectorHooks.notifyFlowEnded("acquired-early");
+  }
+
+  // Pro Frame waehrend SEARCHING_NEXT_TAG aufgerufen (ueber scanHint(), analog zu
+  // checkTag9FlowPhase1Timeout()). Sicherheitsnetz, falls der Detektor aus ist ODER
+  // schlicht keine qualifizierenden Schritte ankommen: die Abbiege-Anweisung wird
+  // dabei NIEMALS automatisch gesprochen (anders als Tag 9s Phase-1-Timeout, der die
+  // Phase weiterschaltet) -- ein zu frueh gesprochenes "links abbiegen" koennte den
+  // Nutzer in eine Wand/falsche Richtung lenken, wenn er tatsaechlich noch nicht weit
+  // genug gegangen ist. Bleibt WALKING, wiederholt stattdessen periodisch eine reine
+  // Geradeaus-Erinnerung; der Zaehler wird NICHT zurueckgesetzt (spaeter doch noch
+  // eintreffende Schritte zaehlen weiterhin normal). Der einzige andere Ausweg ist
+  // notifyTag7Via8Acquired() (rein visuell, unabhaengig vom Detektor).
+  function checkTag7Via8FlowReminder(now){
+    if(tag7Via8FlowPhase !== Tag7Via8Flow.WALKING) return;
+    if(now - tag7Via8FlowLastPromptAt < TAG7_VIA8_FLOW_REMINDER_MS) return;
+    navLog("TAG7_VIA8_STEP_FLOW_REMINDER", { stepCount: tag7Via8FlowStepCount,
+      detectorActive: adaptiveDetectorActive });
+    say("Gehen Sie weiter geradeaus. Halten Sie das Smartphone gerade vor sich.",
+      ttsOpts({interrupt:true, source:"nav.tag7Via8FlowReminder", category:"ACTION_REQUIRED"}));
+    tag7Via8FlowLastPromptAt = now;
+  }
+
   function startNavigation(){
     var destId = destSel.value ? parseInt(destSel.value, 10) : null;
     if(destId == null || !NODES[destId] || !NODES[destId].destination){
@@ -834,6 +951,7 @@ import { record, getTestName } from './logger.js';
     currentTagId = null;
     expectedNextTagId = null;
     resetTag9Flow("route-start");
+    resetTag7Via8Flow("route-start");
     navigationActive = true;
     destinationReached = false;
     lastRouteInstruction = "";
@@ -879,6 +997,7 @@ import { record, getTestName } from './logger.js';
     currentTagId = null;
     expectedNextTagId = null;
     resetTag9Flow("route-end:" + effectiveReason);
+    resetTag7Via8Flow("route-end:" + effectiveReason);
     destinationId = null;
     destinationReached = false;
     resetSegmentState();
@@ -951,16 +1070,50 @@ import { record, getTestName } from './logger.js';
     } else if(tag9FlowPhase !== Tag9Flow.INACTIVE){
       resetTag9Flow("segment-changed");
     }
+    // ---- Tag 8 -> Tag 7 -> Tag 5 Rueckwaerts-Anflug: siehe Block oben ----
+    // Anders als der Tag-4->9-Fluss oben aktiviert sich dieser Fluss UNBEDINGT
+    // (nicht nur, wenn der Detektor schon laeuft): reachPoint() hat die generische
+    // Abbiege-Ansage fuer GENAU diesen Uebergang bereits unterdrueckt (siehe dort),
+    // also darf hier keine stumme Kante entstehen -- startTag7Via8Flow() spricht die
+    // sichere "Gehen Sie geradeaus."-Anweisung in jedem Fall selbst.
+    if(fromTag === 7 && expectedNextTagId === 5 && pathTagIds[segIndex - 1] === 8){
+      startTag7Via8Flow();
+    } else if(tag7Via8FlowPhase !== Tag7Via8Flow.INACTIVE){
+      resetTag7Via8Flow("segment-changed");
+    }
   }
 
   // Startknoten bestätigt: Route berechnen und ersten Abschnitt beginnen.
   function onStartTagConfirmed(tagId){
-    if(tagId === destinationId){
+    if(isArrivalTag(tagId, destinationId)){
+      currentTagId = tagId;
       arriveAtDestination();
       return;
     }
-    var p = findPath(tagId, destinationId);
-    if(!p){
+    // Start-nur-Routen-Override (siehe START_ROUTE_OVERRIDES, graph-data.js): fuer
+    // ein (Start-Tag, Ziel)-Paar ohne begehbare Kante (z.B. 2->16 -- Tag 2 liegt nur
+    // ~2 m von Tag 16 entfernt, aber mit unbekannter Ausgangsorientierung, keine
+    // reale Korridorstrecke). Generischer Lookup, KEIN Tag-2/16-spezifischer Code
+    // hier -- das synthetische path-Array wird direkt uebernommen, findPath() wird
+    // fuer dieses Paar nie aufgerufen. Analog zum bestehenden Tag-11-Sonderfall
+    // unten (setPostTurnPending()): die Bestaetigung wird erst gesprochen, sobald
+    // das Ziel tatsaechlich ueber die normale Erkennung gefunden wird.
+    var startOverride = START_ROUTE_OVERRIDES[tagId] && START_ROUTE_OVERRIDES[tagId][destinationId];
+    if(startOverride){
+      pathTagIds = startOverride.path;
+      segIndex = 0;
+      currentTagId = tagId;
+      var overrideResult = say(startOverride.startText, ttsOpts({interrupt:true,
+        source:"nav.startRouteOverride", category:"NAVIGATION_CONTEXT", expectedTag: pathTagIds[1]}));
+      navLog("ROUTE_PATH", { startTag: tagId, path: pathTagIds, pathText: pathToText(pathTagIds),
+        override: true, speechId: overrideResult.speechId });
+      beginSegment();
+      setPostTurnPending(tagId, expectedNextTagId,
+        startOverride.postTurnConfirmationText, "START_ROUTE_OVERRIDE_DIRECTION_CONFIRMED");
+      return;
+    }
+    var pathResult = findPathToDestination(tagId, destinationId);
+    if(!pathResult){
       var t = (OFF_ROUTE_HINTS[tagId] || ("Sie sind bei " + markerName(tagId) + ".")) +
               " Von hier ist noch kein Weg zum Ziel beschrieben. " +
               "Bitte gehen Sie zum Eingang und suchen Sie Tag 1.";
@@ -968,6 +1121,7 @@ import { record, getTestName } from './logger.js';
       setNavState(NavState.SEARCHING_START_TAG);
       return;
     }
+    var p = pathResult.path;
     pathTagIds = p;
     segIndex = 0;
     currentTagId = tagId;
@@ -1225,7 +1379,7 @@ import { record, getTestName } from './logger.js';
       awayWarned: awayWarned
     });
 
-    if(reachedTagId === destinationId){
+    if(isArrivalTag(reachedTagId, destinationId)){
       navLog("REACHED destination", { tag: reachedTagId, reason: reason || "distance-threshold" });
       arriveAtDestination();
       return;
@@ -1257,7 +1411,23 @@ import { record, getTestName } from './logger.js';
     var t = isTurn ? ("Stopp. " + baseText) : baseText;
     lastRouteInstruction = t;
 
-    if(isTurn){
+    // Rueckwaerts-Anflug 8->7->5 (siehe Tag7Via8Flow unten): die physisch korrekte
+    // Anweisung ist NICHT der generische, hier sofort gesprochene Abbiege-Text
+    // (departureAction von 7->5 bleibt "turn-right", weiterhin korrekt fuer die
+    // unveraenderte 4->7->5-Anflugrichtung) -- stattdessen muss der Nutzer zunaechst
+    // ein paar Schritte geradeaus gehen, bevor "links abbiegen" ueberhaupt stimmt.
+    // Die gesamte Sprachausgabe fuer DIESEN einen Uebergang wird vollstaendig vom
+    // Tag7Via8Flow uebernommen (startTag7Via8Flow(), gleich in beginSegment()
+    // ausgeloest) -- hier daher NICHT sprechen, nur das unveraenderte Bookkeeping
+    // (resetCorridorState) ausfuehren. isTurn bleibt true (departureAction bleibt
+    // "turn-right"), damit setPostTurnPending() unten weiterhin korrekt ausgeloest wird.
+    var deferToTag7Via8Flow = (reachedTagId === 7 && pathTagIds[segIndex] === 8 &&
+      pathTagIds[segIndex + 2] === 5);
+    if(isTurn && deferToTag7Via8Flow){
+      navLog("TTS_DIRECTION_DEFERRED_TO_STAGED_FLOW", { reachedTag: reachedTagId,
+        viaPredecessor: pathTagIds[segIndex], nextTag: pathTagIds[segIndex + 2] });
+      resetCorridorState("turn");
+    } else if(isTurn){
       // Echtes Abbiegen: MUSS IMMER hoerbar sein (nie durch Dedup unterdrueckt) — direkt
       // say() statt speakDirectionIfNew(), aber activeDirectionText wird trotzdem auf den
       // Abbiege-Text gesetzt, damit die naechste Geradeaus-Bestaetigung danach korrekt
@@ -1360,7 +1530,14 @@ import { record, getTestName } from './logger.js';
     resetActiveDirectionState();
     clearPostTurnPending("destination-arrival");
     resetCorridorState("destination-arrival");
-    var t = ARRIVALS[destinationId] || ("Ziel erreicht. Sie sind bei " + markerName(destinationId) + ".");
+    // ARRIVALS[currentTagId] takes priority over ARRIVALS[destinationId]: for the
+    // ordinary case (arrived exactly at the destination) these are the same lookup;
+    // for an ARRIVAL_ALIASES case (e.g. Tag 15 as the reverse-approach arrival for
+    // destinationId 2/Patrik), currentTagId is the actual physical tag reached and
+    // may have its own, approach-specific text -- falling back to ARRIVALS[destinationId]
+    // (and then the generic default) when no such entry exists yet.
+    var t = ARRIVALS[currentTagId] || ARRIVALS[destinationId] ||
+      ("Ziel erreicht. Sie sind bei " + markerName(destinationId) + ".");
     lastRouteInstruction = t;
     setNavState(NavState.DESTINATION_REACHED);
     var destResult = say(t, ttsOpts({interrupt:true, source:"nav.destinationArrival",
@@ -1409,6 +1586,7 @@ import { record, getTestName } from './logger.js';
         navLog("TRACKING_CONFIRMED", { expectedTag: expectedNextTagId,
           detections: trackDetCount, raw: r1(rawDist), ema: r1(emaDist) });
         if(expectedNextTagId === 9) notifyTag9Acquired();
+        if(expectedNextTagId === 5) notifyTag7Via8Acquired();
       }
     }
     var recentMin = rawRecent.length ? Math.min.apply(null, rawRecent) : null;
@@ -1922,6 +2100,17 @@ import { record, getTestName } from './logger.js';
   //  - bereits passierter Routen-Tag: "zurück"-Warnung nur bei hoher Sicherheit
   function onOtherTagConfirmed(tagId){
     if(tagId === currentTagId) return;   // gerade erreicht — kein Fehler
+    // Tag 16 (Ausgang) liegt nur ~2 m von Tag 1 (Eingang) entfernt und kann daher von
+    // der Kamera in der Naehe des Eingangs erfasst werden, unabhaengig von der
+    // gewaehlten Route -- anders als bei jedem anderen Tag ist seine blosse
+    // Sichtbarkeit hier KEIN echtes Zurueck-/Off-Route-Signal. Nur stumm, wenn Tag 16
+    // NICHT Teil des aktiven Pfads ist; eine Route, die Tag 16 tatsaechlich enthaelt
+    // (Rueckweg-Erweiterung, 15->16, oder der Start-Override 2->16), erreicht diese
+    // Funktion fuer Tag 16 ohnehin nie -- der wird ueber den normalen erwarteten-Tag-
+    // Pfad behandelt. Vor JEDER Zustandsaenderung (auch vor lastWrongTagAt/
+    // offRouteSaid) zurueckgegeben, damit ein spaeterer, echter Off-Route-Tag nicht
+    // durch diese Sichtung faelschlich unterdrueckt wird.
+    if(tagId === 16 && (!pathTagIds || pathTagIds.indexOf(16) === -1)) return;
     if(offRouteSaid[tagId]) return;      // pro Abschnitt nur einmal
     var now = performance.now();
     if(now - lastWrongTagAt < SETTINGS.wrongTagCooldownMs) return;
@@ -2012,6 +2201,13 @@ import { record, getTestName } from './logger.js';
     // gewohnt weiterlaufen. Ohne Wirkung, wenn der Fluss inaktiv ist (Detektor
     // aus, siehe beginSegment()) -- dann bleibt scanHint() unveraendert.
     if(tag9FlowPhase === Tag9Flow.WALK_AFTER_TAG4) return;
+    // ---- Tag 8 -> Tag 7 -> Tag 5 Rueckwaerts-Anflug: siehe Block oben ----
+    // Waehrend WALKING uebernimmt checkTag7Via8FlowReminder() jede Sprachausgabe
+    // fuer diesen Uebergang vollstaendig -- der generische, zeitbasierte
+    // Suchhinweis unten wuerde sonst waehrend der Wartezeit auf die Schritte
+    // ueberlappen/widersprechen (analog zum obigen WALK_AFTER_TAG4-Fall).
+    checkTag7Via8FlowReminder(now);
+    if(tag7Via8FlowPhase === Tag7Via8Flow.WALKING) return;
     var idleSince = Math.max(expectedLastSeenAt, searchStartedAt, lastScanHintAt);
     var delay = (scanHintCount === 0) ? currentScanDelayMs : SETTINGS.scanHintRepeatMs;
     if(now - idleSince < delay) return;
@@ -2147,5 +2343,8 @@ export {
   tag9FlowPhase,
   notifyTag9FlowAdaptiveStep,
   setAdaptiveDetectorActive,
-  setTag9DetectorHooks
+  setTag9DetectorHooks,
+  Tag7Via8Flow,
+  tag7Via8FlowPhase,
+  notifyTag7Via8FlowStep
 };

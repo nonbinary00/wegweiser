@@ -1,6 +1,6 @@
 // ==================== Abgeleitete Graph-Strukturen ====================
 
-import { FLOOR_GEOMETRY, NODES, EDGES } from './graph-data.js';
+import { FLOOR_GEOMETRY, NODES, EDGES, ARRIVAL_ALIASES } from './graph-data.js';
 
   // ---- Abgeleitete Strukturen ----
   var MARKERS = {};
@@ -120,6 +120,34 @@ import { FLOOR_GEOMETRY, NODES, EDGES } from './graph-data.js';
     return path.map(function(id){ return "Tag " + id; }).join(" → ");
   }
 
+  // ==================== Alternative Ankunfts-Markierung (siehe ARRIVAL_ALIASES) ====================
+  // Generischer Ersatz fuer den blossen Identitaets-Vergleich "ist dieser Tag das
+  // Ziel?" -- erkennt zusaetzlich den in ARRIVAL_ALIASES (graph-data.js) hinterlegten
+  // alternativen physischen Ankunfts-Tag fuer ein logisches Ziel (z.B. Tag 15 fuer
+  // destinationId 2/Patrik). Ohne Eintrag verhaelt sich dies exakt wie der bisherige
+  // "tagId === destId"-Vergleich.
+  function isArrivalTag(tagId, destId){
+    return tagId === destId || ARRIVAL_ALIASES[destId] === tagId;
+  }
+
+  // Versucht zuerst den direkten Weg zum echten Ziel; nur wenn dieser nicht
+  // existiert, wird der in ARRIVAL_ALIASES hinterlegte alternative Ankunfts-Tag (falls
+  // vorhanden) als Fallback-Ziel versucht. Gibt { path, arrivalTagId } zurueck
+  // (arrivalTagId ist destId, ausser der Fallback wurde tatsaechlich verwendet) oder
+  // null, wenn keiner der beiden Wege existiert. Aendert findPath() selbst nicht --
+  // reiner Aufrufer-seitiger Fallback, ausschliesslich fuer destIds mit einem Eintrag
+  // in ARRIVAL_ALIASES ueberhaupt wirksam.
+  function findPathToDestination(startId, destId){
+    var direct = findPath(startId, destId);
+    if(direct) return { path: direct, arrivalTagId: destId };
+    var alias = ARRIVAL_ALIASES[destId];
+    if(alias != null){
+      var aliasPath = findPath(startId, alias);
+      if(aliasPath) return { path: aliasPath, arrivalTagId: alias };
+    }
+    return null;
+  }
+
   // ==================== VALIDIERUNG ====================
   (function validateGraph(){
     EDGES.forEach(function(e){
@@ -148,5 +176,7 @@ export {
   findPath,
   pathToText,
   isTurnAction,
-  departureActionSpeech
+  departureActionSpeech,
+  isArrivalTag,
+  findPathToDestination
 };
