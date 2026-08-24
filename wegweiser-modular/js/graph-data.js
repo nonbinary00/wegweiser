@@ -641,7 +641,12 @@
     2: {
       16: {
         path: [2, 16],
-        startText: "Drehen Sie sich um und halten Sie das Smartphone gerade vor sich.",
+        // Feldtest-Korrektur (neu): der bisherige Text nannte nur die Ausrichtung
+        // (Umdrehen), nicht die eigentliche Handlung danach (Losgehen) -- ergaenzt um
+        // "und gehen Sie geradeaus.", bewusst OHNE "Suchen Sie den Ausgang." oder
+        // Scan-Wortlaut (links/rechts), da die Zielsuche bereits ueber den normalen
+        // searchHint-Mechanismus der Kante 15->16 laeuft.
+        startText: "Drehen Sie sich um und gehen Sie geradeaus. Halten Sie das Smartphone gerade vor sich.",
         postTurnConfirmationText: "Die Richtung stimmt. Halten Sie das Smartphone gerade vor sich."
       }
     }

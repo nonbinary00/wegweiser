@@ -4,8 +4,11 @@
 //      existing setPostTurnPending()/tryPostTurnConfirmation() mechanism.
 //   3. Patrik (destination 2) has an alternate physical arrival marker (Tag 15)
 //      for the reverse-corridor approach, via ARRIVAL_ALIASES/isArrivalTag().
-//   4. Tag 16 is silently ignored by onOtherTagConfirmed() when it is not part
-//      of the active path (it sits ~2m from Tag 1 and is otherwise a false alarm).
+//   4. Tag 16 is silently ignored by onOtherTagConfirmed() ONLY when the active
+//      route's actual start tag is Tag 1 and Tag 16 is not part of that route (it
+//      sits ~2m from Tag 1 and is otherwise a false alarm there). For any other
+//      start tag, an off-path Tag 16 sighting is a normal off-route/wrong tag --
+//      NOT globally suppressed.
 //   5. The Tag 8->7->5 staged step flow (3 real adaptive steps, then the exact
 //      approved turn instruction; the unchanged 4->7->5 approach; the safe
 //      "never auto-advance" fallback).
@@ -97,7 +100,9 @@ test('Tag 2 start with destination 16 uses the start-only override: approved wor
   assert.deepEqual(nav.pathTagIds, [2, 16]);
   assert.equal(nav.expectedNextTagId, 16);
   assert.ok(
-    spokenTexts.includes('Drehen Sie sich um und halten Sie das Smartphone gerade vor sich.'),
+    spokenTexts.includes(
+      'Drehen Sie sich um und gehen Sie geradeaus. Halten Sie das Smartphone gerade vor sich.'
+    ),
     `expected the approved start instruction, got: ${JSON.stringify(spokenTexts)}`
   );
   assert.ok(!spokenTexts.some((t) => t.includes('Ausgang suchen')), 'must not encourage scanning/searching wording');
@@ -118,14 +123,24 @@ test('Tag 2 start with destination 16 uses the start-only override: approved wor
   assert.ok(spokenTexts.some((t) => t.includes('Ausgang')));
 });
 
-// ==================== Tag 16 silent-ignore (off-path) ====================
+// ==================== Tag 16 silent-ignore (Tag-1-started routes only) ====================
 
-test('Tag 16 detected off-path (unrelated destination) is completely silent and does not alter route state', () => {
-  withFakeClock(700000, () => {
+test('Tag 16 detected off-path on a route actually started at Tag 1 is completely silent and does not alter route state', () => {
+  withFakeClock(700000, (advance) => {
     resetState();
     selectDestination(14);
     nav.startNavigation();
-    nav.onStartTagConfirmed(4); // any ordinary, non-special-cased start tag
+    nav.onStartTagConfirmed(1); // the only start tag Tag 16 is physically close enough to false-trigger from
+    // Fully pass through Tag 1's own physically-tracked start phase (see
+    // beginStartTagTracking()/reachStartTag() in nav.js) so trackingStartTagActive is
+    // reset back to false before this test ends -- otherwise it would leak into later
+    // tests in this file (module-level state, not reset by endNavigation()).
+    var dist = 0.1;
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 1 reached -> beginSegment() for 1->2
+    advance(50);
     var before = {
       path: nav.pathTagIds.slice(), segIndex: nav.segIndex,
       expected: nav.expectedNextTagId, navState: nav.navState,
@@ -156,12 +171,20 @@ test('a genuinely off-route tag other than 16 still speaks the existing warning,
   });
 });
 
-test('sighting Tag 16 off-path does not suppress a later, genuinely off-route warning for a different tag', () => {
-  withFakeClock(720000, () => {
+test('sighting Tag 16 off-path on a Tag-1-started route does not suppress a later, genuinely off-route warning for a different tag', () => {
+  withFakeClock(720000, (advance) => {
     resetState();
     selectDestination(14);
     nav.startNavigation();
-    nav.onStartTagConfirmed(4);
+    nav.onStartTagConfirmed(1);
+    // Fully pass through Tag 1's own physically-tracked start phase (see comment above)
+    // so trackingStartTagActive does not leak into later tests in this file.
+    var dist = 0.1;
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
     spokenTexts.length = 0;
 
     nav.onOtherTagConfirmed(16); // silent -- must not touch the shared cooldown timer
@@ -170,6 +193,23 @@ test('sighting Tag 16 off-path does not suppress a later, genuinely off-route wa
     assert.ok(
       spokenTexts.some((t) => t.includes('nicht auf dem Weg')),
       `Tag 16's silence must not have suppressed this via the shared cooldown, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+test('Tag 16 detected off-path on a route NOT started at Tag 1 is a normal off-route warning, not globally suppressed', () => {
+  withFakeClock(740000, () => {
+    resetState();
+    selectDestination(14);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(4); // any ordinary, non-special-cased, non-Tag-1 start tag
+    spokenTexts.length = 0;
+
+    nav.onOtherTagConfirmed(16);
+
+    assert.ok(
+      spokenTexts.some((t) => t.includes('nicht auf dem Weg')),
+      `expected the normal off-route warning (Tag 16's silent-ignore is scoped to Tag-1 starts only), got: ${JSON.stringify(spokenTexts)}`
     );
   });
 });

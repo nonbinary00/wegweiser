@@ -1136,3 +1136,123 @@ test('without any registered hooks, behavior is unchanged from before this stage
     assert.equal(nav.tag9FlowPhase, nav.Tag9Flow.WALK_AFTER_TAG4);
   });
 });
+
+// ==================== Field-test fixes: Tag 2->16 start, Tag 15->16 start, ====================
+// ==================== Tag 16 fully ignored on a Tag-1-started route         ====================
+
+test('starting at Tag 2 toward Tag 16 speaks the exact required turn-and-walk instruction', () => {
+  resetState();
+  selectDestination(16);
+  nav.startNavigation();
+  spokenTexts.length = 0;
+  nav.onStartTagConfirmed(2);
+  assert.ok(
+    spokenTexts.includes(
+      'Drehen Sie sich um und gehen Sie geradeaus. Halten Sie das Smartphone gerade vor sich.'
+    ),
+    `expected exact Tag 2->16 start text among spoken texts, got: ${JSON.stringify(spokenTexts)}`
+  );
+  assert.deepEqual(nav.pathTagIds, [2, 16], 'path must remain [2, 16]');
+  assert.ok(
+    !spokenTexts.some((t) => t.includes('Suchen Sie den Ausgang')),
+    'must not reintroduce exit-search/scanning wording'
+  );
+});
+
+test('Tag 16 is still accepted normally after the Tag 2 start override (deferred confirmation)', () => {
+  resetState();
+  selectDestination(16);
+  nav.startNavigation();
+  nav.onStartTagConfirmed(2);
+  spokenTexts.length = 0;
+  nav.onNextTagFound(3.0); // Tag 16 actually detected via the normal recognition path
+  assert.ok(
+    spokenTexts.includes('Die Richtung stimmt. Halten Sie das Smartphone gerade vor sich.'),
+    `expected the existing deferred direction confirmation once Tag 16 is found, got: ${JSON.stringify(spokenTexts)}`
+  );
+});
+
+test('starting at Tag 15 toward Tag 16 speaks the exact required left-turn instruction', () => {
+  resetState();
+  selectDestination(16);
+  nav.startNavigation();
+  spokenTexts.length = 0;
+  nav.onStartTagConfirmed(15);
+  assert.ok(
+    spokenTexts.includes(
+      'Biegen Sie links ab und gehen Sie geradeaus. Halten Sie das Smartphone gerade vor sich.'
+    ),
+    `expected exact Tag 15->16 start text among spoken texts, got: ${JSON.stringify(spokenTexts)}`
+  );
+  assert.deepEqual(nav.pathTagIds, [15, 16], 'path must remain [15, 16]');
+  assert.ok(
+    !spokenTexts.some((t) => t.includes('suchen Sie die nächste Markierung')),
+    'the generic start fallback/search instruction must not also be spoken'
+  );
+});
+
+test('Tag 16 is still accepted normally after starting at Tag 15', () => {
+  resetState();
+  selectDestination(16);
+  nav.startNavigation();
+  nav.onStartTagConfirmed(15);
+  spokenTexts.length = 0;
+  nav.onNextTagFound(3.0);
+  assert.equal(nav.navState, nav.NavState.TRACKING);
+  assert.equal(nav.expectedNextTagId, 16);
+});
+
+test('Tag 16 is fully ignored on a route actually started at Tag 1 and not containing Tag 16', () => {
+  withFakeClock(600000, (advance) => {
+    walkToTag4Expected(advance); // destination 11, path [1,2,3,6,4,7,8,10,11], currentTagId=6, expectedNextTagId=4
+    spokenTexts.length = 0;
+    var pathBefore = nav.pathTagIds.slice();
+    var currentBefore = nav.currentTagId, expectedBefore = nav.expectedNextTagId, segBefore = nav.segIndex;
+
+    for(var i = 0; i < 10; i++){
+      nav.onOtherTagConfirmed(16); // spurious sighting: Tag 16 sits ~2m from Tag 1
+      advance(100);
+    }
+
+    assert.deepEqual(spokenTexts, [], `Tag 16 must never produce any TTS here, got: ${JSON.stringify(spokenTexts)}`);
+    assert.deepEqual(nav.pathTagIds, pathBefore, 'active route must remain unchanged');
+    assert.equal(nav.currentTagId, currentBefore, 'no route-state change from Tag 16');
+    assert.equal(nav.expectedNextTagId, expectedBefore, 'no forward-candidate acceptance for Tag 16');
+    assert.equal(nav.segIndex, segBefore, 'no skip for Tag 16');
+
+    // A genuine off-route tag afterward must still be reported -- proves the Tag 16
+    // sightings above did not consume/mutate the wrongTagCooldownMs/offRouteSaid state.
+    nav.onOtherTagConfirmed(191);
+    assert.ok(
+      spokenTexts.some((t) => t.includes('nicht auf dem Weg')),
+      'a genuine off-route tag must still be reported normally after Tag 16 sightings'
+    );
+  });
+});
+
+test('Tag 16 never becomes a forward-skip candidate on a route started at Tag 1', () => {
+  withFakeClock(610000, (advance) => {
+    walkToTag4Expected(advance);
+    for(var f = 0; f < SETTINGS.otherTagFrames + 2; f++){
+      nav.updateSkipCandidate([{ id: 16, dist: 1.5 }], performance.now());
+      advance(100);
+    }
+    assert.equal(nav.expectedNextTagId, 4, 'Tag 16 must never be accepted as a forward candidate');
+    assert.equal(nav.currentTagId, 6, 'no synthetic arrival/retarget caused by Tag 16');
+  });
+});
+
+test('a Tag 16 sighting on a route NOT started at Tag 1 still uses the existing off-route warning (not globally suppressed)', () => {
+  withFakeClock(620000, () => {
+    resetState();
+    selectDestination(11);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(6); // real start tag is 6, not 1
+    spokenTexts.length = 0;
+    nav.onOtherTagConfirmed(16);
+    assert.ok(
+      spokenTexts.some((t) => t.includes('nicht auf dem Weg')),
+      `expected the normal off-route warning for Tag 16 on a non-Tag-1 start, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});

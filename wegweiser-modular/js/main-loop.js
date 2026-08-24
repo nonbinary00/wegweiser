@@ -56,6 +56,23 @@ import { running } from './camera.js';
       }
 
       var now = performance.now();
+      // Feldtest-Korrektur (neu): Tag 16 (Ausgang) liegt physisch nur ~2 m von Tag 1
+      // entfernt und kann daher rein durch Naehe erfasst werden, obwohl der Nutzer gar
+      // nicht dort ist -- aber nur, wenn die aktive Route TATSAECHLICH bei Tag 1
+      // gestartet wurde (pathTagIds[0], seit onStartTagConfirmed() einmalig gesetzt
+      // und danach nie mehr veraendert) und Tag 16 nicht selbst Teil dieser Route ist.
+      // Fuer diesen Fall wird Tag 16 hier, VOR jeder weiteren Verarbeitung, komplett
+      // aus den Erkennungen dieses Frames entfernt -- so, als waere er nie gesehen
+      // worden: keine TTS, kein Off-Route-Status, kein Vorgriffs-Kandidat, kein Skip,
+      // keine Mutation des wrongCand-Zaehlers unten. Routen, die Tag 16 tatsaechlich
+      // enthalten (2->16, 15->16, Rueckweg-Route), bleiben unberuehrt, da dort
+      // pathTagIds.indexOf(16) !== -1 ist; ebenso jede Route mit einem anderen
+      // Start-Tag als 1. Vor pathTagIds-Zuweisung (Start-Phase, "Option C") greift
+      // dieser Filter bewusst nicht -- die bestehende Start-Kandidaten-Auswahl bleibt
+      // unveraendert.
+      if(pathTagIds && pathTagIds[0] === 1 && pathTagIds.indexOf(16) === -1){
+        detected = detected.filter(function(mk){ return mk.id !== 16; });
+      }
       var expectedDet = null, bestKnown = null, bestKnownDist = Infinity;
       var startPhase = navigationActive && pathTagIds == null;
       // All tags decoded this frame, with their distance, for the independent

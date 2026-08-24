@@ -1168,6 +1168,30 @@ import { record, getTestName } from './logger.js';
       return;
     }
 
+    // Feldtest-Korrektur (neu, Start bei Tag 15 Richtung Tag 16): die Kante 15->16
+    // traegt bereits departureAction:"turn-left"/reached:"Biegen Sie links ab."
+    // (graph-data.js) -- dieser Text wird jedoch NUR gesprochen, wenn Tag 15 waehrend
+    // einer laufenden Route ERREICHT wird (reachPoint()). Beginnt die Navigation
+    // direkt BEI Tag 15, durchlaeuft dieser Fall reachPoint() nie (der generische
+    // Start-Fallback unten kennt kein Abbiegen) -- der Nutzer hoerte bisher nur die
+    // generische Suchansage, ohne zu erfahren, dass er zuerst links abbiegen muss.
+    // Analog zum bestehenden Tag-11-Sonderfall oben: generischer Lookup NUR fuer
+    // GENAU dieses (Start-Tag, naechster Tag)-Paar, kein Einfluss auf 15->16 als
+    // Zwischenkante einer laengeren Route (dort bleibt reachPoint()'s eigener Text
+    // unveraendert massgeblich).
+    if(tagId === 15 && p[1] === 16){
+      var startTextTag15 =
+        "Biegen Sie links ab und gehen Sie geradeaus. Halten Sie das Smartphone gerade vor sich.";
+      lastRouteInstruction = startTextTag15;
+      var startResultTag15 = say(startTextTag15, ttsOpts({interrupt:true,
+        source:"nav.startTag15Turn", category:"NAVIGATION_CONTEXT", expectedTag: p[1]}));
+      navLog("START_TAG_15_TURN_INSTRUCTION", { startTag: tagId, expectedTag: p[1],
+        text: startTextTag15, speechId: startResultTag15.speechId });
+      navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
+      beginSegment();
+      return;
+    }
+
     var start = START_TEXTS[tagId] ||
       ("Sie sind bei " + markerName(tagId) + ". Halten Sie das Smartphone vor sich " +
        "und suchen Sie die nächste Markierung.");
@@ -2101,16 +2125,20 @@ import { record, getTestName } from './logger.js';
   function onOtherTagConfirmed(tagId){
     if(tagId === currentTagId) return;   // gerade erreicht — kein Fehler
     // Tag 16 (Ausgang) liegt nur ~2 m von Tag 1 (Eingang) entfernt und kann daher von
-    // der Kamera in der Naehe des Eingangs erfasst werden, unabhaengig von der
-    // gewaehlten Route -- anders als bei jedem anderen Tag ist seine blosse
-    // Sichtbarkeit hier KEIN echtes Zurueck-/Off-Route-Signal. Nur stumm, wenn Tag 16
-    // NICHT Teil des aktiven Pfads ist; eine Route, die Tag 16 tatsaechlich enthaelt
-    // (Rueckweg-Erweiterung, 15->16, oder der Start-Override 2->16), erreicht diese
-    // Funktion fuer Tag 16 ohnehin nie -- der wird ueber den normalen erwarteten-Tag-
-    // Pfad behandelt. Vor JEDER Zustandsaenderung (auch vor lastWrongTagAt/
-    // offRouteSaid) zurueckgegeben, damit ein spaeterer, echter Off-Route-Tag nicht
-    // durch diese Sichtung faelschlich unterdrueckt wird.
-    if(tagId === 16 && (!pathTagIds || pathTagIds.indexOf(16) === -1)) return;
+    // der Kamera in der Naehe des Eingangs erfasst werden -- aber NUR, wenn der
+    // Nutzer tatsaechlich dort steht, also nur fuer Routen, die tatsaechlich BEI
+    // Tag 1 gestartet sind (pathTagIds[0] === 1, seit onStartTagConfirmed() einmalig
+    // gesetzt und danach nie mehr veraendert). Fuer jeden anderen Start-Tag ist eine
+    // Tag-16-Sichtung physisch nicht durch diese Naehe erklaerbar und bleibt daher
+    // eine normale Off-Route-/Zurueck-Meldung (Feldtest-Korrektur: zuvor wurde Tag 16
+    // fuer JEDE Route ohne Tag 16 im Pfad stumm geschaltet, unabhaengig vom Start).
+    // Eine Route, die Tag 16 tatsaechlich enthaelt (Rueckweg-Erweiterung, 15->16, oder
+    // der Start-Override 2->16), erreicht diese Funktion fuer Tag 16 ohnehin nie -- der
+    // wird ueber den normalen erwarteten-Tag-Pfad behandelt. Vor JEDER
+    // Zustandsaenderung (auch vor lastWrongTagAt/offRouteSaid) zurueckgegeben, damit
+    // ein spaeterer, echter Off-Route-Tag nicht durch diese Sichtung faelschlich
+    // unterdrueckt wird.
+    if(tagId === 16 && pathTagIds && pathTagIds[0] === 1 && pathTagIds.indexOf(16) === -1) return;
     if(offRouteSaid[tagId]) return;      // pro Abschnitt nur einmal
     var now = performance.now();
     if(now - lastWrongTagAt < SETTINGS.wrongTagCooldownMs) return;

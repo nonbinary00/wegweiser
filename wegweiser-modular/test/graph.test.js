@@ -712,6 +712,7 @@ test('START_ROUTE_OVERRIDES has exactly the approved Tag2->16 entry, with the ap
   assert.deepEqual(Object.keys(START_ROUTE_OVERRIDES[2]), ['16']);
   const override = START_ROUTE_OVERRIDES[2][16];
   assert.deepEqual(override.path, [2, 16]);
-  assert.equal(override.startText, 'Drehen Sie sich um und halten Sie das Smartphone gerade vor sich.');
+  assert.equal(override.startText,
+    'Drehen Sie sich um und gehen Sie geradeaus. Halten Sie das Smartphone gerade vor sich.');
   assert.equal(override.postTurnConfirmationText, 'Die Richtung stimmt. Halten Sie das Smartphone gerade vor sich.');
 });
