@@ -183,6 +183,16 @@ import { running } from './camera.js';
           // committed this frame -- fall through to updatePanel()/scheduleNext() below
         } else if(navState === NavState.TRACKING || navState === NavState.TRACKING_START_TAG){
           if(expectedDet) touchExpectedSeen(now);
+          // Camera-based guidance toward the selected-but-not-yet-reached start tag
+          // (Tag 1's own dedicated flow, or the generic beginStartApproach() one,
+          // see nav.js) -- deliberately NOT called during plain TRACKING: normal
+          // route navigation relies on distance-based feedback only, unchanged.
+          // Checked BEFORE handleTracking() so a same-frame arrival (which flips
+          // navState away from TRACKING_START_TAG and speaks its own, higher-
+          // priority announcement) cannot cause a stale aim announcement to fire.
+          if(navState === NavState.TRACKING_START_TAG && expectedDet){
+            aimGuidance(expectedDet.corners, true);
+          }
           // supplies this frame's fresh raw distance (arrival logic)
           handleTracking(now, expectedVisual, expectedDet ? expectedDet.dist : null);
           // The forward-candidate check keeps running even while the expected tag is

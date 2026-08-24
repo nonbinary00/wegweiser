@@ -292,9 +292,14 @@ test('both Tag 2 and Tag 15 confirmed in the same window: Tag 2 winning (nearer)
   t += SETTINGS.startCandidateWindowMs + 50;
 
   assert.equal(nav.checkStartCandidateWindow(t), true);
-  assert.equal(nav.currentTagId, 2, 'the nearer candidate (Tag 2) must win');
+  // Both candidates (1.9m/5.1m) are farther than SETTINGS.startTagReachedM, so the
+  // winner is now approached rather than instantly committed (start-tag-approach
+  // fix) -- expectedNextTagId is the immediately-known winner/approach target;
+  // currentTagId only updates once Tag 2 is physically reached (see
+  // start-tag-approach.test.js for that transition).
+  assert.equal(nav.expectedNextTagId, 2, 'the nearer candidate (Tag 2) must win the comparison');
+  assert.equal(nav.navState, nav.NavState.TRACKING_START_TAG);
   assert.ok(!spokenTexts.some((s) => s.includes('kein Weg')));
-  assert.deepEqual(nav.pathTagIds, [2, 3, 6, 4, 7]);
 });
 
 test('both Tag 2 and Tag 15 confirmed in the same window: Tag 15 winning (nearer) still produces a valid route', () => {
@@ -310,8 +315,9 @@ test('both Tag 2 and Tag 15 confirmed in the same window: Tag 15 winning (nearer
   t += SETTINGS.startCandidateWindowMs + 50;
 
   assert.equal(nav.checkStartCandidateWindow(t), true);
-  assert.equal(nav.currentTagId, 15, 'the nearer candidate (Tag 15) must win');
-  assert.deepEqual(nav.pathTagIds, [15, 16]);
+  // Same rationale as above: both candidates are farther than startTagReachedM.
+  assert.equal(nav.expectedNextTagId, 15, 'the nearer candidate (Tag 15) must win the comparison');
+  assert.equal(nav.navState, nav.NavState.TRACKING_START_TAG);
 });
 
 // ==================== Tag 8 -> Tag 7 -> Tag 5 staged flow ====================

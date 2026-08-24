@@ -49,7 +49,11 @@ test('Option C: a nearer candidate confirmed within the window overturns an earl
 
   t += SETTINGS.startCandidateWindowMs + 50;
   assert.equal(nav.checkStartCandidateWindow(t), true);
-  assert.equal(nav.currentTagId, 8, 'the nearer, later-confirmed candidate must win');
+  // Both candidates (6.1m/1.4m) are farther than SETTINGS.startTagReachedM, so the
+  // winner is approached rather than instantly committed (start-tag-approach fix,
+  // see start-tag-approach.test.js) -- expectedNextTagId is the immediately-known
+  // winner; the comparison logic itself (which this test targets) is unchanged.
+  assert.equal(nav.expectedNextTagId, 8, 'the nearer, later-confirmed candidate must win');
 });
 
 test('Option C: the winner is order-independent -- the nearer candidate wins even if confirmed first', () => {
@@ -67,7 +71,7 @@ test('Option C: the winner is order-independent -- the nearer candidate wins eve
 
   t += SETTINGS.startCandidateWindowMs + 50;
   assert.equal(nav.checkStartCandidateWindow(t), true);
-  assert.equal(nav.currentTagId, 8, 'the nearer candidate must win regardless of confirmation order');
+  assert.equal(nav.expectedNextTagId, 8, 'the nearer candidate must win regardless of confirmation order');
 });
 
 test('Option C: a single confirmed candidate becomes the start once the (short) window elapses', () => {
@@ -83,7 +87,7 @@ test('Option C: a single confirmed candidate becomes the start once the (short) 
 
   t += SETTINGS.startCandidateWindowMs + 10;
   assert.equal(nav.checkStartCandidateWindow(t), true);
-  assert.equal(nav.currentTagId, 6);
+  assert.equal(nav.expectedNextTagId, 6);
   assert.ok(
     SETTINGS.startCandidateWindowMs <= 1000,
     'the comparison window must stay short so the single-candidate case is not meaningfully delayed'
@@ -101,7 +105,7 @@ test('Option C: a competitor that only appears after the window has already clos
 
   t += SETTINGS.startCandidateWindowMs + 10;
   assert.equal(nav.checkStartCandidateWindow(t), true);
-  assert.equal(nav.currentTagId, 6);
+  assert.equal(nav.expectedNextTagId, 6);
   var pathAfterCommit = nav.pathTagIds.slice();
 
   // A different tag only becomes confirmable well after the window already closed.
@@ -110,7 +114,7 @@ test('Option C: a competitor that only appears after the window has already clos
   nav.noteStartCandidateConfirmed(8, t);
 
   assert.deepEqual(nav.pathTagIds, pathAfterCommit, 'the already-committed route must not be altered by a late competitor');
-  assert.equal(nav.currentTagId, 6, 'Tag 6 remains the committed start tag');
+  assert.equal(nav.expectedNextTagId, 6, 'Tag 6 remains the committed/approached start tag');
 });
 
 test('Option C: a single noisy raw-distance sample for the farther candidate does not let it win', () => {
@@ -130,7 +134,7 @@ test('Option C: a single noisy raw-distance sample for the farther candidate doe
 
   t += SETTINGS.startCandidateWindowMs + 10;
   assert.equal(nav.checkStartCandidateWindow(t), true);
-  assert.equal(nav.currentTagId, 8, 'the consistently nearer candidate must win despite one favorable outlier for the farther one');
+  assert.equal(nav.expectedNextTagId, 8, 'the consistently nearer candidate must win despite one favorable outlier for the farther one');
 });
 
 test('Option C: starting at Tag 1 still enters the existing entrance-specific flow', () => {
@@ -176,5 +180,5 @@ test('Option C: aborting navigation mid-window clears all pending start-candidat
   nav.noteStartCandidateConfirmed(8, t);
   t += SETTINGS.startCandidateWindowMs + 10;
   assert.equal(nav.checkStartCandidateWindow(t), true);
-  assert.equal(nav.currentTagId, 8, 'only the fresh candidate from the new route may win');
+  assert.equal(nav.expectedNextTagId, 8, 'only the fresh candidate from the new route may win');
 });

@@ -91,8 +91,17 @@ import { record, getTestName } from './logger.js';
   // Sole purpose: prevents updateSkipCandidate() (main-loop.js) from searching for a
   // forward candidate beyond Tag 2 before Tag 1 has actually been reached, and
   // controls, in handleTracking(), whether reachStartTag() is called instead of
-  // reachPoint().
+  // reachPoint(). Also true (see beginStartApproach() below) while any OTHER start
+  // tag is being physically approached -- genericStartApproachActive (below)
+  // distinguishes which of the two flows is active, since both share this same
+  // NavState.TRACKING_START_TAG/handleTracking() machinery.
   var trackingStartTagActive = false;
+  // True only while a GENERIC (non-Tag-1) start-approach phase is active -- see
+  // beginStartApproach()/reachStartTag() below. Tag 1 always sets
+  // trackingStartTagActive without this flag (its own dedicated entrance/turn
+  // flow, unchanged); this flag exists solely so reachStartTag() can tell the two
+  // apart without inspecting the reached tag id itself.
+  var genericStartApproachActive = false;
   var arrivalBelowCount = 0;      // consecutive frames with arrivalDistance <= threshold
   var lastTrackDbgAt = 0;         // throttle for the debug log
   var awayWarned = false;
@@ -527,13 +536,18 @@ import { record, getTestName } from './logger.js';
 
     navLog("START_COMPARE_WINDOW_CLOSED", { candidates: startCandConfirmed, winner: winnerId,
       winnerStableDist: r1(winnerDist), candidateCount: ids.length });
+    // Distinct from START_COMPARE_WINDOW_CLOSED so a log reader can find the exact
+    // moment a start tag was selected without parsing the candidates map -- see
+    // onStartTagConfirmed()/beginStartApproach() below for what happens next
+    // (START_CANDIDATE_SELECTED != START_TAG_REACHED).
+    navLog("START_TAG_SELECTED", { startTag: winnerId, stableDist: r1(winnerDist) });
 
     startCandWindowOpen = false;
     startCandWindowOpenedAt = 0;
     startCandConfirmed = {};
     startCandSamples = {};
 
-    onStartTagConfirmed(winnerId);
+    onStartTagConfirmed(winnerId, winnerDist);
     return true;
   }
 
@@ -581,6 +595,18 @@ import { record, getTestName } from './logger.js';
     forwardSkipSpeechId = null;
     straightConfirmedTagId = null;
     resetSkipCandidate();
+    // Defensive, same rationale as resetStartCandidateState() below: a route
+    // ended or restarted WHILE a start-approach phase (Tag 1's own, or the
+    // generic beginStartApproach() one) was still in progress must not leak
+    // trackingStartTagActive/genericStartApproachActive into whatever comes
+    // next -- beginStartTagTracking()/beginStartApproach() both explicitly set
+    // trackingStartTagActive back to true immediately AFTER calling this
+    // function, so this reset never fights their own setup. Without this, an
+    // aborted approach left handleTracking() permanently mis-routing every
+    // later arrival (in ANY later route) to reachStartTag() instead of
+    // reachPoint().
+    trackingStartTagActive = false;
+    genericStartApproachActive = false;
     // Defensive: by construction the Option-C window/candidate state is already
     // cleared by the time any of resetSegmentState()'s call sites run (a winner is
     // committed and its own state cleared synchronously inside
@@ -1089,8 +1115,65 @@ import { record, getTestName } from './logger.js';
     }
   }
 
-  // Startknoten bestätigt: Route berechnen und ersten Abschnitt beginnen.
-  function onStartTagConfirmed(tagId){
+  // Start candidate confirmed (visually identified + nearest among simultaneously
+  // visible candidates, see checkStartCandidateWindow() -- unchanged selection
+  // logic) is NOT the same as the start tag being physically reached (field log
+  // 46: Tag 4 confirmed from 6.46m immediately announced "Sie sind bei Martin"
+  // and activated segment 4->6, well before the user could plausibly be there).
+  // winnerDist is the winning candidate's stabilized distance from
+  // checkStartCandidateWindow() -- omitted/null for any caller that has no
+  // distance to offer (every existing direct test call, and the Tag 1 branch's
+  // own internal re-entry via reachStartTag(), see below): those keep today's
+  // exact immediate-commit behavior. Tag 1 is excluded from this generic gate
+  // because it already implements its own, always-deferred physical-approach
+  // phase below (beginStartTagTracking()/reachStartTag()) with its own fixed
+  // entrance/turn wording that does not generalize -- routing it through the
+  // generic approach too would just prepend a redundant announcement, not fix
+  // anything. Every OTHER start tag (2, 4, 7, 8, 11, 15, an arrival-tag start, or
+  // a START_ROUTE_OVERRIDES start) is gated uniformly here, with no per-tag
+  // branching: commitStartTag() below is the ENTIRE previous body of this
+  // function, unchanged, and decides on its own which of those cases applies --
+  // this wrapper only decides WHEN to run it.
+  function onStartTagConfirmed(tagId, winnerDist){
+    if(tagId !== 1 && winnerDist != null && winnerDist > SETTINGS.startTagReachedM){
+      beginStartApproach(tagId, winnerDist);
+      return;
+    }
+    commitStartTag(tagId);
+  }
+
+  // Generalizes beginStartTagTracking()/reachStartTag() below (Tag 1's own,
+  // always-deferred approach) to any other start tag whose winning candidate is
+  // still farther away than SETTINGS.startTagReachedM. pathTagIds is set to the
+  // minimal [tagId] placeholder -- just enough to (a) turn off startPhase in
+  // main-loop.js, so the Option-C start-candidate comparison loop does not keep
+  // re-running while this single tag is being approached (an unrelated tag
+  // becoming newly confirmed mid-approach must not reopen a compare window), and
+  // (b) let reachStartTag() below read back the tracked tag id via
+  // pathTagIds[segIndex], exactly like Tag 1's flow already does. The REAL
+  // route/override/turn-branch decision in commitStartTag() depends only on
+  // (tagId, destinationId), never on distance, so it is deliberately deferred,
+  // unchanged, rather than resolved twice -- commitStartTag() is called exactly
+  // once, either immediately above or later from reachStartTag(), once this same
+  // tag is genuinely reached.
+  function beginStartApproach(tagId, winnerDist){
+    pathTagIds = [tagId];
+    segIndex = 0;
+    expectedNextTagId = tagId;   // the approach target -- reuses the same mechanism as Tag 1's beginStartTagTracking() below, not a new parallel variable
+    resetSegmentState();
+    trackingStartTagActive = true;
+    genericStartApproachActive = true;
+    setNavState(NavState.TRACKING_START_TAG);
+    updatePanel(null);
+    navLog("START_APPROACH_STARTED", { startTag: tagId, winnerStableDist: r1(winnerDist),
+      startTagReachedM: SETTINGS.startTagReachedM });
+  }
+
+  // Startknoten bestätigt: Route berechnen und ersten Abschnitt beginnen. Called
+  // exactly once per start tag, either immediately (onStartTagConfirmed() above)
+  // or once a deferred generic approach reaches this same tag (reachStartTag()
+  // below) -- entirely unchanged from before the start-approach phase existed.
+  function commitStartTag(tagId){
     if(isArrivalTag(tagId, destinationId)){
       currentTagId = tagId;
       arriveAtDestination();
@@ -1113,6 +1196,7 @@ import { record, getTestName } from './logger.js';
         source:"nav.startRouteOverride", category:"NAVIGATION_CONTEXT", expectedTag: pathTagIds[1]}));
       navLog("ROUTE_PATH", { startTag: tagId, path: pathTagIds, pathText: pathToText(pathTagIds),
         override: true, speechId: overrideResult.speechId });
+      navLog("ROUTE_ACTIVATED", { startTag: tagId, path: pathTagIds });
       beginSegment();
       setPostTurnPending(tagId, expectedNextTagId,
         startOverride.postTurnConfirmationText, "START_ROUTE_OVERRIDE_DIRECTION_CONFIRMED");
@@ -1168,6 +1252,7 @@ import { record, getTestName } from './logger.js';
       navLog("START_TAG_11_TURN_INSTRUCTION", { startTag: tagId, expectedTag: p[1],
         text: startTextTag11, speechId: startResultTag11.speechId });
       navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
+      navLog("ROUTE_ACTIVATED", { startTag: tagId, path: p });
       beginSegment();
       setPostTurnPending(tagId, expectedNextTagId,
         "Die Richtung stimmt. Gehen Sie geradeaus.", "START_TAG_11_DIRECTION_CONFIRMED");
@@ -1194,6 +1279,7 @@ import { record, getTestName } from './logger.js';
       navLog("START_TAG_15_TURN_INSTRUCTION", { startTag: tagId, expectedTag: p[1],
         text: startTextTag15, speechId: startResultTag15.speechId });
       navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
+      navLog("ROUTE_ACTIVATED", { startTag: tagId, path: p });
       beginSegment();
       return;
     }
@@ -1209,6 +1295,7 @@ import { record, getTestName } from './logger.js';
       category:"NAVIGATION_CONTEXT", expectedTag: p[1]}));
     // ---- Instrumentierung ----
     navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
+    navLog("ROUTE_ACTIVATED", { startTag: tagId, path: p });
     beginSegment();
   }
 
@@ -1253,11 +1340,22 @@ import { record, getTestName } from './logger.js';
   // "continue-straight", das Abbiegen bei Tag 2 fuer 2->3 bleibt unberuehrt) und
   // startet danach den Abschnitt 1->2 ganz normal ueber beginSegment().
   function reachStartTag(reason){
-    var reachedTagId = pathTagIds[segIndex];   // = 1
+    var reachedTagId = pathTagIds[segIndex];   // = 1, or the generic approach target
     currentTagId = reachedTagId;
     trackingStartTagActive = false;
 
     navLog("START_TAG_REACHED", { startTag: reachedTagId, reason: reason || "distance-threshold" });
+
+    // Generic (non-Tag-1) start approach, see beginStartApproach() above: the
+    // reached tag's own route/override/turn-branch decision was deliberately
+    // deferred (only depends on tagId/destinationId, never on distance) --
+    // commitStartTag() now runs it, exactly as it would have run immediately had
+    // the tag already been within reach when first confirmed.
+    if(genericStartApproachActive){
+      genericStartApproachActive = false;
+      commitStartTag(reachedTagId);
+      return;
+    }
 
     var t = "Stopp. Biegen Sie rechts ab.";
     lastRouteInstruction = t;
@@ -1635,10 +1733,15 @@ import { record, getTestName } from './logger.js';
       // Debug: ~1x pro Sekunde Zustand loggen
       if(now - lastTrackDbgAt >= 1000){
         lastTrackDbgAt = now;
+        // state distinguishes normal TRACKING from a start-approach phase
+        // (TRACKING_START_TAG, either Tag 1's own or the generic one, see
+        // beginStartApproach() above) in the log without a separate event --
+        // this single TRACK event already serves as the requested per-frame
+        // "approaching a start tag" diagnostic once state is read alongside it.
         navLog("TRACK", { expectedTag: expectedNextTagId, raw: r1(rawDist),
           ema: r1(emaDist), recentMin: r1(recentMin), arrival: r1(arrival),
-          minSeg: r1(minTrackDist), reachedM: reachedM,
-          lastSeenMsAgo: Math.round(now - expectedLastSeenAt) });
+          minSeg: r1(minTrackDist), reachedM: reachedM, state: navState,
+          aimZone: lastAimZone, lastSeenMsAgo: Math.round(now - expectedLastSeenAt) });
       }
 
       if(rawDist != null && arrival <= reachedM && !isTag9VisualArrivalDeferred(now)){
@@ -2193,7 +2296,13 @@ import { record, getTestName } from './logger.js';
   }
 
   // Ausricht-Hinweise, solange der erwartete Tag sichtbar, aber unbestätigt ist.
-  function aimGuidance(corners){
+  // isStartApproach (new, defaults to falsy for every pre-existing call site --
+  // normal navigation behavior is completely unchanged): while APPROACHING a
+  // selected-but-not-yet-reached start tag (beginStartApproach() above), the
+  // blind user does not yet know which direction the marker even is, so
+  // center/left/right are also spoken here -- scoped to exactly this one phase,
+  // never globally re-enabled for ordinary route navigation.
+  function aimGuidance(corners, isStartApproach){
     var cx = 0, cy = 0;
     for(var i = 0; i < corners.length; i++){ cx += corners[i].x; cy += corners[i].y; }
     cx /= corners.length; cy /= corners.length;
@@ -2207,15 +2316,15 @@ import { record, getTestName } from './logger.js';
     if(zone === lastAimZone) return;
     if(now - lastAimAt < SETTINGS.aimCooldownMs) return;
 
-    // "Markierung mittig." is not spoken — centering is not an action instruction
-    // (the user has nothing left to do, unlike left/right/higher/lower).
-    // zone/lastAimZone/lastAimAt are still updated (as they were for a successful
-    // announcement), so the existing cooldown/transition logic for the remaining,
-    // genuine correction hints keeps working unchanged — no duplicate log entry per
-    // frame: the zone===lastAimZone check above ensures this is logged only once on
-    // the transition into center, not on every further frame where the tag stays
-    // centered.
-    if(zone === "center"){
+    // "Markierung mittig." is not spoken during normal navigation — centering is
+    // not an action instruction there (the user has nothing left to do, unlike
+    // left/right/higher/lower). zone/lastAimZone/lastAimAt are still updated (as
+    // they were for a successful announcement), so the existing cooldown/
+    // transition logic for the remaining, genuine correction hints keeps working
+    // unchanged — no duplicate log entry per frame: the zone===lastAimZone check
+    // above ensures this is logged only once on the transition into center, not
+    // on every further frame where the tag stays centered.
+    if(zone === "center" && !isStartApproach){
       lastAimZone = zone;
       lastAimAt = now;
       navLog("TTS_AIM_CENTER_SUPPRESSED", { expectedTag: expectedNextTagId, state: navState });
@@ -2223,12 +2332,13 @@ import { record, getTestName } from './logger.js';
     }
 
     // Horizontal aim announcements ("Markierung links."/"Markierung rechts.") are
-    // also not spoken — only left/right; the vertical hints (higher/lower) remain
-    // unchanged and still reach say() below. Same pattern as "center" above:
-    // zone/lastAimZone/lastAimAt are still updated, so the cooldown/transition
-    // logic stays unchanged and this is logged only once per transition. say() is
-    // not called at all for these zones — no TTS_REQUESTED for the unspoken phrase.
-    if(zone === "left" || zone === "right"){
+    // also not spoken during normal navigation — only left/right; the vertical
+    // hints (higher/lower) remain unchanged and still reach say() below. Same
+    // pattern as "center" above: zone/lastAimZone/lastAimAt are still updated, so
+    // the cooldown/transition logic stays unchanged and this is logged only once
+    // per transition. say() is not called at all for these zones there — no
+    // TTS_REQUESTED for the unspoken phrase.
+    if((zone === "left" || zone === "right") && !isStartApproach){
       lastAimZone = zone;
       lastAimAt = now;
       navLog("TTS_AIM_HORIZONTAL_SUPPRESSED", { expectedTag: expectedNextTagId,
@@ -2237,8 +2347,13 @@ import { record, getTestName } from './logger.js';
     }
 
     if(speaking()) return;
-    var msg = { up:"Smartphone etwas höher.", down:"Smartphone etwas tiefer." }[zone];
-    var result = say(msg, ttsOpts({source:"nav.aimGuidance", category:"ACTION_REQUIRED"}));
+    // center/left/right only reach here when isStartApproach is true (see the two
+    // guards above) -- up/down speak unconditionally, exactly as before.
+    var msg = { up:"Smartphone etwas höher.", down:"Smartphone etwas tiefer.",
+      center:"Gehen Sie geradeaus.", left:"Etwas nach links.", right:"Etwas nach rechts." }[zone];
+    var category = (zone === "up" || zone === "down") ? "ACTION_REQUIRED" : "NAVIGATION_CONTEXT";
+    var source = isStartApproach ? "nav.startApproachAim" : "nav.aimGuidance";
+    var result = say(msg, ttsOpts({source: source, category: category}));
     if(result.accepted){ lastAimZone = zone; lastAimAt = now; }
   }
 
