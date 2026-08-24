@@ -1463,3 +1463,50 @@ test('destination reacquired near the reached threshold: recovery may briefly fi
     assert.ok(spokenTexts.some((t) => t.includes('Ausgang')), 'final destination speech must still be correct');
   });
 });
+
+// ==================== Phase 1 TTS cleanup (approved) ====================
+
+test('generic start tag speaks the start text without a "Route berechnet." prefix', () => {
+  resetState();
+  selectDestination(3);
+  nav.startNavigation();
+  spokenTexts.length = 0;
+  nav.onStartTagConfirmed(6); // generic branch -- Tag 6 has no START_TEXTS entry
+  assert.ok(
+    spokenTexts.includes(
+      'Sie sind bei Korridor. Halten Sie das Smartphone vor sich und suchen Sie die nächste Markierung.'
+    ),
+    `expected the shortened start text, got: ${JSON.stringify(spokenTexts)}`
+  );
+  assert.ok(
+    !spokenTexts.some((t) => t.startsWith('Route berechnet')),
+    `the "Route berechnet." prefix must no longer be spoken, got: ${JSON.stringify(spokenTexts)}`
+  );
+});
+
+test('the second scan-hint rotation names the location, not a raw AprilTag number', () => {
+  withFakeClock(900000, (advance) => {
+    resetState();
+    selectDestination(16);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(3); // pathTagIds = [3, 15, 16], expectedNextTagId = 15 (Wendepunkt)
+    spokenTexts.length = 0;
+
+    advance(SETTINGS.scanHintAfterMs + 100);
+    nav.scanHint(); // 1st rotation slot (route-specific searchHint)
+    assert.equal(spokenTexts.length, 1,
+      `expected the first scan hint to fire, got: ${JSON.stringify(spokenTexts)}`);
+
+    advance(SETTINGS.scanHintRepeatMs + 100);
+    nav.scanHint(); // 2nd rotation slot -- the one this change touches
+
+    assert.ok(
+      spokenTexts.some((t) => t.includes('Gesucht wird Wendepunkt')),
+      `expected the location name in the hint, got: ${JSON.stringify(spokenTexts)}`
+    );
+    assert.ok(
+      !spokenTexts.some((t) => /Gesucht wird Tag \d/.test(t)),
+      `must never speak a raw AprilTag number, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});

@@ -1196,7 +1196,10 @@ import { record, getTestName } from './logger.js';
       ("Sie sind bei " + markerName(tagId) + ". Halten Sie das Smartphone vor sich " +
        "und suchen Sie die nächste Markierung.");
     lastRouteInstruction = start;
-    say("Route berechnet. " + start, ttsOpts({interrupt:true, source:"nav.routeCalculated",
+    // Phase-1 TTS cleanup (approved): "Route berechnet." narrated a system computation
+    // with no user-actionable content -- removed; the location/action text that
+    // follows is unchanged.
+    say(start, ttsOpts({interrupt:true, source:"nav.routeCalculated",
       category:"NAVIGATION_CONTEXT", expectedTag: p[1]}));
     // ---- Instrumentierung ----
     navLog("ROUTE_PATH", { startTag: tagId, path: p, pathText: pathToText(p) });
@@ -2263,7 +2266,10 @@ import { record, getTestName } from './logger.js';
     if(edge){
       var msgs = [
         edge.searchHint || "Bewegen Sie das Smartphone langsam nach links und rechts und suchen Sie die nächste Markierung.",
-        "Gesucht wird Tag " + expectedNextTagId + " bei " + markerName(expectedNextTagId) +
+        // Phase-1 TTS cleanup (approved): no longer speaks the raw AprilTag number
+        // (was "Gesucht wird Tag " + expectedNextTagId + " bei " + ...) -- consistent
+        // with whereAmIResponse(), which never speaks a raw tag number either.
+        "Gesucht wird " + markerName(expectedNextTagId) +
           ". Bewegen Sie das Smartphone langsam nach links und rechts, auch etwas höher und tiefer.",
         "Immer noch keine Markierung. Sie können jederzeit Anweisung wiederholen oder Wo bin ich drücken."
       ];
