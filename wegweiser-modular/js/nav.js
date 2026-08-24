@@ -7,7 +7,7 @@
 import { SETTINGS } from './config.js';
 import { NODES, START_TEXTS, ARRIVALS, OFF_ROUTE_HINTS, START_ROUTE_OVERRIDES } from './graph-data.js';
 import { EDGE_MAP, findPath, markerName, pathToText, isTurnAction, departureActionSpeech,
-         isArrivalTag, findPathToDestination } from './graph.js';
+         isArrivalTag, findPathToDestination, MARKERS } from './graph.js';
 import { destSel, uiState } from './dom.js';
 import { say, speaking, buzz, isSpeechActive, activeSpeechSource } from './speech.js';
 import { updatePanel, renderNavigationUi } from './ui.js';
@@ -589,6 +589,12 @@ import { record, getTestName } from './logger.js';
     // segment, and a forward-skip retarget all independently guarantee no
     // start-candidate state can leak into the next route.
     resetStartCandidateState();
+    // Orientation-guidance PoC (see maybeLogOrientationDiagnostics() below): the
+    // rolling heading-error window belongs to exactly one segment's worth of
+    // samples -- reset on route start/end and every new segment exactly like the
+    // other per-segment diagnostic state above, so a later, unrelated re-entry
+    // into the 3->6 segment never mixes samples with an earlier attempt.
+    orientationHeadingErrorSamples = [];
   }
 
 
@@ -2348,6 +2354,190 @@ import { record, getTestName } from './logger.js';
       reason: "no-valid-tag-visible" };
   }
 
+  // ==================== Orientation-guidance PoC (Tag 3 -> Tag 6, LOGGING ONLY) ====================
+  // Feasibility investigation, not a navigation feature: distance.js's existing
+  // POSIT solve (estimatePose()) already computes a full pose (rotation +
+  // translation) for every detected marker -- distanceMeters() has always
+  // discarded the rotation immediately after use. This block reuses that SAME
+  // solve (main-loop.js passes in the poseResult it already computed for this
+  // marker this frame -- POSIT is never run a second time here) purely to log
+  // diagnostic heading-alignment data for the one segment 3->6, so the signal's
+  // real-world stability can be judged from field logs before any TTS/navigation
+  // decision is ever built on it. Never changes navState, segIndex,
+  // expectedNextTagId, or any spoken text.
+  //
+  // Geometry (dir_deg, x_m, y_m) is read from MARKERS (graph.js, derived from
+  // graph-data.js's FLOOR_GEOMETRY) -- the Tag 3/Tag 6 coordinates are NOT
+  // duplicated as new constants here, only the tag IDs that scope this PoC are.
+  var ORIENTATION_POC_FROM_TAG = 3;
+  var ORIENTATION_POC_TO_TAG = 6;
+  var ORIENTATION_STABILITY_WINDOW = 8; // rolling sample count, ~1-2s of frames at PROC_MS
+  var orientationHeadingErrorSamples = [];
+
+  function normalizeDeg(deg){
+    var d = deg % 360;
+    if(d < 0) d += 360;
+    return d;
+  }
+  // Signed normalization into [-180, 180) -- headingErrorDeg needs a signed range
+  // (positive = desired direction is to the left, negative = to the right, see
+  // the left/right convention below), unlike markerFacingWorldDeg/
+  // cameraHeadingWorldDeg/desiredRouteHeadingDeg, which stay in [0,360) like dir_deg.
+  function normalizeSignedDeg(deg){
+    return normalizeDeg(deg + 180) - 180;
+  }
+  // Bearing from one floor-plan point to another, in the SAME convention as
+  // dir_deg (graph-data.js/FLOOR_GEOMETRY): atan2 in the (x_m,y_m) plane, 0deg=+x,
+  // 90deg=+y, normalized to [0,360).
+  function bearingDeg(fromMarker, toMarker){
+    return normalizeDeg(Math.atan2(toMarker.y_m - fromMarker.y_m,
+      toMarker.x_m - fromMarker.x_m) * 180 / Math.PI);
+  }
+
+  // Called from main-loop.js for EVERY detected marker this frame (not only the
+  // currently "expected" one) -- during the 3->6 segment, Tag 3 itself is the
+  // ALREADY-reached/current tag (expectedNextTagId is 6, not 3), so a sighting of
+  // Tag 3 would never reach here if this were gated on "is this the expected tag"
+  // the way most of nav.js's other per-frame logic is. tagId is checked first and
+  // is the only thing read before confirming this call is even relevant, so this
+  // is a cheap no-op for every other marker/frame.
+  // Return value is purely a testability aid (nothing in main-loop.js's call site
+  // reads it) -- logger.js has no data-accessor for its buffer (exportJson() is a
+  // browser download/share side effect, not a return value), so tests assert on
+  // this return instead of the log itself. null = did not qualify for this PoC at
+  // all (wrong tag or wrong segment); {ok:false,reason} = qualified but could not
+  // compute (see TAG_ORIENTATION_POSE_UNAVAILABLE reasons); {ok:true,...} = the
+  // full computed diagnostic, mirroring exactly what TAG_ORIENTATION_POSE logs.
+  function maybeLogOrientationDiagnostics(tagId, poseResult, corners, now){
+    if(tagId !== ORIENTATION_POC_FROM_TAG) return null;
+    // "current route segment is 3->6, or the start orientation is being determined
+    // from Tag 3 toward Tag 6" -- both cases are exactly "the segment currently
+    // being tracked (pathTagIds[segIndex] -> expectedNextTagId) is 3->6", whether
+    // Tag 3 was just reached mid-route or is itself the start tag (beginSegment()
+    // sets expectedNextTagId immediately, before any tracking begins -- see
+    // onStartTagConfirmed()/beginSegment()).
+    var qualifies = navigationActive && pathTagIds &&
+      pathTagIds[segIndex] === ORIENTATION_POC_FROM_TAG &&
+      expectedNextTagId === ORIENTATION_POC_TO_TAG;
+    if(!qualifies) return null;
+
+    if(!poseResult || !poseResult.rotation){
+      navLog("TAG_ORIENTATION_POSE_UNAVAILABLE", { tagId: tagId, navState: navState,
+        fromTag: pathTagIds[segIndex], toTag: expectedNextTagId, timestamp: now,
+        reason: "missing-rotation" });
+      return { ok: false, reason: "missing-rotation" };
+    }
+    if(!corners || corners.length !== 4){
+      navLog("TAG_ORIENTATION_POSE_UNAVAILABLE", { tagId: tagId, navState: navState,
+        fromTag: pathTagIds[segIndex], toTag: expectedNextTagId, timestamp: now,
+        reason: "invalid-corners" });
+      return { ok: false, reason: "invalid-corners" };
+    }
+    var fromMarker = MARKERS[ORIENTATION_POC_FROM_TAG];
+    var toMarker = MARKERS[ORIENTATION_POC_TO_TAG];
+    if(!fromMarker || !toMarker || fromMarker.dir_deg == null ||
+       fromMarker.x_m == null || toMarker.x_m == null){
+      navLog("TAG_ORIENTATION_POSE_UNAVAILABLE", { tagId: tagId, navState: navState,
+        fromTag: pathTagIds[segIndex], toTag: expectedNextTagId, timestamp: now,
+        reason: "missing-geometry" });
+      return { ok: false, reason: "missing-geometry" };
+    }
+
+    var R = poseResult.rotation;
+    var relativeCameraYawDeg = Math.atan2(R[2][0], R[2][2]) * 180 / Math.PI;
+    if(!isFinite(relativeCameraYawDeg)){
+      navLog("TAG_ORIENTATION_POSE_UNAVAILABLE", { tagId: tagId, navState: navState,
+        fromTag: pathTagIds[segIndex], toTag: expectedNextTagId, timestamp: now,
+        reason: "non-finite-yaw" });
+      return { ok: false, reason: "non-finite-yaw" };
+    }
+
+    // See the accompanying feasibility audit for the derivation/sign convention:
+    // markerFacingWorldDeg is the direction the tag's printed face points TOWARD
+    // the viewer (dir_deg); a camera squarely facing the tag is therefore looking
+    // in the OPPOSITE direction (+180), adjusted by the measured relative yaw
+    // (positive relativeCameraYawDeg = camera turned toward its own right, which
+    // DECREASES world heading in this CCW-positive convention, hence the minus).
+    var markerFacingWorldDeg = normalizeDeg(fromMarker.dir_deg);
+    var cameraHeadingWorldDeg = normalizeDeg(markerFacingWorldDeg + 180 - relativeCameraYawDeg);
+    var desiredRouteHeadingDeg = bearingDeg(fromMarker, toMarker);
+    // Positive headingErrorDeg: desired heading is more counter-clockwise (to the
+    // LEFT) than the current camera heading. Negative: desired heading is to the
+    // RIGHT. (Not yet used for any instruction -- logging only.)
+    var headingErrorDeg = normalizeSignedDeg(desiredRouteHeadingDeg - cameraHeadingWorldDeg);
+
+    navLog("TAG_ORIENTATION_POSE", {
+      tagId: tagId,
+      navState: navState,
+      fromTag: pathTagIds[segIndex],
+      toTag: expectedNextTagId,
+      timestamp: now,
+      distanceM: r1(poseResult.distanceM),
+      corners: corners,
+      poseError: poseResult.poseError,
+      relativeCameraYawDeg: r1(relativeCameraYawDeg),
+      markerFacingWorldDeg: r1(markerFacingWorldDeg),
+      cameraHeadingWorldDeg: r1(cameraHeadingWorldDeg),
+      desiredRouteHeadingDeg: r1(desiredRouteHeadingDeg),
+      headingErrorDeg: r1(headingErrorDeg)
+    });
+
+    orientationHeadingErrorSamples.push(headingErrorDeg);
+    if(orientationHeadingErrorSamples.length > ORIENTATION_STABILITY_WINDOW){
+      orientationHeadingErrorSamples.shift();
+    }
+    var n = orientationHeadingErrorSamples.length;
+    var sum = 0, min = Infinity, max = -Infinity;
+    for(var i = 0; i < n; i++){
+      var v = orientationHeadingErrorSamples[i];
+      sum += v;
+      if(v < min) min = v;
+      if(v > max) max = v;
+    }
+    var mean = sum / n;
+    var variance = 0;
+    for(var j = 0; j < n; j++){
+      var diff = orientationHeadingErrorSamples[j] - mean;
+      variance += diff * diff;
+    }
+    var stdDevDeg = Math.sqrt(variance / n);
+
+    var stability = {
+      sampleCount: n,
+      meanHeadingErrorDeg: r1(mean),
+      minHeadingErrorDeg: r1(min),
+      maxHeadingErrorDeg: r1(max),
+      spreadDeg: r1(max - min),
+      stdDevDeg: r1(stdDevDeg)
+    };
+    navLog("TAG_ORIENTATION_STABILITY", {
+      tagId: tagId,
+      navState: navState,
+      fromTag: pathTagIds[segIndex],
+      toTag: expectedNextTagId,
+      timestamp: now,
+      sampleCount: stability.sampleCount,
+      meanHeadingErrorDeg: stability.meanHeadingErrorDeg,
+      minHeadingErrorDeg: stability.minHeadingErrorDeg,
+      maxHeadingErrorDeg: stability.maxHeadingErrorDeg,
+      spreadDeg: stability.spreadDeg,
+      stdDevDeg: stability.stdDevDeg
+    });
+
+    return {
+      ok: true,
+      tagId: tagId,
+      distanceM: r1(poseResult.distanceM),
+      poseError: poseResult.poseError,
+      relativeCameraYawDeg: r1(relativeCameraYawDeg),
+      markerFacingWorldDeg: r1(markerFacingWorldDeg),
+      cameraHeadingWorldDeg: r1(cameraHeadingWorldDeg),
+      desiredRouteHeadingDeg: r1(desiredRouteHeadingDeg),
+      headingErrorDeg: r1(headingErrorDeg),
+      stability: stability
+    };
+  }
+
 export {
   NavState,
   navState,
@@ -2398,5 +2588,9 @@ export {
   setTag9DetectorHooks,
   Tag7Via8Flow,
   tag7Via8FlowPhase,
-  notifyTag7Via8FlowStep
+  notifyTag7Via8FlowStep,
+  maybeLogOrientationDiagnostics,
+  normalizeDeg,
+  normalizeSignedDeg,
+  bearingDeg
 };

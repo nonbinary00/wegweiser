@@ -12,7 +12,7 @@ import { PROC_WIDTH, PROC_MS, SETTINGS, DEBUG_SHOW_TAG_ID, CONFIRM_FRAMES, MARKE
 import { detector } from './detector-state.js';
 import { W, H, setFrameSize } from './frame-state.js';
 import { MARKERS, markerName } from './graph.js';
-import { distanceMeters } from './distance.js';
+import { estimatePose } from './distance.js';
 import { showRoom, showIdle, updatePanel, drawMarker } from './ui.js';
 import { record } from './logger.js';
 import {
@@ -23,7 +23,7 @@ import {
   onOtherTagConfirmed, updateSkipCandidate, scanHint, aimGuidance,
   touchExpectedSeen, touchCandidateSeen, setLastExpectedVisual, setWrongCandidate,
   setCandidate, setEmaDist, recordStartCandidateSample, noteStartCandidateConfirmed,
-  checkStartCandidateWindow
+  checkStartCandidateWindow, maybeLogOrientationDiagnostics
 } from './nav.js';
 import { running } from './camera.js';
 
@@ -83,8 +83,17 @@ import { running } from './camera.js';
       for(var i = 0; i < detected.length; i++){
         var mk = detected[i];
         var known = MARKERS[mk.id];
-        var d = distanceMeters(mk.corners, MARKER_SIZE_M);
+        // estimatePose() (distance.js) replaces the old distanceMeters() call here --
+        // same single POSIT solve as before, now also exposing the rotation/pose-error
+        // that distanceMeters() used to discard. Orientation-guidance PoC (Tag 3 -> 6,
+        // logging only, see nav.js): maybeLogOrientationDiagnostics() reuses this SAME
+        // poseResult for every detected marker (its own tagId check makes it a cheap
+        // no-op for anything other than Tag 3) -- POSIT is never solved a second time
+        // for the same marker/frame because of this.
+        var poseResult = estimatePose(mk.corners, MARKER_SIZE_M);
+        var d = poseResult ? poseResult.distanceM : null;
         detectedWithDist.push({ id: mk.id, dist: d });
+        maybeLogOrientationDiagnostics(mk.id, poseResult, mk.corners, now);
         var isExpected = navigationActive &&
           (startPhase ? !!known : mk.id === expectedNextTagId);
         if(navigationActive && !destinationReached){
