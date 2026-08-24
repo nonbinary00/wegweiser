@@ -1784,12 +1784,30 @@ import { record, getTestName } from './logger.js';
       // -- if no stop was spoken before, the resumption deliberately stays silent
       // (the user never knew the camera had briefly lost the tag).
       if(wasStopSpoken){
-        var edge = currentEdge();
-        var isTurnNext = !!(edge && isTurnAction(edge));
-        var recoveryText = isTurnNext ? departureActionSpeech(edge) : "Gehen Sie weiter geradeaus.";
+        // Feldtest-Korrektur (neu): handleLostStopped() laeuft strukturell IMMER
+        // waehrend die Verfolgung des AKTUELLEN Segments (Richtung expectedNextTagId)
+        // im Gange ist -- ein etwaiges Abbiegen zum BETRETEN dieses Segments wurde
+        // bereits vorher, einmalig und synchron angesagt (entweder von reachPoint()
+        // beim Erreichen des vorherigen Tags, oder von einem Start-nur-Zweig in
+        // onStartTagConfirmed()), NIEMALS hier. currentEdge() beschreibt weiterhin
+        // GENAU diese bereits abgeschlossene Einstiegs-Handlung fuer die gesamte
+        // Dauer des Segments (siehe departureAction-Konvention in graph-data.js) --
+        // sie hier erneut ueber isTurnAction(currentEdge()) auszuwerten wiederholte
+        // faelschlich ein bereits erledigtes (und ggf. laengst per
+        // POST_TURN_CONFIRMATION_CLEARED bestaetigtes) Abbiegen bei jeder
+        // Wiederfindung waehrend desselben Segments (Feldlog 43: "Biegen Sie links
+        // ab." nach dem Wiederfinden von Tag 16, obwohl das Abbiegen bei Tag 15
+        // laengst bestaetigt war). Die Wiederaufnahme-Ansage ist daher IMMER die
+        // schlichte Geradeaus-Bestaetigung, unabhaengig vom departureAction des
+        // aktuellen Segments -- die separate, unveraenderte
+        // tryPostTurnConfirmation()-Kette (naechster handleTracking()-Tick)
+        // bestaetigt ein noch offenes Abbiegen unabhaengig davon weiterhin selbst.
+        var recoveryText = "Gehen Sie weiter geradeaus.";
+        var recoveryEdge = currentEdge();
         speakDirectionIfNew(recoveryText, ttsOpts({interrupt:true, source:"nav.reacquired",
           category:"NAVIGATION_CONTEXT"}), "TTS_RECOVERY_STRAIGHT",
-          { expectedTag: expectedNextTagId, trigger: "recovery-after-stop", isTurn: isTurnNext });
+          { expectedTag: expectedNextTagId, trigger: "recovery-after-stop", isTurn: false,
+            currentSegmentDepartureAction: recoveryEdge ? recoveryEdge.departureAction : null });
       }
       return;
     }

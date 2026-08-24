@@ -1256,3 +1256,210 @@ test('a Tag 16 sighting on a route NOT started at Tag 1 still uses the existing 
     );
   });
 });
+
+// ==================== LOST_STOPPED recovery must never repeat a completed turn ====================
+// Field log 43 (route 3 -> 15 -> 16): the turn-left at Tag 15 was correctly announced
+// and confirmed ("Stopp. Biegen Sie links ab." then "Gehen Sie geradeaus." with
+// POST_TURN_CONFIRMATION_CLEARED reason "confirmed"), but a LATER loss+reacquire of
+// Tag 16 -- well into tracking that same segment, after the turn was long finished --
+// incorrectly repeated "Biegen Sie links ab.". Root cause: handleLostStopped()'s
+// recovery text used to be derived from currentEdge()'s departureAction, but
+// currentEdge() always describes the ALREADY-COMPLETED entry action for the
+// currently-tracked segment (see the departureAction convention in graph-data.js),
+// never a still-pending one -- a turn is only ever spoken once, synchronously, before
+// tracking of a segment begins (reachPoint(), or a start-only branch such as the
+// Tag-15->16 or Tag-2->16 start overrides). Fixed generically: recovery now always
+// re-affirms straight continuation, regardless of the segment's departureAction.
+
+// Drives an already-TRACKING expectedNextTagId through a loss -> LOST_STOPPED ->
+// spoken "Stopp..." -> reacquire cycle, mirroring the real per-frame calls
+// main-loop.js would make (touchExpectedSeen() while visible, none while lost).
+// Asserts the lost-stop instruction was actually spoken -- a prerequisite for any
+// recovery announcement at all, see handleLostStopped()'s wasStopSpoken gate -- then
+// clears spokenTexts so callers can assert only on the reacquisition speech itself.
+function driveLossThenReacquire(advance, reacquireDist){
+  var expectedTag = nav.expectedNextTagId;
+  for(var i = 0; i < 3; i++){
+    nav.touchExpectedSeen(performance.now());
+    nav.setEmaDist(3.0);
+    nav.handleTracking(performance.now(), true, 3.0);
+    advance(50);
+  }
+  // Tag goes out of view: no more touchExpectedSeen() calls -- advance past
+  // trackLostStopMs so handleTracking() recognizes the loss internally.
+  advance(SETTINGS.trackLostStopMs + 100);
+  nav.handleTracking(performance.now(), false, null);
+  assert.equal(nav.navState, nav.NavState.LOST_STOPPED, 'must have transitioned to LOST_STOPPED');
+
+  // Let the delayed "Stopp..." announcement actually fire.
+  advance(SETTINGS.lostSpeechDelayMs + 100);
+  nav.handleLostStopped(performance.now(), null);
+  assert.ok(
+    spokenTexts.some((t) => t.startsWith('Stopp. Suchen Sie die Markierung')),
+    `expected the lost-stop instruction before reacquisition, got: ${JSON.stringify(spokenTexts)}`
+  );
+
+  spokenTexts.length = 0;
+  advance(200);
+  nav.handleLostStopped(performance.now(), { id: expectedTag, dist: reacquireDist });
+}
+
+test('Scenario A -- straight segment: recovery after loss says the plain straight instruction, never a turn', () => {
+  withFakeClock(800000, (advance) => {
+    walkToTag4Expected(advance); // destination 11, path [1,2,3,6,4,7,8,10,11], expectedNextTagId=4 (edge 6->4 is continue-straight)
+    nav.onNextTagFound(3.0); // Tag 4 visually found -> TRACKING
+    spokenTexts.length = 0;
+
+    driveLossThenReacquire(advance, 0.6);
+
+    assert.ok(
+      spokenTexts.includes('Gehen Sie weiter geradeaus.'),
+      `expected the plain straight recovery instruction, got: ${JSON.stringify(spokenTexts)}`
+    );
+    assert.ok(
+      !spokenTexts.some((t) => t.includes('Biegen Sie')),
+      'a straight segment must never produce a turn instruction on recovery'
+    );
+  });
+});
+
+test('Scenario B -- completed turn, then loss and reacquisition: recovery must not repeat the old turn (field log 43)', () => {
+  withFakeClock(810000, (advance) => {
+    resetState();
+    selectDestination(16);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(3); // pathTagIds = [3, 15, 16], the exact field-log route
+    assert.deepEqual(nav.pathTagIds, [3, 15, 16]);
+
+    // Reach Tag 15: turn-left announced, postTurnPending(turnTag:15, expectedTag:16) set.
+    var dist = 0.1;
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 15 REACHED
+    advance(50);
+    assert.ok(
+      spokenTexts.some((t) => t.includes('Biegen Sie links ab.')),
+      `expected the turn instruction at Tag 15, got: ${JSON.stringify(spokenTexts)}`
+    );
+    assert.equal(nav.expectedNextTagId, 16);
+
+    // Tag 16 visually confirmed -> post-turn confirmation spoken and cleared, exactly
+    // as in the field log (steps 6-9).
+    spokenTexts.length = 0;
+    nav.onNextTagFound(3.0);
+    assert.ok(
+      spokenTexts.includes('Gehen Sie geradeaus.'),
+      `expected the post-turn confirmation, got: ${JSON.stringify(spokenTexts)}`
+    );
+
+    spokenTexts.length = 0;
+    driveLossThenReacquire(advance, 0.52); // matches the field-log reacquire distance (~0.52 m)
+
+    assert.ok(
+      !spokenTexts.some((t) => t.includes('Biegen Sie links ab.')),
+      `must NOT repeat the completed Tag 15 turn, got: ${JSON.stringify(spokenTexts)}`
+    );
+    assert.ok(
+      spokenTexts.includes('Gehen Sie weiter geradeaus.'),
+      `expected the plain straight recovery instruction instead, got: ${JSON.stringify(spokenTexts)}`
+    );
+    // NOTE: this suite asserts only on user-visible speech (spokenTexts) and nav.js's
+    // own exported state, matching the rest of the file -- the internal nav-log
+    // fields (isTurn/trigger/source on TTS_RECOVERY_STRAIGHT/TTS_REQUESTED) are not
+    // independently inspectable from here: logger.js's only public accessor,
+    // exportJson(), is a pure UI side effect (browser download/Web-Share, it never
+    // returns the payload) and its internal event buffer is not otherwise exported.
+    // The spoken-text assertions above already fully exercise the fixed code path
+    // (handleLostStopped()'s recoveryText selection), which is what determines both
+    // the speech and those log fields.
+  });
+});
+
+test('Scenario C -- recovery logic does not read or corrupt postTurnPending, and a still-pending confirmation can still resolve afterwards', () => {
+  // NOTE: in the real app, postTurnPending is always already resolved (confirmed or
+  // suppressed-to-a-terminal-state) by the time LOST_STOPPED can ever be reached for
+  // the same expected tag: entering TRACKING requires onNextTagFound(), which
+  // unconditionally attempts tryPostTurnConfirmation() with interrupt:true -- which
+  // bypasses the "busy" suppression path entirely and therefore always resolves on
+  // its first attempt. So a genuinely-still-pending confirmation can only coexist
+  // with a LOST_STOPPED cycle for the SAME tag in an artificial construction (as
+  // below, calling handleTracking() directly without first calling onNextTagFound()).
+  // This test exists to lock in an INVARIANT the fix depends on: handleLostStopped()'s
+  // recovery must be fully decoupled from postTurnPending -- it must neither read it
+  // to decide what to say, nor clear/corrupt it -- so that if a future change ever did
+  // introduce a reachable pending-during-loss interleaving (e.g. a forward-skip retarget
+  // immediately after a turn), recovery would still behave safely.
+  withFakeClock(820000, (advance) => {
+    resetState();
+    selectDestination(16);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(3); // pathTagIds = [3, 15, 16]
+
+    var dist = 0.1;
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 15 REACHED -> postTurnPending(15, 16) set
+    advance(50);
+    assert.equal(nav.expectedNextTagId, 16);
+
+    // Deliberately do NOT call onNextTagFound(16) -- postTurnPending stays open.
+    spokenTexts.length = 0;
+    driveLossThenReacquire(advance, 0.52);
+
+    assert.ok(
+      !spokenTexts.some((t) => t.includes('Biegen Sie links ab.')),
+      `recovery must not repeat the turn even while confirmation is still open, got: ${JSON.stringify(spokenTexts)}`
+    );
+    assert.ok(
+      spokenTexts.includes('Gehen Sie weiter geradeaus.'),
+      `expected the plain straight recovery instruction, got: ${JSON.stringify(spokenTexts)}`
+    );
+
+    // The independent post-turn confirmation mechanism must still be intact and able
+    // to resolve normally afterwards, once the tag is genuinely found.
+    spokenTexts.length = 0;
+    nav.onNextTagFound(0.52);
+    assert.ok(
+      spokenTexts.includes('Gehen Sie geradeaus.'),
+      `expected the post-turn confirmation to still fire normally afterwards, got: ${JSON.stringify(spokenTexts)}`
+    );
+  });
+});
+
+// ==================== Sanity check: destination arrival still preempts recovery ====================
+
+test('destination reacquired near the reached threshold: recovery may briefly fire, but arrival still follows normally and is unaffected', () => {
+  withFakeClock(830000, (advance) => {
+    resetState();
+    selectDestination(16);
+    nav.startNavigation();
+    nav.onStartTagConfirmed(3);
+    var dist = 0.1;
+    nav.setEmaDist(dist);
+    nav.handleTracking(performance.now(), true, dist);
+    advance(50);
+    nav.handleTracking(performance.now(), true, dist); // Tag 15 REACHED
+    advance(50);
+    nav.onNextTagFound(3.0); // Tag 16 found -> post-turn confirmation spoken+cleared
+    spokenTexts.length = 0;
+
+    driveLossThenReacquire(advance, 1.79); // just inside SETTINGS.reachedM (1.8)
+
+    assert.ok(
+      !spokenTexts.some((t) => t.includes('Biegen Sie links ab.')),
+      `recovery must not repeat the old turn here either, got: ${JSON.stringify(spokenTexts)}`
+    );
+    assert.equal(nav.destinationReached, false, 'reacquisition itself is not an arrival');
+
+    // Immediately afterward, the real distance-based arrival chain proceeds exactly
+    // as before -- unaffected by the recovery fix.
+    nav.setEmaDist(0.1);
+    nav.handleTracking(performance.now(), true, 0.1);
+    advance(50);
+    nav.handleTracking(performance.now(), true, 0.1); // Tag 16 REACHED == destination
+    assert.equal(nav.destinationReached, true);
+    assert.ok(spokenTexts.some((t) => t.includes('Ausgang')), 'final destination speech must still be correct');
+  });
+});
