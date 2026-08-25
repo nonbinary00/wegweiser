@@ -2536,6 +2536,25 @@ import { record, getTestName } from './logger.js';
       toMarker.x_m - fromMarker.x_m) * 180 / Math.PI);
   }
 
+  // Circular mean of a set of signed angles (degrees, any range -- typically
+  // [-180,180) heading-error samples). Ordinary arithmetic mean is WRONG for
+  // angular data that straddles the +-180 wrap boundary: mean([179,-179]) would
+  // naively read as 0 (facing the exact opposite of reality), when the true
+  // average orientation is near +-180. Averaging the unit vectors (cos,sin) of
+  // each angle and taking atan2 of the result is the standard fix -- it has no
+  // discontinuity at the wrap point. Normalized back into [-180,180) via the
+  // existing normalizeSignedDeg so the result composes with the rest of this
+  // module's angle handling.
+  function circularMeanDeg(samples){
+    var sumX = 0, sumY = 0;
+    for(var i = 0; i < samples.length; i++){
+      var rad = samples[i] * Math.PI / 180;
+      sumX += Math.cos(rad);
+      sumY += Math.sin(rad);
+    }
+    return normalizeSignedDeg(Math.atan2(sumY / samples.length, sumX / samples.length) * 180 / Math.PI);
+  }
+
   // Pure angle-zone classification -- assumes the distance/stability gates
   // already passed. Exported standalone so the zone boundaries can be
   // unit-tested without driving any pose/stability state.
@@ -2656,27 +2675,41 @@ import { record, getTestName } from './logger.js';
       orientationHeadingErrorSamples.shift();
     }
     var n = orientationHeadingErrorSamples.length;
-    var sum = 0, min = Infinity, max = -Infinity;
+    // Circular statistics (see circularMeanDeg() above for why): mean is the
+    // sin/cos-averaged circular mean, and every other statistic is derived from
+    // each sample's SIGNED SHORTEST-ARC deviation from that mean (via
+    // normalizeSignedDeg), never from a raw `sample - mean` subtraction. This
+    // makes min/max/spread/stdDev wrap-safe -- e.g. samples clustered near
+    // [+170, -170] no longer read as a ~340deg spread, since each sample's
+    // deviation from the ~+-180 mean is correctly the short way around (~10deg).
+    // When a window never crosses +-180 this is numerically identical to the
+    // old linear mean/min/max/spread/stddev (no threshold retuning implied).
+    var mean = circularMeanDeg(orientationHeadingErrorSamples);
+    var minDiff = Infinity, maxDiff = -Infinity, sumSq = 0;
     for(var i = 0; i < n; i++){
-      var v = orientationHeadingErrorSamples[i];
-      sum += v;
-      if(v < min) min = v;
-      if(v > max) max = v;
+      var diff = normalizeSignedDeg(orientationHeadingErrorSamples[i] - mean);
+      if(diff < minDiff) minDiff = diff;
+      if(diff > maxDiff) maxDiff = diff;
+      sumSq += diff * diff;
     }
-    var mean = sum / n;
-    var variance = 0;
-    for(var j = 0; j < n; j++){
-      var diff = orientationHeadingErrorSamples[j] - mean;
-      variance += diff * diff;
-    }
-    var stdDevDeg = Math.sqrt(variance / n);
+    var stdDevDeg = Math.sqrt(sumSq / n);
 
     var stability = {
       sampleCount: n,
       meanHeadingErrorDeg: r1(mean),
-      minHeadingErrorDeg: r1(min),
-      maxHeadingErrorDeg: r1(max),
-      spreadDeg: r1(max - min),
+      // min/max are the mean shifted by the smallest/largest signed deviation
+      // found in the window -- i.e. the circular arc's two endpoints, not a
+      // linear min()/max() over the raw (possibly wrap-discontinuous) samples.
+      minHeadingErrorDeg: r1(normalizeSignedDeg(mean + minDiff)),
+      maxHeadingErrorDeg: r1(normalizeSignedDeg(mean + maxDiff)),
+      // Circular spread: width of the arc spanned by the samples' deviations
+      // from the mean (maxDiff - minDiff), NOT max-min on the raw samples.
+      spreadDeg: r1(maxDiff - minDiff),
+      // Circular deviation: same population-stddev formula as before, but
+      // applied to wrap-safe deviations -- still in degrees, still compared
+      // against the same 10deg stability threshold (see
+      // ORIENTATION_MAX_STABLE_STDDEV_DEG), just no longer corrupted by the
+      // +-180 discontinuity.
       stdDevDeg: r1(stdDevDeg)
     };
     navLog("TAG_ORIENTATION_STABILITY", {
@@ -2693,7 +2726,15 @@ import { record, getTestName } from './logger.js';
       stdDevDeg: stability.stdDevDeg
     });
 
-    var gate = classifyOrientation(poseResult.distanceM, stability, headingErrorDeg);
+    // Classify using the window's stable circular mean, NOT the latest
+    // instantaneous headingErrorDeg -- a single noisy/transitional frame can
+    // briefly land just under a zone threshold (e.g. 153 deg, just under the
+    // 155 deg OPPOSITE cutoff) while the actual stable window is still clearly
+    // near +-180, which previously caused a spurious OPPOSITE->LEFT/RIGHT
+    // flicker on that one frame alone (confirmed in field logs). The gates
+    // (distance/sample-count/stddev) are unaffected by this -- only which
+    // angle feeds classifyHeadingZone() once those gates already pass.
+    var gate = classifyOrientation(poseResult.distanceM, stability, stability.meanHeadingErrorDeg);
 
     // Change-based logging: fires on the first classification for this segment
     // and on every transition, but not once per identical frame -- keeps field
@@ -2710,6 +2751,7 @@ import { record, getTestName } from './logger.js';
         cameraHeadingWorldDeg: r1(cameraHeadingWorldDeg),
         desiredRouteHeadingDeg: r1(desiredRouteHeadingDeg),
         headingErrorDeg: r1(headingErrorDeg),
+        meanHeadingErrorDeg: stability.meanHeadingErrorDeg,
         sampleCount: stability.sampleCount,
         spreadDeg: stability.spreadDeg,
         stdDevDeg: stability.stdDevDeg,
@@ -2790,6 +2832,7 @@ export {
   normalizeDeg,
   normalizeSignedDeg,
   bearingDeg,
+  circularMeanDeg,
   classifyHeadingZone,
   classifyOrientation
 };
