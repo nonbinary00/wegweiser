@@ -2573,6 +2573,25 @@ import { record, getTestName } from './logger.js';
   // that range.
   var ORIENTATION_BRANCH_AMBIGUOUS_MAX_GAP = 3;
 
+  // Diagnostic-only threshold for bothPoseCandidatesFarFromHistory (see
+  // maybeLogOrientationDiagnostics() below) -- flags frames where NEITHER
+  // POSIT candidate resembles the previously selected orientation yaw, a
+  // distinct "whole-solve drift" failure mode found in field log
+  // wegweiser-v13-log-20260825-134855(12).json's "6-4_still_back" session,
+  // separate from the classic near-tied mirror-branch swap
+  // ORIENTATION_BRANCH_AMBIGUOUS_MAX_GAP already handles. Evidence across
+  // logs 12/13/14 (see the accompanying analysis): whichever candidate is
+  // the "good" one, in every non-degenerate frame sampled, sits within
+  // 0.17-4.4deg of the previous selected yaw; every confirmed degeneracy
+  // frame (both candidates equally implausible) has BOTH candidates at
+  // 24.5deg+ from history. 20deg sits in the middle of that clean margin,
+  // not at either boundary, and deliberately reuses the same magnitude as
+  // the existing selectedYawJumped diagnostic (a distinct, independently
+  // named constant here -- the two concepts may diverge later) rather than
+  // inventing a new number. Diagnostic only -- never read by branch
+  // selection, bootstrap, the stability window, or the classifier.
+  var ORIENTATION_FAR_FROM_HISTORY_DEG = 20;
+
   function normalizeDeg(deg){
     var d = deg % 360;
     if(d < 0) d += 360;
@@ -2937,6 +2956,21 @@ import { record, getTestName } from './logger.js';
       circularDistanceDeg(relativeCameraYawDeg, priorSelectedYaw);
     var previousToAlternativeDeg = (priorSelectedYaw == null || alternativeRelativeCameraYawDeg == null) ? null :
       circularDistanceDeg(alternativeRelativeCameraYawDeg, priorSelectedYaw);
+    // Diagnostic-only "whole-solve drift" signal (see
+    // ORIENTATION_FAR_FROM_HISTORY_DEG above) -- true only when NEITHER
+    // candidate resembles the previous selected yaw, i.e. continuity has no
+    // good candidate to prefer regardless of poseErrorGap. False (never
+    // null) whenever there's no previous yaw or no alternative this frame --
+    // "both far" is meaningless without both distances. Never read by branch
+    // selection, bootstrap, the stability window, or the classifier -- purely
+    // informational, and NOT a claim that this frame IS solver failure (a
+    // genuine large/fast physical turn can trip this too).
+    var bothPoseCandidatesFarFromHistory = previousToBestDeg != null && previousToAlternativeDeg != null &&
+      previousToBestDeg > ORIENTATION_FAR_FROM_HISTORY_DEG && previousToAlternativeDeg > ORIENTATION_FAR_FROM_HISTORY_DEG;
+    var nearestCandidateToHistoryDeg = (previousToBestDeg == null || previousToAlternativeDeg == null) ? null :
+      Math.min(previousToBestDeg, previousToAlternativeDeg);
+    var farthestCandidateFromHistoryDeg = (previousToBestDeg == null || previousToAlternativeDeg == null) ? null :
+      Math.max(previousToBestDeg, previousToAlternativeDeg);
     previousSelectedOrientationYawDeg = selectedOrientationYawDeg;
     previousSelectedOrientationBranch = selectedPoseBranch;
 
@@ -2991,6 +3025,11 @@ import { record, getTestName } from './logger.js';
       selectedSolverLabelChanged: selectedSolverLabelChanged,
       previousToBestDeg: r1(previousToBestDeg),
       previousToAlternativeDeg: r1(previousToAlternativeDeg),
+      // "Whole-solve drift" diagnostic (see ORIENTATION_FAR_FROM_HISTORY_DEG
+      // above) -- NOT a cause classifier, NOT used by branch selection.
+      bothPoseCandidatesFarFromHistory: bothPoseCandidatesFarFromHistory,
+      nearestCandidateToHistoryDeg: r1(nearestCandidateToHistoryDeg),
+      farthestCandidateFromHistoryDeg: r1(farthestCandidateFromHistoryDeg),
       // Bootstrap diagnostics (see runOrientationBootstrap() above) -- all
       // null once bootstrap has completed for this segment.
       orientationBootstrapActive: orientationBootstrapActive,
@@ -3120,6 +3159,9 @@ import { record, getTestName } from './logger.js';
       selectedSolverLabelChanged: selectedSolverLabelChanged,
       previousToBestDeg: r1(previousToBestDeg),
       previousToAlternativeDeg: r1(previousToAlternativeDeg),
+      bothPoseCandidatesFarFromHistory: bothPoseCandidatesFarFromHistory,
+      nearestCandidateToHistoryDeg: r1(nearestCandidateToHistoryDeg),
+      farthestCandidateFromHistoryDeg: r1(farthestCandidateFromHistoryDeg),
       orientationBootstrapActive: orientationBootstrapActive,
       orientationBootstrapSampleCount: orientationBootstrapSamples.length,
       stability: stability,
