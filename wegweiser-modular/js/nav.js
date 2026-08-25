@@ -625,11 +625,14 @@ import { record, getTestName } from './logger.js';
     lastLoggedOrientationClassification = null;
     // Temporal branch-continuity state (see selectOrientationBranch()) belongs
     // to this same per-segment lifecycle -- a later, unrelated re-entry into
-    // the same or a different segment must bootstrap fresh (POSIT's own best
-    // pick, see selectOrientationBranch()'s "initial-best" path) rather than
-    // being temporally "continuous" with a heading from a previous approach.
+    // the same or a different segment must bootstrap fresh rather than being
+    // temporally "continuous" with a heading from a previous approach.
     previousSelectedOrientationYawDeg = null;
     previousSelectedOrientationBranch = null;
+    // Multi-frame bootstrap (see runOrientationBootstrap()) resets alongside
+    // the continuity state above -- a new segment/route must re-collect its
+    // own bootstrap window, never reuse samples from a different approach.
+    orientationBootstrapSamples = [];
   }
 
 
@@ -2509,7 +2512,21 @@ import { record, getTestName } from './logger.js';
   // exactly one segment's worth of continuity, same lifecycle as the stability
   // window above -- reset alongside it in resetSegmentState().
   var previousSelectedOrientationYawDeg = null;
-  var previousSelectedOrientationBranch = null; // "best" | "alternative" | null
+  var previousSelectedOrientationBranch = null; // "best" | "alternative" | "bootstrap" | null
+
+  // ---- Multi-frame bootstrap (see runOrientationBootstrap() below). Replaces
+  // trusting frame 0's raw POSIT "best" label immediately: field log
+  // wegweiser-v13-log-20260825-130059(11).json ("6-4_still_back") showed frame
+  // 0 as an EXACT tie (best=+7.96/poseErr=6, alternative=-23.25/poseErr=6) --
+  // zero basis to prefer either -- yet that log's eventually-dominant,
+  // better-supported mode turned out to be the OTHER (negative) one. A short,
+  // bounded window of frames is collected first so the initial reference yaw
+  // is chosen from accumulated reprojection-quality evidence across several
+  // observations, not a single arbitrary tie-break. 6 sits in the requested
+  // 5-8 range: short enough to add only a fraction of a second of latency,
+  // long enough that both logs' two real modes are each seen multiple times.
+  var ORIENTATION_BOOTSTRAP_MAX_FRAMES = 6;
+  var orientationBootstrapSamples = []; // [{best, bestErr, alt, altErr}], reset with the state above
 
   // ---- Classification gates/zones (diagnostic thresholds only -- nothing here
   // feeds a spoken instruction or a navigation decision yet). Centralized so they
@@ -2536,17 +2553,25 @@ import { record, getTestName } from './logger.js';
   var ORIENTATION_OPPOSITE_ZONE_DEG = 25;
 
   // Ambiguity criterion for the temporal branch-continuity override (see
-  // selectOrientationBranch() below). Field evidence
-  // (wegweiser-v13-log-20260825-113344(9).json): the two cleanest confirmed
-  // branch-swap frames both had poseErrorGap of 0 and 1 (best~=-16.44/
-  // alt~=+13.63 at gap=0; best~=+12.54/alt~=-15.06 at gap=1) -- i.e. POSIT's
-  // two candidates were within 0-1 px of an exact reprojection tie. Over the
-  // WHOLE session, poseErrorGap=3 was actually the single most common value
-  // (28 of 69 frames) regardless of whether a swap occurred -- so a looser
-  // cutoff like <=3 would let continuity second-guess POSIT on the majority
-  // of all frames, not just genuinely ambiguous ones. Kept deliberately
-  // conservative at the evidence's own near-exact-tie boundary instead.
-  var ORIENTATION_BRANCH_AMBIGUOUS_MAX_GAP = 1;
+  // selectOrientationBranch() below). Revised from 1 to 3 after analyzing
+  // wegweiser-v13-log-20260825-130011(10).json ("6-4_still") and
+  // -130059(11).json ("6-4_still_back"): with the old <=1 cutoff, ALL 11
+  // residual >20deg selected-yaw jumps in the first log sat at poseErrorGap
+  // 2-3 (best-clear-error rejected a valid, temporally-consistent alternative
+  // purely because gap was 2 or 3, not because it was a bad candidate). An
+  // offline replay across candidate thresholds confirmed <=3 as the ceiling
+  // supported by evidence: residual jumps dropped 11->1 (first log) and
+  // 18->5 (second log) at <=3, with ZERO additional improvement at <=4 (no
+  // swap frames in either log sit at gap=4) -- so <=4+ buys nothing while
+  // needlessly widening the window that could later admit a real ambiguity.
+  // Frames with gap in the 10-30 range are a DIFFERENT, unrelated failure
+  // mode (POSIT's iterative refinement occasionally converges the discarded
+  // branch to a genuinely degenerate, high-error solution, not a mirror
+  // candidate) and must stay excluded -- confirmed by inspecting those
+  // frames' corners (stable, no jump, no clipping) and distanceM (flat),
+  // ruling out corner/geometry/detector explanations. <=3 sits well clear of
+  // that range.
+  var ORIENTATION_BRANCH_AMBIGUOUS_MAX_GAP = 3;
 
   function normalizeDeg(deg){
     var d = deg % 360;
@@ -2665,6 +2690,119 @@ import { record, getTestName } from './logger.js';
     }
     return { yawDeg: bestYawDeg, branch: "best", reason: "continuity-best" };
   }
+  // Note: the previousYawDeg==null ("initial-best") branch above is no longer
+  // reachable from maybeLogOrientationDiagnostics() in production once the
+  // multi-frame bootstrap below always runs first and establishes a non-null
+  // previous yaw before normal continuity ever sees a frame -- kept as-is
+  // (rather than removed) so this pure function still has a sane, tested
+  // standalone contract for "no prior data at all".
+
+  // Multi-frame bootstrap (see ORIENTATION_BOOTSTRAP_MAX_FRAMES/
+  // orientationBootstrapSamples above for the field-log motivation): given a
+  // short, bounded list of {best, bestErr, alt, altErr} samples collected so
+  // far this segment, associates each frame's two yaw candidates to one of
+  // two running "modes" by nearest CIRCULAR distance to that mode's own
+  // samples so far -- physical continuity, NOT the solver's best/alternative
+  // label (field logs confirmed that label flips ~20% of frames independent
+  // of real motion, see the accompanying analysis) -- then scores each mode
+  // by its mean reprojection error over the window. Called incrementally
+  // (once per bootstrap frame, on the samples accumulated so far) so it also
+  // doubles as a smoothly-evolving PROVISIONAL yaw during collection, rather
+  // than leaving the orientation path with no output at all until the window
+  // completes.
+  //
+  // Never reads desiredRouteHeadingDeg, headingErrorDeg, or any classifier
+  // result -- mode choice is based only on candidate yaw continuity and
+  // reprojection quality, exactly like selectOrientationBranch() above.
+  //
+  // Pure/stateless (the caller owns the accumulated `samples` array) so this
+  // is unit-testable independently of maybeLogOrientationDiagnostics()'s
+  // module-level bootstrap state.
+  function runOrientationBootstrap(samples){
+    var first = samples[0];
+    // Seed the two mode tracks from the very first sample -- NOT a decision,
+    // only a starting reference point for nearest-neighbor grouping of later
+    // frames. If frame 0 had no alternative at all, mode B starts with no
+    // seed (null) rather than duplicating mode A's seed, so a run of
+    // single-candidate frames never fabricates a fake second mode.
+    var modeYaws = [[first.best], first.alt != null ? [first.alt] : []];
+    var modeErrs = [[first.bestErr], first.alt != null ? [first.altErr] : []];
+    // The most RECENT observation assigned to each mode -- used both as the
+    // nearest-neighbor grouping reference and as the mode's eventual selected
+    // yaw. Deliberately NOT a running mean: a mean would smear together two
+    // genuinely different observations of the same mode (e.g. real quick
+    // motion during bootstrap) into a synthesized value nothing ever actually
+    // measured -- see "do not average the two pose branches into one yaw".
+    // The running mean is still computed separately below, but only for the
+    // mode-vs-mode error/dispersion SCORING, and for the diagnostic
+    // "representative yaw" fields -- never for the value actually selected.
+    var modeLast = [first.best, first.alt != null ? first.alt : null];
+
+    for(var i = 1; i < samples.length; i++){
+      var s = samples[i];
+      // Fallback reference for a mode with no seed yet: the OTHER mode's
+      // reference, so a still-empty mode never wins a nearest-neighbor
+      // comparison purely because `null` compares strangely.
+      var refA = modeLast[0];
+      var refB = modeLast[1] != null ? modeLast[1] : modeLast[0];
+      if(s.alt == null){
+        // Only one candidate this frame -- attach it to whichever running
+        // mode is currently closer, leaving the other mode untouched.
+        var target = circularDistanceDeg(s.best, refB) < circularDistanceDeg(s.best, refA) ? 1 : 0;
+        modeYaws[target].push(s.best);
+        modeErrs[target].push(s.bestErr);
+        modeLast[target] = s.best;
+        continue;
+      }
+      var costSame = circularDistanceDeg(s.best, refA) + circularDistanceDeg(s.alt, refB);
+      var costSwap = circularDistanceDeg(s.alt, refA) + circularDistanceDeg(s.best, refB);
+      if(costSwap < costSame){
+        modeYaws[0].push(s.alt);  modeErrs[0].push(s.altErr);  modeLast[0] = s.alt;
+        modeYaws[1].push(s.best); modeErrs[1].push(s.bestErr); modeLast[1] = s.best;
+      }else{
+        modeYaws[0].push(s.best); modeErrs[0].push(s.bestErr); modeLast[0] = s.best;
+        modeYaws[1].push(s.alt);  modeErrs[1].push(s.altErr);  modeLast[1] = s.alt;
+      }
+    }
+
+    var modes = [0, 1].map(function(idx){
+      var yaws = modeYaws[idx], errs = modeErrs[idx];
+      if(yaws.length === 0){
+        return { count: 0, latestYawDeg: null, yawDeg: null, meanError: null, stdDevDeg: null };
+      }
+      var meanYaw = circularMeanDeg(yaws);
+      var sumErr = 0, sumSq = 0;
+      for(var j = 0; j < yaws.length; j++){
+        sumErr += errs[j];
+        var dev = circularDistanceDeg(yaws[j], meanYaw);
+        sumSq += dev * dev;
+      }
+      return { count: yaws.length, latestYawDeg: modeLast[idx], yawDeg: meanYaw,
+               meanError: sumErr / errs.length, stdDevDeg: Math.sqrt(sumSq / yaws.length) };
+    });
+
+    var chosenIndex, reason;
+    if(modes[0].count === 0){
+      chosenIndex = 1; reason = "bootstrap-single-mode";
+    }else if(modes[1].count === 0){
+      chosenIndex = 0; reason = "bootstrap-single-mode";
+    }else if(modes[0].meanError < modes[1].meanError){
+      chosenIndex = 0; reason = "bootstrap-lower-error";
+    }else if(modes[1].meanError < modes[0].meanError){
+      chosenIndex = 1; reason = "bootstrap-lower-error";
+    }else{
+      // Fully tied on the evidence collected so far -- deterministic
+      // fallback (always mode 0, the track that absorbed sample 0's own raw
+      // "best" candidate), explicitly logged as ambiguous rather than
+      // silently presented as a confident choice.
+      chosenIndex = 0; reason = "bootstrap-tied-fallback";
+    }
+
+    // The SELECTED yaw is the chosen mode's most recent actual observation
+    // (never a synthesized average); modeA/modeB (including their averaged
+    // `yawDeg`) are exposed purely for diagnostics/logging.
+    return { yawDeg: modes[chosenIndex].latestYawDeg, reason: reason, modeA: modes[0], modeB: modes[1] };
+  }
 
   // Called from main-loop.js for EVERY detected marker this frame (not only the
   // currently "expected" one) -- for the active segment's FROM tag, that tag is
@@ -2744,20 +2882,61 @@ import { record, getTestName } from './logger.js';
     var poseErrorGap = poseResult.poseErrorGap == null ? null : poseResult.poseErrorGap;
 
     // Temporal branch continuity (orientation path only -- see
-    // selectOrientationBranch() above). This NEVER touches poseResult.rotation
-    // itself, distanceM, translation, or estimatePose()'s own selection --
-    // only which of the two already-computed yaw candidates feeds the
-    // orientation-specific heading/error/stability/classification below.
-    var branchChoice = selectOrientationBranch(
-      relativeCameraYawDeg, alternativeRelativeCameraYawDeg, poseErrorGap, previousSelectedOrientationYawDeg);
-    var selectedOrientationYawDeg = branchChoice.yawDeg;
-    var selectedPoseBranch = branchChoice.branch;
-    var orientationBranchSwitched = previousSelectedOrientationBranch != null &&
+    // selectOrientationBranch()/runOrientationBootstrap() above). This NEVER
+    // touches poseResult.rotation itself, distanceM, translation, or
+    // estimatePose()'s own selection -- only which of the two already-computed
+    // yaw candidates feeds the orientation-specific heading/error/stability/
+    // classification below. priorSelectedYaw is snapshotted BEFORE this
+    // frame's own selection updates the module state, so every diagnostic
+    // distance below compares against what was accepted going INTO this
+    // frame, not what this frame just produced.
+    var priorSelectedYaw = previousSelectedOrientationYawDeg;
+    var orientationBootstrapActive = orientationBootstrapSamples.length < ORIENTATION_BOOTSTRAP_MAX_FRAMES;
+    var selectedOrientationYawDeg, selectedPoseBranch, selectedBranchReason;
+    var bootstrapModeA = null, bootstrapModeB = null;
+
+    if(orientationBootstrapActive){
+      orientationBootstrapSamples.push({ best: relativeCameraYawDeg, bestErr: poseResult.poseError,
+        alt: alternativeRelativeCameraYawDeg, altErr: alternativePoseError });
+      var bootstrapResult = runOrientationBootstrap(orientationBootstrapSamples);
+      selectedOrientationYawDeg = bootstrapResult.yawDeg;
+      selectedPoseBranch = "bootstrap";
+      selectedBranchReason = bootstrapResult.reason;
+      bootstrapModeA = bootstrapResult.modeA;
+      bootstrapModeB = bootstrapResult.modeB;
+    }else{
+      var branchChoice = selectOrientationBranch(
+        relativeCameraYawDeg, alternativeRelativeCameraYawDeg, poseErrorGap, priorSelectedYaw);
+      selectedOrientationYawDeg = branchChoice.yawDeg;
+      selectedPoseBranch = branchChoice.branch;
+      selectedBranchReason = branchChoice.reason;
+    }
+
+    // Diagnostic semantics fix: the previous field name (orientationBranchSwitched)
+    // actually only meant "the solver label changed" (best<->alternative),
+    // which field logs showed flips ~20% of frames independent of any real
+    // yaw change (e.g. two consecutive best-clear-error frames both report
+    // branch="best" even when the underlying physical candidate swapped ~30deg
+    // -- a real jump that looked like "no switch" under the old name). Two
+    // separate, honestly-named fields replace it:
+    //   selectedYawJumpDeg/selectedYawJumped -- the ACTUAL circular jump in the
+    //     yaw the orientation path used, frame to frame (what field tests
+    //     actually want to verify improved);
+    //   selectedSolverLabelChanged -- the old, narrower "best<->alternative
+    //     label differs from last frame" meaning, kept separately since it is
+    //     still useful (just not a proxy for "did the yaw jump"). The trivial
+    //     "bootstrap"->real-label transition on the first post-bootstrap frame
+    //     is not counted as a label change.
+    var selectedYawJumpDeg = priorSelectedYaw == null ? null :
+      circularDistanceDeg(selectedOrientationYawDeg, priorSelectedYaw);
+    var selectedYawJumped = selectedYawJumpDeg != null && selectedYawJumpDeg > 20;
+    var selectedSolverLabelChanged = previousSelectedOrientationBranch != null &&
+      previousSelectedOrientationBranch !== "bootstrap" &&
       selectedPoseBranch !== previousSelectedOrientationBranch;
-    var previousToBestDeg = previousSelectedOrientationYawDeg == null ? null :
-      circularDistanceDeg(relativeCameraYawDeg, previousSelectedOrientationYawDeg);
-    var previousToAlternativeDeg = (previousSelectedOrientationYawDeg == null || alternativeRelativeCameraYawDeg == null) ? null :
-      circularDistanceDeg(alternativeRelativeCameraYawDeg, previousSelectedOrientationYawDeg);
+    var previousToBestDeg = priorSelectedYaw == null ? null :
+      circularDistanceDeg(relativeCameraYawDeg, priorSelectedYaw);
+    var previousToAlternativeDeg = (priorSelectedYaw == null || alternativeRelativeCameraYawDeg == null) ? null :
+      circularDistanceDeg(alternativeRelativeCameraYawDeg, priorSelectedYaw);
     previousSelectedOrientationYawDeg = selectedOrientationYawDeg;
     previousSelectedOrientationBranch = selectedPoseBranch;
 
@@ -2799,17 +2978,33 @@ import { record, getTestName } from './logger.js';
       alternativePoseError: alternativePoseError,
       poseErrorGap: poseErrorGap,
       poseErrorGapRatio: r1(poseResult.poseErrorGapRatio),
-      // Temporal branch-continuity diagnostics (see selectOrientationBranch()
-      // above) -- selectedOrientationYawDeg is what actually feeds
-      // cameraHeadingWorldDeg/headingErrorDeg/the stability window/the
-      // classifier below; relativeCameraYawDeg above stays the raw POSIT best,
-      // untouched, for comparison.
+      // Temporal branch-continuity diagnostics (see selectOrientationBranch()/
+      // runOrientationBootstrap() above) -- selectedOrientationYawDeg is what
+      // actually feeds cameraHeadingWorldDeg/headingErrorDeg/the stability
+      // window/the classifier below; relativeCameraYawDeg above stays the raw
+      // POSIT best, untouched, for comparison.
       selectedOrientationYawDeg: r1(selectedOrientationYawDeg),
       selectedPoseBranch: selectedPoseBranch,
-      selectedBranchReason: branchChoice.reason,
-      orientationBranchSwitched: orientationBranchSwitched,
+      selectedBranchReason: selectedBranchReason,
+      selectedYawJumpDeg: r1(selectedYawJumpDeg),
+      selectedYawJumped: selectedYawJumped,
+      selectedSolverLabelChanged: selectedSolverLabelChanged,
       previousToBestDeg: r1(previousToBestDeg),
-      previousToAlternativeDeg: r1(previousToAlternativeDeg)
+      previousToAlternativeDeg: r1(previousToAlternativeDeg),
+      // Bootstrap diagnostics (see runOrientationBootstrap() above) -- all
+      // null once bootstrap has completed for this segment.
+      orientationBootstrapActive: orientationBootstrapActive,
+      orientationBootstrapSampleCount: orientationBootstrapSamples.length,
+      orientationBootstrapChosen: orientationBootstrapActive ? r1(selectedOrientationYawDeg) : null,
+      orientationBootstrapReason: orientationBootstrapActive ? selectedBranchReason : null,
+      orientationBootstrapModeA: bootstrapModeA && {
+        yawDeg: r1(bootstrapModeA.yawDeg), meanError: r1(bootstrapModeA.meanError),
+        stdDevDeg: r1(bootstrapModeA.stdDevDeg), count: bootstrapModeA.count
+      },
+      orientationBootstrapModeB: bootstrapModeB && {
+        yawDeg: r1(bootstrapModeB.yawDeg), meanError: r1(bootstrapModeB.meanError),
+        stdDevDeg: r1(bootstrapModeB.stdDevDeg), count: bootstrapModeB.count
+      }
     });
 
     orientationHeadingErrorSamples.push(headingErrorDeg);
@@ -2919,10 +3114,14 @@ import { record, getTestName } from './logger.js';
       poseErrorGapRatio: r1(poseResult.poseErrorGapRatio),
       selectedOrientationYawDeg: r1(selectedOrientationYawDeg),
       selectedPoseBranch: selectedPoseBranch,
-      selectedBranchReason: branchChoice.reason,
-      orientationBranchSwitched: orientationBranchSwitched,
+      selectedBranchReason: selectedBranchReason,
+      selectedYawJumpDeg: r1(selectedYawJumpDeg),
+      selectedYawJumped: selectedYawJumped,
+      selectedSolverLabelChanged: selectedSolverLabelChanged,
       previousToBestDeg: r1(previousToBestDeg),
       previousToAlternativeDeg: r1(previousToAlternativeDeg),
+      orientationBootstrapActive: orientationBootstrapActive,
+      orientationBootstrapSampleCount: orientationBootstrapSamples.length,
       stability: stability,
       classification: gate.classification,
       classificationReason: gate.reason
@@ -2988,5 +3187,6 @@ export {
   classifyHeadingZone,
   classifyOrientation,
   circularDistanceDeg,
-  selectOrientationBranch
+  selectOrientationBranch,
+  runOrientationBootstrap
 };

@@ -126,7 +126,22 @@ test('selectOrientationBranch: route heading is never a parameter -- selection i
 
 // ==================== Integration: maybeLogOrientationDiagnostics() ====================
 
-test('integration: no previous yaw on the first qualifying frame -> selectedOrientationYawDeg equals the raw POSIT best', () => {
+// Feeds the same pose repeatedly to run the multi-frame bootstrap (6 frames,
+// see ORIENTATION_BOOTSTRAP_MAX_FRAMES) to completion on a single, unambiguous
+// physical yaw, PLUS one more identical frame so the returned result reflects
+// NORMAL post-bootstrap continuity (orientationBootstrapActive===false) --
+// the 6th bootstrap frame itself is still correctly reported as active=true,
+// since ITS OWN output came from bootstrap logic. See
+// orientation-bootstrap.test.js for bootstrap mechanics themselves.
+function warmUpBootstrap(fromTag, pose, cornersArg, startTimestamp){
+  var result;
+  for(var i = 0; i < 7; i++){
+    result = nav.maybeLogOrientationDiagnostics(fromTag, pose, cornersArg, startTimestamp + i);
+  }
+  return result;
+}
+
+test('integration: the first qualifying frame starts the multi-frame bootstrap, not an immediate raw-best anchor', () => {
   var seg = enterRoute(6, 4);
   var pose = {
     distanceM: 1.0, rotation: makeRotation(13), translation: [0, 0, 1.0], poseError: 6,
@@ -135,38 +150,43 @@ test('integration: no previous yaw on the first qualifying frame -> selectedOrie
   var result = nav.maybeLogOrientationDiagnostics(seg.fromTag, pose, SOME_CORNERS, 1000);
 
   assert.ok(result && result.ok);
-  assert.equal(result.selectedOrientationYawDeg, result.relativeCameraYawDeg);
-  assert.equal(result.selectedPoseBranch, 'best');
-  assert.equal(result.selectedBranchReason, 'initial-best');
-  assert.equal(result.orientationBranchSwitched, false);
+  assert.equal(result.orientationBootstrapActive, true);
+  assert.equal(result.orientationBootstrapSampleCount, 1);
+  assert.equal(result.selectedPoseBranch, 'bootstrap');
 });
 
-test('integration: a confirmed field-log branch swap is absorbed -- the orientation path keeps the previously selected physical branch', () => {
+test('integration: post-bootstrap, a confirmed field-log branch swap is absorbed -- the orientation path keeps the previously selected physical branch', () => {
   var seg = enterRoute(6, 4);
-  // Frame 1: establishes a selected yaw near -16 (best branch, no ambiguity yet).
+  // Establishes a selected yaw near -16 across the bootstrap window (no
+  // ambiguity to resolve yet -- both candidates tie on error every frame, so
+  // bootstrap deterministically settles on whichever absorbed sample 0's own
+  // "best", exactly like the pre-bootstrap anchor would have).
   var pose1 = {
     distanceM: 1.0, rotation: makeRotation(-16.44), translation: [0, 0, 1.0], poseError: 6,
     alternativeRotation: makeRotation(13.63), alternativePoseError: 6, poseErrorGap: 0
   };
-  var result1 = nav.maybeLogOrientationDiagnostics(seg.fromTag, pose1, SOME_CORNERS, 1000);
+  var result1 = warmUpBootstrap(seg.fromTag, pose1, SOME_CORNERS, 1000);
   assert.ok(result1 && result1.ok);
+  assert.equal(result1.orientationBootstrapActive, false);
   assert.ok(Math.abs(result1.selectedOrientationYawDeg - (-16.44)) < 0.01);
 
-  // Frame 2: POSIT's OWN "best" swaps to the physically-same-orientation's
+  // Next frame: POSIT's OWN "best" swaps to the physically-same-orientation's
   // other branch (+12.54), with the true continuation (-15.06) now demoted
   // to "alternative" -- exactly the field log's confirmed swap pattern.
   var pose2 = {
     distanceM: 1.0, rotation: makeRotation(12.54), translation: [0, 0, 1.0], poseError: 6,
     alternativeRotation: makeRotation(-15.06), alternativePoseError: 7, poseErrorGap: 1
   };
-  var result2 = nav.maybeLogOrientationDiagnostics(seg.fromTag, pose2, SOME_CORNERS, 1001);
+  var result2 = nav.maybeLogOrientationDiagnostics(seg.fromTag, pose2, SOME_CORNERS, 1010);
 
   assert.ok(result2 && result2.ok);
   assert.equal(result2.selectedPoseBranch, 'alternative');
   assert.ok(Math.abs(result2.selectedOrientationYawDeg - (-15.06)) < 0.01,
     `expected the orientation path to stay near -16deg (continuity), got ${result2.selectedOrientationYawDeg}`);
-  assert.equal(result2.orientationBranchSwitched, true,
-    'selectedPoseBranch changed from "best" (frame 1) to "alternative" (frame 2) -- a real branch transition, correctly flagged');
+  assert.equal(result2.selectedSolverLabelChanged, true,
+    'selectedPoseBranch changed from "best" (previous frame) to "alternative" (this frame) -- a real solver-label transition, correctly flagged');
+  assert.equal(result2.selectedYawJumped, false,
+    'the ACTUAL selected yaw stayed continuous -- this is the field-relevant diagnostic, unlike the old label-based flag');
   // Crucially: the RAW POSIT best yaw did jump by ~29deg (unchanged, still
   // exposed for comparison) even though the orientation-path output did not.
   assert.ok(Math.abs(result2.relativeCameraYawDeg - 12.54) < 0.01);
@@ -209,15 +229,16 @@ test('integration: generic across an arbitrary route edge (8->10) -- no tag-spec
     distanceM: 1.0, rotation: makeRotation(5), translation: [0, 0, 1.0], poseError: 6,
     alternativeRotation: makeRotation(-25), alternativePoseError: 6, poseErrorGap: 0
   };
-  var result1 = nav.maybeLogOrientationDiagnostics(seg.fromTag, pose1, SOME_CORNERS, 1000);
+  var result1 = warmUpBootstrap(seg.fromTag, pose1, SOME_CORNERS, 1000);
   assert.ok(result1 && result1.ok);
-  assert.equal(result1.selectedPoseBranch, 'best');
+  assert.equal(result1.orientationBootstrapActive, false);
+  assert.ok(Math.abs(result1.selectedOrientationYawDeg - 5) < 0.01);
 
   var pose2 = {
     distanceM: 1.0, rotation: makeRotation(-25), translation: [0, 0, 1.0], poseError: 6,
     alternativeRotation: makeRotation(5), alternativePoseError: 6, poseErrorGap: 0
   };
-  var result2 = nav.maybeLogOrientationDiagnostics(seg.fromTag, pose2, SOME_CORNERS, 1001);
+  var result2 = nav.maybeLogOrientationDiagnostics(seg.fromTag, pose2, SOME_CORNERS, 1010);
   assert.ok(result2 && result2.ok);
   assert.equal(result2.selectedPoseBranch, 'alternative');
   assert.ok(Math.abs(result2.selectedOrientationYawDeg - 5) < 0.01, 'continuity should hold the same physical branch (yaw ~5deg)');
@@ -225,13 +246,14 @@ test('integration: generic across an arbitrary route edge (8->10) -- no tag-spec
 
 test('reset: a new segment bootstraps fresh (no leaked continuity state)', () => {
   var seg1 = enterRoute(6, 4);
-  nav.maybeLogOrientationDiagnostics(seg1.fromTag, {
+  warmUpBootstrap(seg1.fromTag, {
     distanceM: 1.0, rotation: makeRotation(-16), translation: [0, 0, 1.0], poseError: 6,
     alternativeRotation: makeRotation(13), alternativePoseError: 6, poseErrorGap: 0
   }, SOME_CORNERS, 1000);
 
   // A fresh route/segment (even the same edge again) must not remember the
-  // previous approach's selected yaw -- resetSegmentState() clears it.
+  // previous approach's selected yaw, nor its bootstrap sample count --
+  // resetSegmentState() clears both.
   var seg2 = enterRoute(6, 4);
   var result = nav.maybeLogOrientationDiagnostics(seg2.fromTag, {
     distanceM: 1.0, rotation: makeRotation(13), translation: [0, 0, 1.0], poseError: 6,
@@ -239,8 +261,8 @@ test('reset: a new segment bootstraps fresh (no leaked continuity state)', () =>
   }, SOME_CORNERS, 2000);
 
   assert.ok(result && result.ok);
-  assert.equal(result.selectedPoseBranch, 'best', 'expected a fresh bootstrap (initial-best), not continuity with the previous approach');
-  assert.equal(result.selectedBranchReason, 'initial-best');
+  assert.equal(result.orientationBootstrapActive, true, 'expected a fresh bootstrap, not continuity with the previous approach');
+  assert.equal(result.orientationBootstrapSampleCount, 1, 'bootstrap sample count must not carry over from the previous segment');
 });
 
 // ==================== Isolation / non-regression ====================
