@@ -29,8 +29,38 @@ import { W, H } from './frame-state.js';
       var pose = posit.pose(pts);
       var t = pose.bestTranslation;
       var distanceM = Math.sqrt(t[0]*t[0] + t[1]*t[1] + t[2]*t[2]);
+
+      // Diagnostic-only additive exposure of the SECOND (non-selected) POSIT
+      // branch. js-aruco2's coplanar POSIT (vendor/posit.js's pos()/pose())
+      // always computes two candidate rotations for a planar target -- the
+      // classic twofold pose ambiguity -- and keeps whichever reprojects with
+      // lower error as "best"; the loser was already computed and retained on
+      // the Pose object (pose.alternativeRotation/alternativeError) but never
+      // read by any caller before now. Exposing it here does NOT change which
+      // branch is selected, nor distanceM/rotation/translation/poseError above
+      // -- it only surfaces what POSIT already computed, for field-log
+      // comparison of the two branches (see nav.js's orientation diagnostics).
+      //
+      // A branch can be invalid (isValid() fails -- a reconstructed point ends
+      // up behind the camera): pose() then leaves its rotation as the
+      // unpopulated [[],[],[]] passed into pose() and its error as the sentinel
+      // {euclidean:-1, pixels:-1, maximum:-1}. Guard against exposing that as a
+      // real pose -- alternativeRotation/alternativePoseError are null when the
+      // alternative branch wasn't valid/available.
+      var altRotation = pose.alternativeRotation;
+      var altAvailable = pose.alternativeError >= 0 && altRotation &&
+        altRotation[2] && altRotation[2].length === 3;
+      var alternativePoseError = altAvailable ? pose.alternativeError : null;
+      var poseErrorGap = altAvailable ? Math.abs(alternativePoseError - pose.bestError) : null;
+      var poseErrorGapRatio = (poseErrorGap != null && pose.bestError > 0) ?
+        poseErrorGap / pose.bestError : null;
+
       return { distanceM: distanceM, rotation: pose.bestRotation, translation: t,
-               poseError: pose.bestError };
+               poseError: pose.bestError,
+               alternativeRotation: altAvailable ? altRotation : null,
+               alternativePoseError: alternativePoseError,
+               poseErrorGap: poseErrorGap,
+               poseErrorGapRatio: poseErrorGapRatio };
     }catch(e){ return null; }
   }
 

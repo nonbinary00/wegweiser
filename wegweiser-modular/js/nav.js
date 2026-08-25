@@ -2654,6 +2654,24 @@ import { record, getTestName } from './logger.js';
     // RIGHT. (Not yet used for any instruction -- logging only.)
     var headingErrorDeg = normalizeSignedDeg(desiredRouteHeadingDeg - cameraHeadingWorldDeg);
 
+    // Diagnostic-only: the SAME yaw formula as relativeCameraYawDeg above,
+    // applied to POSIT's non-selected (alternative) branch (see distance.js/
+    // vendor/posit.js) -- exposed purely so field logs can show whether the two
+    // branches are near-tied when the observed yaw jumps between clusters.
+    // null whenever the alternative branch wasn't available/valid for this
+    // frame. Never read by the classifier below; never affects navState,
+    // stability, or TTS.
+    var altR = poseResult.alternativeRotation;
+    var alternativeRelativeCameraYawDeg = altR ? Math.atan2(altR[2][0], altR[2][2]) * 180 / Math.PI : null;
+    if(alternativeRelativeCameraYawDeg != null && !isFinite(alternativeRelativeCameraYawDeg)){
+      alternativeRelativeCameraYawDeg = null;
+    }
+    // Normalize "field absent" (e.g. a test-mocked poseResult without these
+    // keys) the same as "explicitly null" (a real poseResult whose alternative
+    // branch was invalid/unavailable) -- both mean "no alternative-branch data".
+    var alternativePoseError = poseResult.alternativePoseError == null ? null : poseResult.alternativePoseError;
+    var poseErrorGap = poseResult.poseErrorGap == null ? null : poseResult.poseErrorGap;
+
     navLog("TAG_ORIENTATION_POSE", {
       tagId: tagId,
       navState: navState,
@@ -2667,7 +2685,13 @@ import { record, getTestName } from './logger.js';
       markerFacingWorldDeg: r1(markerFacingWorldDeg),
       cameraHeadingWorldDeg: r1(cameraHeadingWorldDeg),
       desiredRouteHeadingDeg: r1(desiredRouteHeadingDeg),
-      headingErrorDeg: r1(headingErrorDeg)
+      headingErrorDeg: r1(headingErrorDeg),
+      // Alternative-branch diagnostics (see comment above) -- null when POSIT's
+      // second branch wasn't valid/available this frame.
+      alternativeRelativeCameraYawDeg: r1(alternativeRelativeCameraYawDeg),
+      alternativePoseError: alternativePoseError,
+      poseErrorGap: poseErrorGap,
+      poseErrorGapRatio: r1(poseResult.poseErrorGapRatio)
     });
 
     orientationHeadingErrorSamples.push(headingErrorDeg);
@@ -2771,6 +2795,10 @@ import { record, getTestName } from './logger.js';
       cameraHeadingWorldDeg: r1(cameraHeadingWorldDeg),
       desiredRouteHeadingDeg: r1(desiredRouteHeadingDeg),
       headingErrorDeg: r1(headingErrorDeg),
+      alternativeRelativeCameraYawDeg: r1(alternativeRelativeCameraYawDeg),
+      alternativePoseError: alternativePoseError,
+      poseErrorGap: poseErrorGap,
+      poseErrorGapRatio: r1(poseResult.poseErrorGapRatio),
       stability: stability,
       classification: gate.classification,
       classificationReason: gate.reason
