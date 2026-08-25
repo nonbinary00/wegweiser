@@ -623,6 +623,13 @@ import { record, getTestName } from './logger.js';
     // the same segment never mixes samples with an earlier attempt.
     orientationHeadingErrorSamples = [];
     lastLoggedOrientationClassification = null;
+    // Temporal branch-continuity state (see selectOrientationBranch()) belongs
+    // to this same per-segment lifecycle -- a later, unrelated re-entry into
+    // the same or a different segment must bootstrap fresh (POSIT's own best
+    // pick, see selectOrientationBranch()'s "initial-best" path) rather than
+    // being temporally "continuous" with a heading from a previous approach.
+    previousSelectedOrientationYawDeg = null;
+    previousSelectedOrientationBranch = null;
   }
 
 
@@ -2492,6 +2499,18 @@ import { record, getTestName } from './logger.js';
   var orientationHeadingErrorSamples = [];
   var lastLoggedOrientationClassification = null; // change-based ORIENTATION_CLASSIFICATION logging
 
+  // ---- Temporal branch continuity (diagnostic/orientation-layer only -- see
+  // selectOrientationBranch() below). Field logs confirmed POSIT's best/
+  // alternative branches swapping frame-to-frame while the observed marker
+  // barely moved (wegweiser-v13-log-20260825-113344(9).json); this state lets
+  // the orientation path prefer whichever candidate is temporally consistent
+  // with the last ACCEPTED orientation yaw, instead of re-polluting the
+  // stability window every time POSIT's own tie-break flips. Belongs to
+  // exactly one segment's worth of continuity, same lifecycle as the stability
+  // window above -- reset alongside it in resetSegmentState().
+  var previousSelectedOrientationYawDeg = null;
+  var previousSelectedOrientationBranch = null; // "best" | "alternative" | null
+
   // ---- Classification gates/zones (diagnostic thresholds only -- nothing here
   // feeds a spoken instruction or a navigation decision yet). Centralized so they
   // are easy to find and revisit once more field data exists; none of these were
@@ -2515,6 +2534,19 @@ import { record, getTestName } from './logger.js';
   // headingErrorDeg sign convention documented below.
   var ORIENTATION_ALIGNED_ZONE_DEG = 20;
   var ORIENTATION_OPPOSITE_ZONE_DEG = 25;
+
+  // Ambiguity criterion for the temporal branch-continuity override (see
+  // selectOrientationBranch() below). Field evidence
+  // (wegweiser-v13-log-20260825-113344(9).json): the two cleanest confirmed
+  // branch-swap frames both had poseErrorGap of 0 and 1 (best~=-16.44/
+  // alt~=+13.63 at gap=0; best~=+12.54/alt~=-15.06 at gap=1) -- i.e. POSIT's
+  // two candidates were within 0-1 px of an exact reprojection tie. Over the
+  // WHOLE session, poseErrorGap=3 was actually the single most common value
+  // (28 of 69 frames) regardless of whether a swap occurred -- so a looser
+  // cutoff like <=3 would let continuity second-guess POSIT on the majority
+  // of all frames, not just genuinely ambiguous ones. Kept deliberately
+  // conservative at the evidence's own near-exact-tie boundary instead.
+  var ORIENTATION_BRANCH_AMBIGUOUS_MAX_GAP = 1;
 
   function normalizeDeg(deg){
     var d = deg % 360;
@@ -2582,6 +2614,58 @@ import { record, getTestName } from './logger.js';
     return { classification: classifyHeadingZone(headingErrorDeg), reason: null };
   }
 
+  // Wrap-safe circular distance in degrees between two headings -- always
+  // takes the shorter way around the circle (e.g. 179 and -178 are 3deg
+  // apart, not 357). Built on the same normalizeSignedDeg() used everywhere
+  // else in this module for wrap handling.
+  function circularDistanceDeg(a, b){
+    return Math.abs(normalizeSignedDeg(a - b));
+  }
+
+  // Diagnostic-only temporal continuity for the POSIT best/alternative branch
+  // ambiguity (see distance.js/vendor/posit.js and the field-log evidence
+  // above ORIENTATION_BRANCH_AMBIGUOUS_MAX_GAP): POSIT recomputes both
+  // candidate rotations fresh every frame with no memory of the previous
+  // frame's choice, so when the two branches are near-tied in reprojection
+  // error, ordinary sub-pixel jitter can flip which one "wins" even though the
+  // observed marker barely moved. This function does NOT change
+  // estimatePose()'s own selection (used by distance/arrival/routing) -- it
+  // only chooses which of the two ALREADY-COMPUTED yaw candidates the
+  // ORIENTATION path uses, by preferring whichever is closer to the previously
+  // SELECTED orientation yaw, and ONLY when the two branches are ambiguous
+  // enough (poseErrorGap at or below the threshold). A clearly-better POSIT
+  // branch is never second-guessed.
+  //
+  // desiredRouteHeadingDeg is deliberately NOT a parameter here and must never
+  // become one -- branch choice is based only on POSIT reprojection quality
+  // and temporal continuity, never on which branch "looks more aligned with
+  // the route" (that would be confirmation bias and could hide a real wrong
+  // orientation).
+  //
+  // Pure/stateless (all inputs passed in, including the previous yaw) so it is
+  // unit-testable independently of maybeLogOrientationDiagnostics() and its
+  // module-level continuity state.
+  function selectOrientationBranch(bestYawDeg, alternativeYawDeg, poseErrorGap, previousYawDeg){
+    if(previousYawDeg == null){
+      // Bootstrap: nothing to be temporally consistent WITH yet. Always
+      // POSIT's own best pick -- never the alternative, even if it happened
+      // to look more "plausible" some other way.
+      return { yawDeg: bestYawDeg, branch: "best", reason: "initial-best" };
+    }
+    if(alternativeYawDeg == null || poseErrorGap == null){
+      return { yawDeg: bestYawDeg, branch: "best", reason: "no-alternative" };
+    }
+    if(poseErrorGap > ORIENTATION_BRANCH_AMBIGUOUS_MAX_GAP){
+      return { yawDeg: bestYawDeg, branch: "best", reason: "best-clear-error" };
+    }
+    var distToBest = circularDistanceDeg(bestYawDeg, previousYawDeg);
+    var distToAlternative = circularDistanceDeg(alternativeYawDeg, previousYawDeg);
+    if(distToAlternative < distToBest){
+      return { yawDeg: alternativeYawDeg, branch: "alternative", reason: "continuity-alternative" };
+    }
+    return { yawDeg: bestYawDeg, branch: "best", reason: "continuity-best" };
+  }
+
   // Called from main-loop.js for EVERY detected marker this frame (not only the
   // currently "expected" one) -- for the active segment's FROM tag, that tag is
   // the ALREADY-reached/current tag (expectedNextTagId points to the next tag,
@@ -2640,27 +2724,14 @@ import { record, getTestName } from './logger.js';
       return { ok: false, reason: "non-finite-yaw" };
     }
 
-    // See the accompanying feasibility audit for the derivation/sign convention:
-    // markerFacingWorldDeg is the direction the tag's printed face points TOWARD
-    // the viewer (dir_deg); a camera squarely facing the tag is therefore looking
-    // in the OPPOSITE direction (+180), adjusted by the measured relative yaw
-    // (positive relativeCameraYawDeg = camera turned toward its own right, which
-    // DECREASES world heading in this CCW-positive convention, hence the minus).
-    var markerFacingWorldDeg = normalizeDeg(fromMarker.dir_deg);
-    var cameraHeadingWorldDeg = normalizeDeg(markerFacingWorldDeg + 180 - relativeCameraYawDeg);
-    var desiredRouteHeadingDeg = bearingDeg(fromMarker, toMarker);
-    // Positive headingErrorDeg: desired heading is more counter-clockwise (to the
-    // LEFT) than the current camera heading. Negative: desired heading is to the
-    // RIGHT. (Not yet used for any instruction -- logging only.)
-    var headingErrorDeg = normalizeSignedDeg(desiredRouteHeadingDeg - cameraHeadingWorldDeg);
-
     // Diagnostic-only: the SAME yaw formula as relativeCameraYawDeg above,
     // applied to POSIT's non-selected (alternative) branch (see distance.js/
     // vendor/posit.js) -- exposed purely so field logs can show whether the two
     // branches are near-tied when the observed yaw jumps between clusters.
     // null whenever the alternative branch wasn't available/valid for this
-    // frame. Never read by the classifier below; never affects navState,
-    // stability, or TTS.
+    // frame. Never affects navState or TTS; DOES feed the temporal-continuity
+    // branch selection just below (orientation path only -- see
+    // selectOrientationBranch()).
     var altR = poseResult.alternativeRotation;
     var alternativeRelativeCameraYawDeg = altR ? Math.atan2(altR[2][0], altR[2][2]) * 180 / Math.PI : null;
     if(alternativeRelativeCameraYawDeg != null && !isFinite(alternativeRelativeCameraYawDeg)){
@@ -2671,6 +2742,42 @@ import { record, getTestName } from './logger.js';
     // branch was invalid/unavailable) -- both mean "no alternative-branch data".
     var alternativePoseError = poseResult.alternativePoseError == null ? null : poseResult.alternativePoseError;
     var poseErrorGap = poseResult.poseErrorGap == null ? null : poseResult.poseErrorGap;
+
+    // Temporal branch continuity (orientation path only -- see
+    // selectOrientationBranch() above). This NEVER touches poseResult.rotation
+    // itself, distanceM, translation, or estimatePose()'s own selection --
+    // only which of the two already-computed yaw candidates feeds the
+    // orientation-specific heading/error/stability/classification below.
+    var branchChoice = selectOrientationBranch(
+      relativeCameraYawDeg, alternativeRelativeCameraYawDeg, poseErrorGap, previousSelectedOrientationYawDeg);
+    var selectedOrientationYawDeg = branchChoice.yawDeg;
+    var selectedPoseBranch = branchChoice.branch;
+    var orientationBranchSwitched = previousSelectedOrientationBranch != null &&
+      selectedPoseBranch !== previousSelectedOrientationBranch;
+    var previousToBestDeg = previousSelectedOrientationYawDeg == null ? null :
+      circularDistanceDeg(relativeCameraYawDeg, previousSelectedOrientationYawDeg);
+    var previousToAlternativeDeg = (previousSelectedOrientationYawDeg == null || alternativeRelativeCameraYawDeg == null) ? null :
+      circularDistanceDeg(alternativeRelativeCameraYawDeg, previousSelectedOrientationYawDeg);
+    previousSelectedOrientationYawDeg = selectedOrientationYawDeg;
+    previousSelectedOrientationBranch = selectedPoseBranch;
+
+    // See the accompanying feasibility audit for the derivation/sign convention:
+    // markerFacingWorldDeg is the direction the tag's printed face points TOWARD
+    // the viewer (dir_deg); a camera squarely facing the tag is therefore looking
+    // in the OPPOSITE direction (+180), adjusted by the measured relative yaw
+    // (positive relativeCameraYawDeg = camera turned toward its own right, which
+    // DECREASES world heading in this CCW-positive convention, hence the minus).
+    // Uses selectedOrientationYawDeg (NOT the raw relativeCameraYawDeg) so the
+    // continuity fix above actually reaches the stability window/classifier --
+    // this is the orientation-only path; distance/arrival/routing never read
+    // cameraHeadingWorldDeg or headingErrorDeg.
+    var markerFacingWorldDeg = normalizeDeg(fromMarker.dir_deg);
+    var cameraHeadingWorldDeg = normalizeDeg(markerFacingWorldDeg + 180 - selectedOrientationYawDeg);
+    var desiredRouteHeadingDeg = bearingDeg(fromMarker, toMarker);
+    // Positive headingErrorDeg: desired heading is more counter-clockwise (to the
+    // LEFT) than the current camera heading. Negative: desired heading is to the
+    // RIGHT. (Not yet used for any instruction -- logging only.)
+    var headingErrorDeg = normalizeSignedDeg(desiredRouteHeadingDeg - cameraHeadingWorldDeg);
 
     navLog("TAG_ORIENTATION_POSE", {
       tagId: tagId,
@@ -2691,7 +2798,18 @@ import { record, getTestName } from './logger.js';
       alternativeRelativeCameraYawDeg: r1(alternativeRelativeCameraYawDeg),
       alternativePoseError: alternativePoseError,
       poseErrorGap: poseErrorGap,
-      poseErrorGapRatio: r1(poseResult.poseErrorGapRatio)
+      poseErrorGapRatio: r1(poseResult.poseErrorGapRatio),
+      // Temporal branch-continuity diagnostics (see selectOrientationBranch()
+      // above) -- selectedOrientationYawDeg is what actually feeds
+      // cameraHeadingWorldDeg/headingErrorDeg/the stability window/the
+      // classifier below; relativeCameraYawDeg above stays the raw POSIT best,
+      // untouched, for comparison.
+      selectedOrientationYawDeg: r1(selectedOrientationYawDeg),
+      selectedPoseBranch: selectedPoseBranch,
+      selectedBranchReason: branchChoice.reason,
+      orientationBranchSwitched: orientationBranchSwitched,
+      previousToBestDeg: r1(previousToBestDeg),
+      previousToAlternativeDeg: r1(previousToAlternativeDeg)
     });
 
     orientationHeadingErrorSamples.push(headingErrorDeg);
@@ -2799,6 +2917,12 @@ import { record, getTestName } from './logger.js';
       alternativePoseError: alternativePoseError,
       poseErrorGap: poseErrorGap,
       poseErrorGapRatio: r1(poseResult.poseErrorGapRatio),
+      selectedOrientationYawDeg: r1(selectedOrientationYawDeg),
+      selectedPoseBranch: selectedPoseBranch,
+      selectedBranchReason: branchChoice.reason,
+      orientationBranchSwitched: orientationBranchSwitched,
+      previousToBestDeg: r1(previousToBestDeg),
+      previousToAlternativeDeg: r1(previousToAlternativeDeg),
       stability: stability,
       classification: gate.classification,
       classificationReason: gate.reason
@@ -2862,5 +2986,7 @@ export {
   bearingDeg,
   circularMeanDeg,
   classifyHeadingZone,
-  classifyOrientation
+  classifyOrientation,
+  circularDistanceDeg,
+  selectOrientationBranch
 };
