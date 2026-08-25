@@ -615,12 +615,14 @@ import { record, getTestName } from './logger.js';
     // segment, and a forward-skip retarget all independently guarantee no
     // start-candidate state can leak into the next route.
     resetStartCandidateState();
-    // Orientation-guidance PoC (see maybeLogOrientationDiagnostics() below): the
-    // rolling heading-error window belongs to exactly one segment's worth of
-    // samples -- reset on route start/end and every new segment exactly like the
-    // other per-segment diagnostic state above, so a later, unrelated re-entry
-    // into the 3->6 segment never mixes samples with an earlier attempt.
+    // Orientation-guidance diagnostics (see maybeLogOrientationDiagnostics()
+    // below): the rolling heading-error window and the last logged
+    // classification belong to exactly one segment's worth of samples -- reset
+    // on route start/end and every new segment exactly like the other
+    // per-segment diagnostic state above, so a later, unrelated re-entry into
+    // the same segment never mixes samples with an earlier attempt.
     orientationHeadingErrorSamples = [];
+    lastLoggedOrientationClassification = null;
   }
 
 
@@ -2469,25 +2471,50 @@ import { record, getTestName } from './logger.js';
       reason: "no-valid-tag-visible" };
   }
 
-  // ==================== Orientation-guidance PoC (Tag 3 -> Tag 6, LOGGING ONLY) ====================
+  // ==================== Orientation-guidance diagnostics (LOGGING ONLY) ====================
   // Feasibility investigation, not a navigation feature: distance.js's existing
   // POSIT solve (estimatePose()) already computes a full pose (rotation +
   // translation) for every detected marker -- distanceMeters() has always
   // discarded the rotation immediately after use. This block reuses that SAME
   // solve (main-loop.js passes in the poseResult it already computed for this
   // marker this frame -- POSIT is never run a second time here) purely to log
-  // diagnostic heading-alignment data for the one segment 3->6, so the signal's
-  // real-world stability can be judged from field logs before any TTS/navigation
-  // decision is ever built on it. Never changes navState, segIndex,
-  // expectedNextTagId, or any spoken text.
+  // diagnostic heading-alignment data for the CURRENT active route segment
+  // (pathTagIds[segIndex] -> expectedNextTagId), whichever tag pair that is --
+  // so the signal's real-world stability can be judged from field logs before
+  // any TTS/navigation decision is ever built on it. Never changes navState,
+  // segIndex, expectedNextTagId, or any spoken text.
   //
   // Geometry (dir_deg, x_m, y_m) is read from MARKERS (graph.js, derived from
-  // graph-data.js's FLOOR_GEOMETRY) -- the Tag 3/Tag 6 coordinates are NOT
-  // duplicated as new constants here, only the tag IDs that scope this PoC are.
-  var ORIENTATION_POC_FROM_TAG = 3;
-  var ORIENTATION_POC_TO_TAG = 6;
+  // graph-data.js's FLOOR_GEOMETRY) -- no tag ID is hardcoded anywhere in this
+  // block; the qualifying gate and the classifier below are generic across any
+  // route edge.
   var ORIENTATION_STABILITY_WINDOW = 8; // rolling sample count, ~1-2s of frames at PROC_MS
   var orientationHeadingErrorSamples = [];
+  var lastLoggedOrientationClassification = null; // change-based ORIENTATION_CLASSIFICATION logging
+
+  // ---- Classification gates/zones (diagnostic thresholds only -- nothing here
+  // feeds a spoken instruction or a navigation decision yet). Centralized so they
+  // are easy to find and revisit once more field data exists; none of these were
+  // tuned from a single example.
+  //
+  // Distance gate: beyond this, the POSIT pose solve is not trusted for
+  // orientation (steep viewing angle / tag near the screen edge -- the same
+  // regime SETTINGS.reachedM's own comment already flags as unreliable).
+  // Conservative on purpose -- widening it requires field evidence, not a guess.
+  var ORIENTATION_TRUST_MAX_DISTANCE_M = 1.5;
+  // Stability gate: require a full rolling window of samples, and reject a
+  // window whose heading-error stddev is too high (noisy/uncertain measurement).
+  var ORIENTATION_MIN_STABLE_SAMPLES = ORIENTATION_STABILITY_WINDOW;
+  var ORIENTATION_MAX_STABLE_STDDEV_DEG = 10;
+  // Angle zones applied to the normalized, signed headingErrorDeg ([-180,180)):
+  // ALIGNED: |error| within this many degrees of 0 (the desired heading).
+  // OPPOSITE: |error| within this many degrees of +-180 (facing away/backwards)
+  // -- deliberately NOT folded into LEFT/RIGHT, since "turn around" is a
+  // different instruction from "turn left/right". Anything between the two
+  // zones is LEFT (positive error) or RIGHT (negative error), per the
+  // headingErrorDeg sign convention documented below.
+  var ORIENTATION_ALIGNED_ZONE_DEG = 20;
+  var ORIENTATION_OPPOSITE_ZONE_DEG = 25;
 
   function normalizeDeg(deg){
     var d = deg % 360;
@@ -2509,31 +2536,58 @@ import { record, getTestName } from './logger.js';
       toMarker.x_m - fromMarker.x_m) * 180 / Math.PI);
   }
 
+  // Pure angle-zone classification -- assumes the distance/stability gates
+  // already passed. Exported standalone so the zone boundaries can be
+  // unit-tested without driving any pose/stability state.
+  function classifyHeadingZone(headingErrorDeg){
+    var abs = Math.abs(headingErrorDeg);
+    if(abs >= 180 - ORIENTATION_OPPOSITE_ZONE_DEG) return "OPPOSITE";
+    if(abs <= ORIENTATION_ALIGNED_ZONE_DEG) return "ALIGNED";
+    return headingErrorDeg > 0 ? "LEFT" : "RIGHT";
+  }
+
+  // Combines the distance gate, the stability gate, and the angle-zone
+  // classification into the final diagnostic result. Pure/stateless (all
+  // inputs passed in) so it is unit-testable independently of
+  // maybeLogOrientationDiagnostics() and its pose/nav-state plumbing.
+  function classifyOrientation(distanceM, stability, headingErrorDeg){
+    if(distanceM == null || distanceM > ORIENTATION_TRUST_MAX_DISTANCE_M){
+      return { classification: "UNSTABLE_DISTANCE", reason: "distance-exceeds-trust-threshold" };
+    }
+    if(!stability || stability.sampleCount < ORIENTATION_MIN_STABLE_SAMPLES){
+      return { classification: "UNSTABLE_WINDOW", reason: "insufficient-samples" };
+    }
+    if(stability.stdDevDeg > ORIENTATION_MAX_STABLE_STDDEV_DEG){
+      return { classification: "UNSTABLE_WINDOW", reason: "high-stddev" };
+    }
+    return { classification: classifyHeadingZone(headingErrorDeg), reason: null };
+  }
+
   // Called from main-loop.js for EVERY detected marker this frame (not only the
-  // currently "expected" one) -- during the 3->6 segment, Tag 3 itself is the
-  // ALREADY-reached/current tag (expectedNextTagId is 6, not 3), so a sighting of
-  // Tag 3 would never reach here if this were gated on "is this the expected tag"
-  // the way most of nav.js's other per-frame logic is. tagId is checked first and
-  // is the only thing read before confirming this call is even relevant, so this
-  // is a cheap no-op for every other marker/frame.
+  // currently "expected" one) -- for the active segment's FROM tag, that tag is
+  // the ALREADY-reached/current tag (expectedNextTagId points to the next tag,
+  // not this one), so a sighting of it would never reach here if this were
+  // gated on "is this the expected tag" the way most of nav.js's other
+  // per-frame logic is. tagId is checked first and is the only thing read
+  // before confirming this call is even relevant, so this is a cheap no-op for
+  // every other marker/frame.
   // Return value is purely a testability aid (nothing in main-loop.js's call site
   // reads it) -- logger.js has no data-accessor for its buffer (exportJson() is a
   // browser download/share side effect, not a return value), so tests assert on
-  // this return instead of the log itself. null = did not qualify for this PoC at
-  // all (wrong tag or wrong segment); {ok:false,reason} = qualified but could not
-  // compute (see TAG_ORIENTATION_POSE_UNAVAILABLE reasons); {ok:true,...} = the
-  // full computed diagnostic, mirroring exactly what TAG_ORIENTATION_POSE logs.
+  // this return instead of the log itself. null = did not qualify (wrong tag or
+  // no active segment); {ok:false,reason} = qualified but could not compute
+  // (see TAG_ORIENTATION_POSE_UNAVAILABLE reasons); {ok:true,...} = the full
+  // computed diagnostic, mirroring exactly what TAG_ORIENTATION_POSE and
+  // ORIENTATION_CLASSIFICATION log.
   function maybeLogOrientationDiagnostics(tagId, poseResult, corners, now){
-    if(tagId !== ORIENTATION_POC_FROM_TAG) return null;
-    // "current route segment is 3->6, or the start orientation is being determined
-    // from Tag 3 toward Tag 6" -- both cases are exactly "the segment currently
-    // being tracked (pathTagIds[segIndex] -> expectedNextTagId) is 3->6", whether
-    // Tag 3 was just reached mid-route or is itself the start tag (beginSegment()
-    // sets expectedNextTagId immediately, before any tracking begins -- see
-    // onStartTagConfirmed()/beginSegment()).
+    // Qualifying condition: tagId is the tag the active segment currently
+    // tracks FROM (pathTagIds[segIndex]), whether that tag was just reached
+    // mid-route or is itself the start tag (beginSegment() sets
+    // expectedNextTagId immediately, before any tracking begins -- see
+    // onStartTagConfirmed()/beginSegment()). Generic across ANY route edge --
+    // no tag ID is hardcoded here.
     var qualifies = navigationActive && pathTagIds &&
-      pathTagIds[segIndex] === ORIENTATION_POC_FROM_TAG &&
-      expectedNextTagId === ORIENTATION_POC_TO_TAG;
+      tagId === pathTagIds[segIndex] && expectedNextTagId != null;
     if(!qualifies) return null;
 
     if(!poseResult || !poseResult.rotation){
@@ -2548,8 +2602,8 @@ import { record, getTestName } from './logger.js';
         reason: "invalid-corners" });
       return { ok: false, reason: "invalid-corners" };
     }
-    var fromMarker = MARKERS[ORIENTATION_POC_FROM_TAG];
-    var toMarker = MARKERS[ORIENTATION_POC_TO_TAG];
+    var fromMarker = MARKERS[pathTagIds[segIndex]];
+    var toMarker = MARKERS[expectedNextTagId];
     if(!fromMarker || !toMarker || fromMarker.dir_deg == null ||
        fromMarker.x_m == null || toMarker.x_m == null){
       navLog("TAG_ORIENTATION_POSE_UNAVAILABLE", { tagId: tagId, navState: navState,
@@ -2639,6 +2693,32 @@ import { record, getTestName } from './logger.js';
       stdDevDeg: stability.stdDevDeg
     });
 
+    var gate = classifyOrientation(poseResult.distanceM, stability, headingErrorDeg);
+
+    // Change-based logging: fires on the first classification for this segment
+    // and on every transition, but not once per identical frame -- keeps field
+    // logs readable without hiding a meaningful LEFT/RIGHT/ALIGNED/OPPOSITE/
+    // UNSTABLE_* transition.
+    if(gate.classification !== lastLoggedOrientationClassification){
+      navLog("ORIENTATION_CLASSIFICATION", {
+        tagId: tagId,
+        navState: navState,
+        fromTag: pathTagIds[segIndex],
+        toTag: expectedNextTagId,
+        timestamp: now,
+        distanceM: r1(poseResult.distanceM),
+        cameraHeadingWorldDeg: r1(cameraHeadingWorldDeg),
+        desiredRouteHeadingDeg: r1(desiredRouteHeadingDeg),
+        headingErrorDeg: r1(headingErrorDeg),
+        sampleCount: stability.sampleCount,
+        spreadDeg: stability.spreadDeg,
+        stdDevDeg: stability.stdDevDeg,
+        classification: gate.classification,
+        reason: gate.reason
+      });
+      lastLoggedOrientationClassification = gate.classification;
+    }
+
     return {
       ok: true,
       tagId: tagId,
@@ -2649,7 +2729,9 @@ import { record, getTestName } from './logger.js';
       cameraHeadingWorldDeg: r1(cameraHeadingWorldDeg),
       desiredRouteHeadingDeg: r1(desiredRouteHeadingDeg),
       headingErrorDeg: r1(headingErrorDeg),
-      stability: stability
+      stability: stability,
+      classification: gate.classification,
+      classificationReason: gate.reason
     };
   }
 
@@ -2707,5 +2789,7 @@ export {
   maybeLogOrientationDiagnostics,
   normalizeDeg,
   normalizeSignedDeg,
-  bearingDeg
+  bearingDeg,
+  classifyHeadingZone,
+  classifyOrientation
 };
