@@ -623,6 +623,11 @@ import { record, getTestName } from './logger.js';
     // the same segment never mixes samples with an earlier attempt.
     orientationHeadingErrorSamples = [];
     lastLoggedOrientationClassification = null;
+    // Start-of-route orientation TTS confirmation gate (see declaration above)
+    // -- same per-segment lifecycle as the stability window it derives from.
+    orientationConfirmCandidate = null;
+    orientationConfirmCount = 0;
+    lastSpokenOrientationClassification = null;
     // Temporal branch-continuity state (see selectOrientationBranch()) belongs
     // to this same per-segment lifecycle -- a later, unrelated re-entry into
     // the same or a different segment must bootstrap fresh rather than being
@@ -2502,6 +2507,20 @@ import { record, getTestName } from './logger.js';
   var orientationHeadingErrorSamples = [];
   var lastLoggedOrientationClassification = null; // change-based ORIENTATION_CLASSIFICATION logging
 
+  // ---- Start-of-route orientation TTS confirmation gate (diagnostic/orientation
+  // layer only -- see maybeLogOrientationDiagnostics() below for where this is
+  // consumed). Deliberately separate from lastLoggedOrientationClassification
+  // above, which drives field-log readability only and has no confirmation-count
+  // or jump/degeneracy gating. Belongs to exactly one segment's worth of
+  // guidance, same lifecycle as the stability window above -- reset alongside it
+  // in resetSegmentState() so a later segment (or a later, unrelated re-entry
+  // into the same segment) never inherits a confirmation streak or a "already
+  // spoken" fact from an earlier approach.
+  var ORIENTATION_TTS_CONFIRM_FRAMES = 3;
+  var orientationConfirmCandidate = null; // classification currently accumulating confirmation frames
+  var orientationConfirmCount = 0;        // consecutive qualifying frames for that candidate
+  var lastSpokenOrientationClassification = null; // dedup: don't repeat the same confirmed instruction
+
   // ---- Temporal branch continuity (diagnostic/orientation-layer only -- see
   // selectOrientationBranch() below). Field logs confirmed POSIT's best/
   // alternative branches swapping frame-to-frame while the observed marker
@@ -3135,6 +3154,61 @@ import { record, getTestName } from './logger.js';
         reason: gate.reason
       });
       lastLoggedOrientationClassification = gate.classification;
+    }
+
+    // ==================== Start-of-route orientation TTS ====================
+    // Rare, start-only assistance: eligible ONLY on the route's first segment
+    // (segIndex===0 -- "start of route", not "start of every segment"), and
+    // ONLY while navState is still SEARCHING_NEXT_TAG. navState is set to
+    // SEARCHING_NEXT_TAG exclusively by beginSegment() and never reverts to it
+    // within the same segment (TRACKING/LOST_STOPPED both leave it permanently
+    // for this segment) -- so this check alone, re-evaluated every frame, is
+    // sufficient to permanently disable guidance the instant normal tracking
+    // begins, with no separate "disabled" flag needed. Also excludes the
+    // TRACKING_START_TAG approach phase for tag 1/11 (segIndex===0 there too,
+    // but navState differs), where expectedNextTagId is the approach target
+    // itself and headingErrorDeg above is not a meaningful route-heading error.
+    if(segIndex === 0 && navState === NavState.SEARCHING_NEXT_TAG){
+      var qualifyingConfirmFrame = !selectedYawJumped && !bothPoseCandidatesFarFromHistory;
+      if(qualifyingConfirmFrame && gate.classification === orientationConfirmCandidate){
+        orientationConfirmCount++;
+      } else {
+        orientationConfirmCandidate = qualifyingConfirmFrame ? gate.classification : null;
+        orientationConfirmCount = qualifyingConfirmFrame ? 1 : 0;
+      }
+      if(orientationConfirmCount >= ORIENTATION_TTS_CONFIRM_FRAMES){
+        var confirmedClassification = orientationConfirmCandidate;
+        // ALIGNED: confirmed silently, never spoken -- "no correction needed" IS
+        // the correct signal, and repeated confirmation must not re-trigger
+        // speech (lastSpokenOrientationClassification dedup below still guards
+        // against a spurious re-announcement if it later flips back).
+        // OPPOSITE: confirmed and logged like LEFT/RIGHT (diagnostics only) but
+        // deliberately NOT spoken yet -- no controlled field data validates
+        // OPPOSITE under the current bootstrap/continuity pipeline (see the
+        // accompanying analysis). Revisit once that data exists.
+        if((confirmedClassification === "LEFT" || confirmedClassification === "RIGHT" ||
+            confirmedClassification === "OPPOSITE") &&
+           confirmedClassification !== lastSpokenOrientationClassification){
+          lastSpokenOrientationClassification = confirmedClassification;
+          navLog("ORIENTATION_TTS_CONFIRMED", {
+            tagId: tagId, navState: navState, fromTag: pathTagIds[segIndex],
+            toTag: expectedNextTagId, timestamp: now,
+            classification: confirmedClassification, confirmFrames: orientationConfirmCount,
+            meanHeadingErrorDeg: stability.meanHeadingErrorDeg, stdDevDeg: stability.stdDevDeg
+          });
+          if(confirmedClassification === "LEFT" || confirmedClassification === "RIGHT"){
+            var orientationText = confirmedClassification === "LEFT" ?
+              "Drehen Sie sich nach links." : "Drehen Sie sich nach rechts.";
+            var orientationResult = say(orientationText, ttsOpts({interrupt: false,
+              source: "nav.orientationGuidance", category: "ACTION_REQUIRED"}));
+            navLog("TTS_ORIENTATION_GUIDANCE", {
+              classification: confirmedClassification, text: orientationText,
+              speechId: orientationResult.speechId, accepted: orientationResult.accepted,
+              suppressionReason: orientationResult.suppressionReason
+            });
+          }
+        }
+      }
     }
 
     return {
