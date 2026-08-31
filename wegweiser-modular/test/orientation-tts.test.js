@@ -137,6 +137,48 @@ test('RIGHT: confirms after 3 consecutive clean frames and speaks exactly once',
   assert.deepEqual(spokenTexts, ['Drehen Sie sich nach rechts.']);
 });
 
+// Field log 17 regression: RIGHT was correctly confirmed and say() was called,
+// but another announcement (a long nav.scanHint utterance) was still active,
+// so the request was suppressed with suppressionReason "busy". The bug: the
+// classification was nevertheless treated as already spoken, so the same
+// RIGHT was never retried for the rest of the segment even though the user
+// never actually heard it. Fix under test: only dedup-lock a LEFT/RIGHT
+// classification once say() actually accepts it -- a suppressed attempt must
+// let the very next qualifying frame retry naturally through the existing
+// confirmation logic (no new timer/queue/retry mechanism).
+test('a suppressed (busy) RIGHT is not treated as spoken, and the next confirming frame retries and succeeds', () => {
+  var seg = enterRoute();
+  var rightYaw = alignmentYaw() - 40; // RIGHT zone
+
+  feedStable(seg.fromTag, rightYaw, 9, 1000); // window fill (8) + 1 confirming frame = count 2
+  assert.deepEqual(spokenTexts, []);
+
+  // Simulate another announcement already speaking, exactly like field log
+  // 17's overlapping nav.scanHint utterance -- interrupt:false on
+  // nav.orientationGuidance means this frame's attempt is suppressed as busy.
+  globalThis.speechSynthesis.pending = true;
+  var suppressed;
+  try {
+    suppressed = feedStable(seg.fromTag, rightYaw, 1, 1009); // 3rd consecutive clean frame
+  } finally {
+    globalThis.speechSynthesis.pending = false;
+  }
+  assert.equal(suppressed.classification, 'RIGHT');
+  assert.deepEqual(spokenTexts, [], 'a suppressed request must never appear in spokenTexts');
+
+  // The classification must NOT have been treated as already spoken -- the
+  // very next qualifying frame (still RIGHT, still clean, no longer busy)
+  // retries naturally and succeeds.
+  var retried = feedStable(seg.fromTag, rightYaw, 1, 1010);
+  assert.equal(retried.classification, 'RIGHT');
+  assert.deepEqual(spokenTexts, ['Drehen Sie sich nach rechts.']);
+
+  // Once actually accepted, the existing dedup behavior resumes: further
+  // identical clean frames must not repeat it.
+  feedStable(seg.fromTag, rightYaw, 5, 1011);
+  assert.deepEqual(spokenTexts, ['Drehen Sie sich nach rechts.']);
+});
+
 test('ALIGNED: confirmed silently -- never spoken, even well past the confirmation threshold', () => {
   var seg = enterRoute();
   var alignedYaw = alignmentYaw();

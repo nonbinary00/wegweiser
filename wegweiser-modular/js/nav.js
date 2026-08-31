@@ -3189,7 +3189,6 @@ import { record, getTestName } from './logger.js';
         if((confirmedClassification === "LEFT" || confirmedClassification === "RIGHT" ||
             confirmedClassification === "OPPOSITE") &&
            confirmedClassification !== lastSpokenOrientationClassification){
-          lastSpokenOrientationClassification = confirmedClassification;
           navLog("ORIENTATION_TTS_CONFIRMED", {
             tagId: tagId, navState: navState, fromTag: pathTagIds[segIndex],
             toTag: expectedNextTagId, timestamp: now,
@@ -3206,6 +3205,20 @@ import { record, getTestName } from './logger.js';
               speechId: orientationResult.speechId, accepted: orientationResult.accepted,
               suppressionReason: orientationResult.suppressionReason
             });
+            // Field log 17: say() can be suppressed (e.g. "busy", another
+            // announcement already speaking) with interrupt:false above -- only
+            // count this classification as actually delivered (and therefore
+            // dedup-eligible) when accepted. Left unset on suppression, so the
+            // very next qualifying frame's re-confirmation (confirmedClassification
+            // still !== lastSpokenOrientationClassification) naturally retries --
+            // no separate retry/queue mechanism.
+            if(orientationResult.accepted){
+              lastSpokenOrientationClassification = confirmedClassification;
+            }
+          } else {
+            // OPPOSITE: log-only, no say() call/acceptance to gate on -- keep the
+            // prior unconditional dedup behavior exactly as before.
+            lastSpokenOrientationClassification = confirmedClassification;
           }
         }
       }
