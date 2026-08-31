@@ -79,6 +79,42 @@ import { record, getTestName } from './logger.js';
 
   var emaDist = null;
   var minTrackDist = null;        // smallest measured distance (progress reference)
+  // Start-approach-only baseline (see handleTracking()'s near-loss-fallback branch
+  // below): the arrival distance captured on the FIRST tracked frame of a
+  // TRACKING_START_TAG approach, never overwritten afterward -- unlike
+  // minTrackDist above (which tracks the closest distance seen and keeps
+  // shrinking), this stays fixed at "how far away the approach started" so a
+  // later loss can be checked for genuine progress (startApproachBaselineDist -
+  // minTrackDist), not just closeness. Meaningless outside a start approach;
+  // reset alongside minTrackDist in resetSegmentState().
+  var startApproachBaselineDist = null;
+  // Near-loss-fallback guard, TRACKING_START_TAG only (see handleTracking()) --
+  // field logs (wegweiser-v13-log-20260831-134108(50)/134227(52).json) showed the
+  // global fallback accepting a stationary user (~0.01-0.02m of net movement) as
+  // "arrived" at Tag 1, and a shallow/ambiguous drift
+  // (wegweiser-v13-log-20260825-151856(17).json, ~0.12m) still ~0.77m short of
+  // startTagReachedM. Two independent conditions are required together, since
+  // either alone was insufficient in the field data (a real ~0.4m approach that
+  // stops at 1.5m is still too far from the 1.0m target; a close-looking but
+  // never-actually-approached distance is not evidence of arrival either):
+  //   START_APPROACH_MIN_PROGRESS_M -- baselineDist - minTrackDist must clear
+  //     this to rule out noise/stationary readings. Field noise floor: largest
+  //     observed net drift with zero real movement was ~0.04m (log 49's flat
+  //     phase, 75 frames) and single-frame swings up to ~0.17m; the ambiguous
+  //     log 17 case drifted ~0.12m. 0.3m sits comfortably above all of these
+  //     while remaining far below the ~0.9m of real, sustained progress observed
+  //     once genuine approach begins (log 49's descent phase).
+  //   START_APPROACH_PROXIMITY_MARGIN_M -- reuses the SAME 0.4m already used
+  //     elsewhere in this near-loss-fallback condition (the lastRawDist vs.
+  //     minTrackDist slack just below) and already implicit in the default-tag
+  //     relationship (SETTINGS.reachedM 1.8 + 0.4 = SETTINGS.nearLossFallbackM
+  //     2.2) -- not a new, unrelated number. Applied to startTagReachedM (1.0)
+  //     instead of the global fallback ceiling, giving 1.4m: strictly tighter
+  //     than nearLossFallbackM (2.2m), and by design, NOT reused from it (see
+  //     accompanying analysis for why the global ceiling is too loose for the
+  //     tightened start-tag threshold specifically).
+  var START_APPROACH_MIN_PROGRESS_M = 0.3;
+  var START_APPROACH_PROXIMITY_MARGIN_M = 0.4;
   var rawRecent = [];             // last N raw distances (window for "most recent minimum")
   var lastRawDist = null;         // last valid raw distance
   var lastRawAt = 0;              // timestamp of the last valid measurement
@@ -570,6 +606,7 @@ import { record, getTestName } from './logger.js';
     candId = null; candCount = 0;
     lastAimZone = null; lastAimAt = 0;
     minTrackDist = null;
+    startApproachBaselineDist = null;
     awayWarned = false;
     minAwayEmaDist = null;
     awayPostConfirmSamples = 0;
@@ -1747,6 +1784,13 @@ import { record, getTestName } from './logger.js';
       var arrival = emaDist;
       if(rawDist != null && rawDist < arrival) arrival = rawDist;
 
+      // Start-approach baseline (see declaration above): captured once, from the
+      // first tracked frame of a TRACKING_START_TAG approach, never overwritten
+      // afterward -- feeds the near-loss-fallback progress check further below.
+      if(trackingStartTagActive && startApproachBaselineDist == null){
+        startApproachBaselineDist = arrival;
+      }
+
       // Debug: ~1x pro Sekunde Zustand loggen
       if(now - lastTrackDbgAt >= 1000){
         lastTrackDbgAt = now;
@@ -1849,14 +1893,38 @@ import { record, getTestName } from './logger.js';
     //   - LETZTE Messung nahe am Minimum => Nutzer naeherte sich beim Verlust,
     //     entfernte sich nicht
     //   - keine "Sie entfernen sich"-Warnung im Abschnitt
+    //
+    // TRACKING_START_TAG only, additionally: the global nearLossFallbackM (2.2m)
+    // checks above are far looser than the tightened startTagReachedM (1.0m) this
+    // approach is actually aiming for (see accompanying analysis) -- field logs
+    // wegweiser-v13-log-20260831-134108(50).json/134227(52).json showed a
+    // stationary user (~0.01-0.02m net movement) accepted as "arrived" at ~1.56m/
+    // ~1.68m, and wegweiser-v13-log-20260825-151856(17).json showed a shallow
+    // ~0.12m drift accepted at ~1.77m, still ~0.77m short of the real target.
+    // startApproachEvidenceOk requires BOTH genuine progress from the approach's
+    // own baseline AND that the closest distance reached was actually close to
+    // startTagReachedM (not the global ceiling) -- neither alone was sufficient
+    // in the field data (a real ~0.4m approach that stops at 1.5m is still too
+    // far; a close-looking but never-approached distance is not arrival either).
+    // Always true outside a start approach, so ordinary-edge/4->9 near-loss
+    // behavior is completely unaffected.
+    var startApproachEvidenceOk = !trackingStartTagActive || (
+      startApproachBaselineDist != null && minTrackDist != null &&
+      (startApproachBaselineDist - minTrackDist) >= START_APPROACH_MIN_PROGRESS_M &&
+      minTrackDist <= (SETTINGS.startTagReachedM + START_APPROACH_PROXIMITY_MARGIN_M));
+
     if(!awayWarned &&
        trackDetCount >= SETTINGS.nearLossMinDets &&
        recentMin != null && recentMin <= SETTINGS.nearLossFallbackM &&
        minTrackDist != null && minTrackDist <= SETTINGS.nearLossFallbackM &&
-       lastRawDist != null && lastRawDist <= minTrackDist + 0.4){
+       lastRawDist != null && lastRawDist <= minTrackDist + 0.4 &&
+       startApproachEvidenceOk){
       navLog("REACHED reason=near-loss-fallback", { expectedTag: expectedNextTagId,
         lastRaw: r1(lastRawDist), recentMin: r1(recentMin), minSeg: r1(minTrackDist),
-        lostForMs: Math.round(lostFor), dets: trackDetCount });
+        lostForMs: Math.round(lostFor), dets: trackDetCount,
+        startApproachBaselineDist: r1(startApproachBaselineDist),
+        startApproachProgressM: startApproachBaselineDist != null && minTrackDist != null ?
+          r1(startApproachBaselineDist - minTrackDist) : null });
       // See the comment at the other reachPoint() call above -- same branch, same
       // rationale.
       if(trackingStartTagActive) reachStartTag("near-loss-fallback");
