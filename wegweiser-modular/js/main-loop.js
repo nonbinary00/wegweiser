@@ -19,8 +19,8 @@ import {
   navState, NavState, navigationActive, pathTagIds, destinationReached, destinationId,
   currentTagId, expectedNextTagId, segIndex, emaDist, candId, candCount, wrongCandId,
   wrongCandCount, lastExpectedVis, candLastSeenAt, trackingStartTagActive,
-  setNavState, handleTracking, handleLostStopped, onExpectedTagFound,
-  onOtherTagConfirmed, updateSkipCandidate, scanHint, aimGuidance,
+  setNavState, handleTracking, handleLostStopped, noteStartLossRecoveryCandidate,
+  onExpectedTagFound, onOtherTagConfirmed, updateSkipCandidate, scanHint, aimGuidance,
   touchExpectedSeen, touchCandidateSeen, setLastExpectedVisual, setWrongCandidate,
   setCandidate, setEmaDist, recordStartCandidateSample, noteStartCandidateConfirmed,
   checkStartCandidateWindow, maybeLogOrientationDiagnostics
@@ -219,6 +219,18 @@ import { running } from './camera.js';
           // The same restriction applies to a loss that occurred while Tag 1 was
           // still being tracked.
           if(!startPhase && !expectedDet && !trackingStartTagActive) updateSkipCandidate(detectedWithDist, now);
+          // Start-tag-loss recovery (Case B, see nav.js): while trackingStartTagActive
+          // stays true, updateSkipCandidate() above is intentionally skipped --
+          // pathTagIds is still only the single-element start-approach placeholder,
+          // not a real route, so the ordinary forward-candidate mechanism cannot
+          // apply here. noteStartLossRecoveryCandidate() is the dedicated, narrower
+          // mechanism for exactly this state (own stable-sighting counter, own
+          // confirmation path -- see nav.js); Case A (the original start tag
+          // reappearing) is entirely unaffected, handled below by
+          // handleLostStopped() exactly as before.
+          if(trackingStartTagActive && !expectedDet){
+            noteStartLossRecoveryCandidate(bestKnown && bestKnown.id !== expectedNextTagId ? bestKnown.id : null);
+          }
           if(navState === NavState.LOST_STOPPED){
             handleLostStopped(now, expectedDet);
           }
