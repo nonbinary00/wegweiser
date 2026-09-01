@@ -2081,7 +2081,7 @@ import { record, getTestName } from './logger.js';
   // enough (avoids false localization from detector noise, mirrors the existing
   // otherTagFrames tolerance) -- only a genuinely stable sighting may become a
   // recovery anchor.
-  function noteStartLossRecoveryCandidate(tagId){
+  function noteStartLossRecoveryCandidate(tagId, dist){
     if(tagId == null || tagId === expectedNextTagId){
       if(wrongCandId != null){ wrongCandId = null; wrongCandCount = 0; }
       return;
@@ -2089,28 +2089,41 @@ import { record, getTestName } from './logger.js';
     if(wrongCandId === tagId){ wrongCandCount++; } else { wrongCandId = tagId; wrongCandCount = 1; }
     if(wrongCandCount < SETTINGS.otherTagFrames) return;
     wrongCandId = null; wrongCandCount = 0;
-    attemptStartLossRecovery(tagId);
+    attemptStartLossRecovery(tagId, dist);
   }
 
   // Confirmed candidate (see above) -- verifies it is actually usable as a recovery
   // anchor before touching any state. destinationId is read but never reassigned
   // here: the originally selected destination is always preserved unchanged, exactly
   // as required. Uses the SAME route-calculation infrastructure as a first-time
-  // start-tag confirmation (findPathToDestination(), commitStartTag()) -- no second
-  // routing system.
-  function attemptStartLossRecovery(tagId){
+  // start-tag confirmation (findPathToDestination()) -- no second routing system.
+  //
+  // Safety fix (visible != reached): a stably CONFIRMED sighting is still only a
+  // sighting, not a location -- dist (main-loop.js's bestKnown.dist for this tag)
+  // is passed straight into the existing onStartTagConfirmed(tagId, winnerDist)
+  // entry point below, exactly as a first-time start-tag confirmation would. That
+  // function already implements the full "visible != reached" decision (defers via
+  // beginStartApproach() while farther than SETTINGS.startTagReachedM, commits
+  // immediately only when already within reach, and correctly special-cases
+  // tagId===1 via its own dedicated entrance flow) -- no separate distance/reach
+  // system, no threshold duplicated here.
+  function attemptStartLossRecovery(tagId, dist){
     if(tagId === currentTagId) return;   // just reached -- not an error (mirrors onOtherTagConfirmed())
     if(offRouteSaid[tagId]) return;      // already reported once during this approach
     var now = performance.now();
     if(now - lastWrongTagAt < SETTINGS.wrongTagCooldownMs) return;
     if(!MARKERS[tagId]) return;          // not a known graph node at all -- cannot anchor a route
+    if(destinationId == null) return;    // defensive: nothing to recover toward
 
     // Path validation (required before accepting any recovery anchor): reuses the
     // exact same findPathToDestination() a first-time start-tag confirmation would
-    // use. If no path exists, no route is replaced and no state is touched -- the
+    // use. If no path exists, no approach is started and no state is touched -- the
     // app stays exactly as it was, in LOST_STOPPED, still able to recover normally
     // via Case A (the original expected tag) or a later, different candidate tag.
-    // Reuses commitStartTag()'s own existing "no path" wording, unchanged.
+    // Reuses commitStartTag()'s own existing "no path" wording, unchanged. This is
+    // purely a validation read -- the route array itself is (re)computed later,
+    // from commitStartTag() itself, once the tag is actually physically reached
+    // (see below); it is not committed here.
     var pathResult = findPathToDestination(tagId, destinationId);
     if(!pathResult){
       var noPathText = (OFF_ROUTE_HINTS[tagId] || ("Erkannt: " + markerName(tagId) + ".")) +
@@ -2122,44 +2135,35 @@ import { record, getTestName } from './logger.js';
       return;
     }
 
-    var abandonedExpectedTag = expectedNextTagId;
-    navLog("START_LOSS_RECOVERY_ACCEPTED", { candidateTag: tagId,
-      abandonedExpectedTag: abandonedExpectedTag, destinationId: destinationId,
-      newPath: pathResult.path, newPathText: pathToText(pathResult.path) });
+    navLog("START_LOSS_RECOVERY_APPROACH_STARTED", { candidateTag: tagId,
+      candidateDist: r1(dist), abandonedExpectedTag: expectedNextTagId, destinationId: destinationId,
+      validatedPath: pathResult.path, validatedPathText: pathToText(pathResult.path) });
 
     // Safety requirement: the user must not silently continue in an unknown
-    // direction -- an explicit recovery message is spoken BEFORE the newly
-    // calculated route continues (commitStartTag() below speaks its own,
-    // route-specific first instruction immediately afterward). Reuses the existing
-    // OFF_ROUTE_HINTS wording used elsewhere for naming a detected tag; only the
-    // trailing sentence is new, since no existing phrase already describes this
-    // specific "originally expected marker not found, recalculating from here"
-    // situation.
+    // direction -- an explicit recovery message is spoken BEFORE the approach
+    // toward this new tag begins. Deliberately does NOT claim arrival or describe
+    // the route ("von hier neu berechnet"/"Sie sind bei ...") -- the tag may still
+    // be several meters away at this point (see dist above); onStartTagConfirmed()
+    // below speaks its own, route-specific first instruction later, only once the
+    // tag is actually reached. Reuses the existing OFF_ROUTE_HINTS wording used
+    // elsewhere for naming a detected tag; only the trailing sentence is new, since
+    // no existing phrase already describes this specific "originally expected
+    // marker not found again" situation.
     var recoveryText = (OFF_ROUTE_HINTS[tagId] || ("Erkannt: " + markerName(tagId) + ".")) +
-      " Die ursprüngliche Markierung wurde nicht wiedergefunden. Die Route wird von hier neu berechnet.";
+      " Die ursprüngliche Markierung wurde nicht wiedergefunden.";
     var recoveryResult = say(recoveryText, ttsOpts({interrupt:true, source:"nav.startLossRecovery",
       category:"ACTION_REQUIRED", expectedTag: tagId}));
     navLog("TTS_START_LOSS_RECOVERY", { candidateTag: tagId, text: recoveryText,
       speechId: recoveryResult.speechId });
 
-    // Stale start-approach state must not survive into the freshly committed route.
-    // pathTagIds/segIndex/expectedNextTagId still point at the abandoned tag (and
-    // are not touched by resetSegmentState(), which owns a different set of
-    // per-segment fields) -- cleared explicitly here, restoring the exact
-    // pre-start-phase invariant startNavigation() itself establishes, so
-    // commitStartTag() below runs from a clean slate exactly like a first-time
-    // start-tag confirmation. currentTagId is already null (the abandoned tag was,
-    // by construction, never reached -- see beginStartApproach()), so it is left
-    // untouched; commitStartTag() sets it fresh. resetSegmentState() is reused
-    // (not duplicated) for everything else it already owns -- trackingStartTagActive,
-    // genericStartApproachActive, wrongCandId/wrongCandCount, skip-candidate and
-    // start-candidate state, and per-segment orientation diagnostics.
-    pathTagIds = null;
-    segIndex = -1;
-    expectedNextTagId = null;
-    resetSegmentState();
-
-    commitStartTag(tagId);
+    // No manual pathTagIds/segIndex/expectedNextTagId reset here, and no direct
+    // commitStartTag() call: onStartTagConfirmed() below -- via beginStartApproach()
+    // (far away) or commitStartTag() (already within reach) -- already overwrites
+    // all three itself and calls resetSegmentState() internally, which already
+    // clears the abandoned approach's trackingStartTagActive,
+    // genericStartApproachActive, wrongCandId/wrongCandCount, and skip-/
+    // start-candidate state. Duplicating that reset here would be redundant.
+    onStartTagConfirmed(tagId, dist);
   }
 
   // ==================== Kontrollierter Routen-Skip (generisch) ====================

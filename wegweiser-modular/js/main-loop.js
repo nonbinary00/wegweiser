@@ -229,7 +229,8 @@ import { running } from './camera.js';
           // reappearing) is entirely unaffected, handled below by
           // handleLostStopped() exactly as before.
           if(trackingStartTagActive && !expectedDet){
-            noteStartLossRecoveryCandidate(bestKnown && bestKnown.id !== expectedNextTagId ? bestKnown.id : null);
+            var startLossCand = (bestKnown && bestKnown.id !== expectedNextTagId) ? bestKnown : null;
+            noteStartLossRecoveryCandidate(startLossCand ? startLossCand.id : null, startLossCand ? startLossCand.dist : null);
           }
           if(navState === NavState.LOST_STOPPED){
             handleLostStopped(now, expectedDet);
