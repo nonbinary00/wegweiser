@@ -19,7 +19,7 @@ import {
   navState, NavState, navigationActive, pathTagIds, destinationReached, destinationId,
   currentTagId, expectedNextTagId, segIndex, emaDist, candId, candCount, wrongCandId,
   wrongCandCount, lastExpectedVis, candLastSeenAt, trackingStartTagActive,
-  setNavState, handleTracking, handleLostStopped, noteStartLossRecoveryCandidate,
+  setNavState, handleTracking, handleLostStopped, noteOffRouteRecoveryCandidate,
   onExpectedTagFound, onOtherTagConfirmed, updateSkipCandidate, scanHint, aimGuidance,
   touchExpectedSeen, touchCandidateSeen, setLastExpectedVisual, setWrongCandidate,
   setCandidate, setEmaDist, recordStartCandidateSample, noteStartCandidateConfirmed,
@@ -206,6 +206,20 @@ import { running } from './camera.js';
           // phase, so a detected Tag 2 would otherwise be wrongly treated as a
           // forward candidate of itself.
           if(!startPhase && !expectedDet && !trackingStartTagActive) updateSkipCandidate(detectedWithDist, now);
+          // Generic mid-route off-route recovery (see nav.js): while ordinarily
+          // TRACKING toward a real, already-computed route (not the deferred
+          // start-approach phase, not trackingStartTagActive), a known tag that is
+          // NOT on the active path is otherwise silently dropped by
+          // updateSkipCandidate()'s own NOT_ON_ACTIVE_PATH rejection just above --
+          // noteOffRouteRecoveryCandidate() is the deliberate follow-up for exactly
+          // that case (own stable-sighting counter, own confirmation path -- see
+          // nav.js). Deliberately scoped to plain TRACKING only, not
+          // TRACKING_START_TAG: a tag interrupting an already-in-progress approach
+          // (to Tag 1, or to any recovery target) is out of scope here.
+          if(navState === NavState.TRACKING && !startPhase && !expectedDet && !trackingStartTagActive){
+            var trackingOffRouteCand = (bestKnown && bestKnown.id !== expectedNextTagId) ? bestKnown : null;
+            noteOffRouteRecoveryCandidate(trackingOffRouteCand ? trackingOffRouteCand.id : null, trackingOffRouteCand ? trackingOffRouteCand.dist : null);
+          }
         } else if(navState === NavState.LOST_STOPPED){
           if(expectedDet) touchExpectedSeen(now);
           // updateSkipCandidate() must run here before handleLostStopped(). A
@@ -219,18 +233,17 @@ import { running } from './camera.js';
           // The same restriction applies to a loss that occurred while Tag 1 was
           // still being tracked.
           if(!startPhase && !expectedDet && !trackingStartTagActive) updateSkipCandidate(detectedWithDist, now);
-          // Start-tag-loss recovery (Case B, see nav.js): while trackingStartTagActive
-          // stays true, updateSkipCandidate() above is intentionally skipped --
-          // pathTagIds is still only the single-element start-approach placeholder,
-          // not a real route, so the ordinary forward-candidate mechanism cannot
-          // apply here. noteStartLossRecoveryCandidate() is the dedicated, narrower
-          // mechanism for exactly this state (own stable-sighting counter, own
-          // confirmation path -- see nav.js); Case A (the original start tag
-          // reappearing) is entirely unaffected, handled below by
-          // handleLostStopped() exactly as before.
-          if(trackingStartTagActive && !expectedDet){
-            var startLossCand = (bestKnown && bestKnown.id !== expectedNextTagId) ? bestKnown : null;
-            noteStartLossRecoveryCandidate(startLossCand ? startLossCand.id : null, startLossCand ? startLossCand.dist : null);
+          // Off-route recovery candidate tracking (see nav.js) -- covers BOTH: (a)
+          // the original start-tag-loss case (trackingStartTagActive===true,
+          // pathTagIds is still only the start-approach placeholder) and (b) an
+          // ordinary mid-route loss (trackingStartTagActive===false, a real route
+          // is active and the user has walked away from it). Both share the exact
+          // same confirmation mechanism -- only the resulting approach target
+          // differs, decided entirely inside nav.js -- so a single, unconditional
+          // call covers both.
+          if(!expectedDet){
+            var lostOffRouteCand = (bestKnown && bestKnown.id !== expectedNextTagId) ? bestKnown : null;
+            noteOffRouteRecoveryCandidate(lostOffRouteCand ? lostOffRouteCand.id : null, lostOffRouteCand ? lostOffRouteCand.dist : null);
           }
           if(navState === NavState.LOST_STOPPED){
             handleLostStopped(now, expectedDet);
@@ -265,7 +278,7 @@ import { running } from './camera.js';
               ? SETTINGS.backTagFrames : SETTINGS.otherTagFrames;
             if(wrongCandCount >= needFrames){
               setWrongCandidate(null, 0);
-              onOtherTagConfirmed(bestKnown.id);
+              onOtherTagConfirmed(bestKnown.id, bestKnown.dist);
             }
           } else {
             setWrongCandidate(null, 0);

@@ -1,6 +1,8 @@
-// Behavioral tests for the start-tag-loss recovery mechanism (see
-// noteStartLossRecoveryCandidate()/attemptStartLossRecovery() in nav.js) and its
-// "visible != reached" safety fix.
+// Behavioral tests for the start-tag-loss trigger of the generic off-route
+// recovery mechanism (see noteOffRouteRecoveryCandidate()/attemptOffRouteRecovery()
+// in nav.js) and its "visible != reached" safety fix. The ordinary mid-route
+// trigger of the same mechanism (a real active route abandoned mid-segment) is
+// covered separately in test/off-route-recovery.test.js.
 //
 // Original gap (field logs wegweiser-v13-log-20260831-152926(58)/153056(59).json,
 // destination 14 from Tag 7): once trackingStartTagActive stays true into
@@ -96,7 +98,7 @@ test('Test 1: a recovery tag confirmed several meters away starts an approach, d
     driveToStartTagLoss(7, 14);
 
     for(var i = 0; i < SETTINGS.otherTagFrames; i++){
-      nav.noteStartLossRecoveryCandidate(8, 2.5); // ~2.5m -- well beyond startTagReachedM (1.0m)
+      nav.noteOffRouteRecoveryCandidate(8, 2.5); // ~2.5m -- well beyond startTagReachedM (1.0m)
       advance(100);
     }
 
@@ -124,7 +126,7 @@ test('Test 2: distance decreasing but still above startTagReachedM keeps the app
   withFakeClock(2100000, (advance) => {
     driveToStartTagLoss(7, 14);
     for(var i = 0; i < SETTINGS.otherTagFrames; i++){
-      nav.noteStartLossRecoveryCandidate(8, 2.5);
+      nav.noteOffRouteRecoveryCandidate(8, 2.5);
       advance(100);
     }
     spokenTexts.length = 0;
@@ -148,7 +150,7 @@ test('Test 3: only once Tag 8 is physically reached does the app commit and star
   withFakeClock(2200000, (advance) => {
     driveToStartTagLoss(7, 14);
     for(var i = 0; i < SETTINGS.otherTagFrames; i++){
-      nav.noteStartLossRecoveryCandidate(8, 2.5);
+      nav.noteOffRouteRecoveryCandidate(8, 2.5);
       advance(100);
     }
     spokenTexts.length = 0;
@@ -171,7 +173,7 @@ test('Test 4: a single-frame sighting of a different tag does not start a recove
   withFakeClock(2300000, (advance) => {
     driveToStartTagLoss(7, 14);
 
-    nav.noteStartLossRecoveryCandidate(8, 2.5);
+    nav.noteOffRouteRecoveryCandidate(8, 2.5);
     advance(100);
 
     assert.equal(nav.navState, nav.NavState.LOST_STOPPED, 'must remain in the original safe recovery state');
@@ -189,7 +191,7 @@ test('Test 5: losing the recovery tag during its own approach uses the existing 
   withFakeClock(2400000, (advance) => {
     driveToStartTagLoss(7, 14);
     for(var i = 0; i < SETTINGS.otherTagFrames; i++){
-      nav.noteStartLossRecoveryCandidate(8, 2.5);
+      nav.noteOffRouteRecoveryCandidate(8, 2.5);
       advance(100);
     }
     assert.equal(nav.navState, nav.NavState.TRACKING_START_TAG);
@@ -219,9 +221,9 @@ test('Test 6: the original start tag reappearing still reacquires normally, with
 
     // A different tag briefly interrupts first (below the recovery threshold) --
     // must not interfere with the original tag reappearing afterward.
-    nav.noteStartLossRecoveryCandidate(8, 2.5);
+    nav.noteOffRouteRecoveryCandidate(8, 2.5);
     advance(100);
-    nav.noteStartLossRecoveryCandidate(8, 2.5);
+    nav.noteOffRouteRecoveryCandidate(8, 2.5);
     advance(100);
 
     nav.handleLostStopped(performance.now(), { dist: 2.0, corners: [] }); // Tag 7 seen again
@@ -247,7 +249,7 @@ test('a known tag with no path to the current destination is rejected before any
     driveToStartTagLoss(7, 14); // Tag 5 has no outgoing edges -- no path to 14 exists
 
     for(var i = 0; i < SETTINGS.otherTagFrames; i++){
-      nav.noteStartLossRecoveryCandidate(5, 2.5);
+      nav.noteOffRouteRecoveryCandidate(5, 2.5);
       advance(100);
     }
 
@@ -257,7 +259,7 @@ test('a known tag with no path to the current destination is rejected before any
     assert.equal(nav.currentTagId, null);
     assert.equal(nav.destinationId, 14, 'destination must remain unchanged even on rejection');
     assert.ok(
-      spokenTexts.some((t) => t.includes('kein Weg zum Ziel')),
+      spokenTexts.some((t) => t.includes('nicht auf dem Weg')),
       `expected the existing "no path" instruction to be reused, got: ${JSON.stringify(spokenTexts)}`
     );
   });
@@ -270,13 +272,13 @@ test('an interrupted series of sightings (different tags alternating) never accu
     driveToStartTagLoss(7, 14);
 
     for(var i = 0; i < SETTINGS.otherTagFrames - 1; i++){
-      nav.noteStartLossRecoveryCandidate(8, 2.5);
+      nav.noteOffRouteRecoveryCandidate(8, 2.5);
       advance(100);
     }
-    nav.noteStartLossRecoveryCandidate(9, 3.0); // a different tag interrupts the series
+    nav.noteOffRouteRecoveryCandidate(9, 3.0); // a different tag interrupts the series
     advance(100);
     for(var j = 0; j < SETTINGS.otherTagFrames - 1; j++){
-      nav.noteStartLossRecoveryCandidate(8, 2.5);
+      nav.noteOffRouteRecoveryCandidate(8, 2.5);
       advance(100);
     }
 
@@ -293,17 +295,17 @@ test('a repeatedly-rejected no-path tag is only reported once (existing wrongTag
     driveToStartTagLoss(7, 14);
 
     for(var i = 0; i < SETTINGS.otherTagFrames; i++){
-      nav.noteStartLossRecoveryCandidate(5, 2.5);
+      nav.noteOffRouteRecoveryCandidate(5, 2.5);
       advance(100);
     }
-    var countAfterFirst = spokenTexts.filter((t) => t.includes('kein Weg zum Ziel')).length;
+    var countAfterFirst = spokenTexts.filter((t) => t.includes('nicht auf dem Weg')).length;
     assert.equal(countAfterFirst, 1);
 
     for(var j = 0; j < SETTINGS.otherTagFrames; j++){
-      nav.noteStartLossRecoveryCandidate(5, 2.5);
+      nav.noteOffRouteRecoveryCandidate(5, 2.5);
       advance(100);
     }
-    var countAfterSecond = spokenTexts.filter((t) => t.includes('kein Weg zum Ziel')).length;
+    var countAfterSecond = spokenTexts.filter((t) => t.includes('nicht auf dem Weg')).length;
     assert.equal(countAfterSecond, 1, 'must not repeat the rejection message for the same tag every confirmation cycle');
   });
 });
@@ -318,7 +320,7 @@ test('a recovery tag already within startTagReachedM commits immediately, withou
     driveToStartTagLoss(7, 14);
 
     for(var i = 0; i < SETTINGS.otherTagFrames; i++){
-      nav.noteStartLossRecoveryCandidate(8, 0.5); // already within startTagReachedM (1.0m)
+      nav.noteOffRouteRecoveryCandidate(8, 0.5); // already within startTagReachedM (1.0m)
       advance(100);
     }
 
